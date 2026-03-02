@@ -574,8 +574,7 @@ enum SplitHandoffMessage {
 // swallows or drops a player.
 struct EntitySnapshot {
     entity_id: EntityID,
-    state: SoftState,
-    // Active modifiers and cooldowns are embedded within SoftState
+    record: EntityRecord, // Contains both SoftState and OffensiveStats
 }
 
 enum EntityHandoffMessage {
