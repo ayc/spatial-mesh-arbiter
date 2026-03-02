@@ -195,6 +195,74 @@ struct EntityStateUpdate {
     is_ghost: bool,
 }
 
+// --- Stat Modifier System (Buff/Debuff Stat Layering) ---
+// See RPG Mechanics § 1.3 for the full evaluation algorithm and examples.
+// Modifiers are carried on ActiveStatusEffect and layered on top of the
+// immutable base OffensiveStats/DefensiveStats at evaluation time (Pre-Roll
+// for offense, Resolution for defense). The stored base structs are never mutated.
+
+enum StatModifier {
+    // Additive: base_value + flat_value (applied first, before multiplicative)
+    FlatOffense { field: OffenseField, value: SimFixed },
+    FlatDefense { field: DefenseField, value: SimFixed },
+
+    // Multiplicative: base_value * multiplier (applied after all additives)
+    MultOffense { field: OffenseField, multiplier: SimFixed },
+    MultDefense { field: DefenseField, multiplier: SimFixed },
+
+    // Appends a temporary conditional to the effective OffensiveStats at Pre-Roll time
+    AddConditional { conditional: OffensiveCondition },
+}
+
+enum OffenseField {
+    GlobalDamageMultiplier,
+    CritChance,
+    CritMultiplier,
+    ArmorPenetrationPct,
+    ArmorPenetrationFlat,
+}
+
+enum DefenseField {
+    Resistance { damage_type: u8 },
+    EvasionRating,
+    BlockChance,
+    ThornsDamage,
+}
+
+// --- Offensive Stats (Companion Struct — Immutable Base) ---
+// Stored alongside SoftState in the Arbiter's per-entity storage, NOT inside SoftState.
+// Compiled by Meta Services from equipment/inventory and pushed via UpdateEntityStats.
+// The Arbiter never mutates this struct during gameplay; temporary buffs are layered
+// on top via StatModifier entries on ActiveStatusEffect at cast time.
+// See RPG Mechanics § 1.1 for gameplay context and § 1.3 for the modifier pattern.
+struct OffensiveStats {
+    global_damage_multiplier: SimFixed, // e.g., 1.2 (+20% all damage)
+    crit_chance: SimFixed,              // 0.0 to 1.0
+    crit_multiplier: SimFixed,          // e.g., 1.5 (150% damage)
+    armor_penetration_pct: SimFixed,    // e.g., 0.3 (Ignores 30% of target armor)
+    armor_penetration_flat: SimFixed,   // e.g., 10 (Ignores 10 flat armor)
+
+    // Elemental Damage Conversions (Path of Exile style)
+    // A 16-element array indexed by damage_type (matching the Damage Type Registry).
+    // e.g., conversion_table[3] = 0.2 means "20% of base damage is converted to Fire"
+    conversion_table: [SimFixed; 16],
+
+    // Attacker-Owned Logic resolved during Phase 2 (e.g., Executioner's Axe)
+    conditionals: Vec<OffensiveCondition>,
+}
+
+// --- Defensive Stats (Inside SoftState) ---
+// Lives inside SoftState because it is read on every incoming hit during Phase 2 Resolution.
+// See RPG Mechanics § 1.2 for gameplay context.
+struct DefensiveStats {
+    // A 16-element array mapping to the Damage Type Registry (e.g., 0=Slashing, 3=Fire).
+    resistances: [SimFixed; 16],
+
+    evasion_rating: SimFixed, // Chance to completely dodge non-True damage
+    block_chance: SimFixed,   // Chance to reduce incoming damage by 50%
+    thorns_damage: i32,       // Flat True damage reflected to melee attackers
+}
+
 // Internal Engine Representation of a running Buff/Debuff
 struct ActiveStatusEffect {
     effect_id: u16,
@@ -203,13 +271,13 @@ struct ActiveStatusEffect {
     next_pulse_tick: u64,      // The absolute Shard Tick when this effect should trigger its payload
     data_epoch: u32,           // The balance version this buff was applied under
     pulse_context: Option<CombatContext>, // The pre-rolled damage/healing payload to apply every pulse
+    modifiers: Vec<StatModifier>, // Stat modifications active while this effect is alive
 }
 
 // Base attributes for physics and gameplay scaling
 struct CoreStats {
     move_speed: SimFixed,
     weight: SimFixed,
-    evasion: SimFixed,
     time_scale: SimFixed, // Gameplay Kinematic Dilation multiplier (e.g., 1.0 is normal, 0.5 is slow motion)
 }
 
@@ -223,13 +291,21 @@ struct SoftState {
     velocity: Vec2F,
     rotation: SimFixed,
     last_movement_tick: u64,
-    stats: CoreStats,          // Move speed, weight, evasion, etc.
-    defense: DefensiveStats,   // Resistances
+    stats: CoreStats,          // Move speed, weight, time scale
+    defense: DefensiveStats,   // Resistances, evasion, block, thorns
     active_status_effects: Vec<ActiveStatusEffect>,
     is_invulnerable: bool,
     is_dead: bool,             // Flags the entity for cleanup/corpse transition
     resurrect_window_ticks: Option<u32>, // Time remaining for a healer to resurrect before hard despawn
     logout_fuse_ticks: Option<u32>, // Used for the 60-second wilderness logout mechanic
+}
+
+// Per-entity storage in the Arbiter's entity table.
+// SoftState is the primary authoritative state. OffensiveStats is a companion struct
+// compiled by Meta and read at cast time. Both are included in handoff serialization.
+struct EntityRecord {
+    soft_state: SoftState,
+    offense: OffensiveStats,   // Immutable base from Meta; modified at evaluation time by buff modifiers
 }
 
 struct SoftStateSnapshot {
@@ -259,12 +335,23 @@ enum DownstreamPayload {
     }
 }
 
-// 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Event Bus)
+// 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Redis Streams Event Bus)
 enum MetaCommand {
     SpawnEntity {
         entity_id: EntityID,
         character_id: UUID,
-        compiled_state: SoftState, // Base stats, JRPG Save Zone coordinates pre-calculated by Meta
+        compiled_state: SoftState,       // Base stats, JRPG Save Zone coordinates pre-calculated by Meta
+        compiled_offense: OffensiveStats, // Gear-compiled offensive attributes for Pre-Roll
+    },
+    // Pushes updated base stats when equipment changes (e.g., player equips a new weapon).
+    // The Arbiter atomically overwrites the stored OffensiveStats and/or DefensiveStats.
+    // Active buff modifiers on ActiveStatusEffect are unaffected — they layer on top
+    // of the new base at the next evaluation (see RPG Mechanics § 1.3).
+    UpdateEntityStats {
+        entity_id: EntityID,
+        offense: Option<OffensiveStats>,    // Updated if equipment changes affect offense
+        defense: Option<DefensiveStats>,    // Updated if equipment changes affect defense
+        core_stats: Option<CoreStats>,      // Updated if equipment changes affect move speed, weight, etc.
     },
     InitiateLogout {
         entity_id: EntityID,
@@ -273,7 +360,41 @@ enum MetaCommand {
     ApplyCrossServerAura {
         entity_id: EntityID,
         buff_id: u16, // e.g., "Guild Buff" activated by a player on another server
-    }
+    },
+    // Notification from Session Manager that an Edge Node has crashed.
+    // Arbiter should stop sending StateUpdates to the dead Edge Node and
+    // start logout fuse timers for affected entities. See Core Architecture § 9.11.
+    EdgeNodeDead {
+        edge_node_id: u32,
+        affected_entities: Vec<EntityID>,
+    },
+}
+
+// 5b. Session Manager Types (Edge Node Lifecycle)
+// The Session Manager is a Redis-backed registry that tracks active sessions,
+// Edge Node liveness, and entity-to-Arbiter mappings. See Core Architecture § 9.11.
+
+struct SessionMapping {
+    character_id: UUID,
+    entity_id: EntityID,
+    arbiter_id: u32,
+    edge_node_id: u32,
+    status: SessionStatus,
+    created_at: u64,       // Shard Tick when the session was established
+}
+
+enum SessionStatus {
+    Active,    // Player is connected and playing
+    Orphaned,  // Edge Node died; entity is alive, awaiting client reconnection
+    Expired,   // Logout fuse expired; entity was despawned. Mapping retained for delayed reconnection.
+}
+
+struct EdgeNodeRegistration {
+    edge_node_id: u32,
+    address: String,         // Routable address for client WebSocket connections
+    region: String,          // Geographic region (e.g., "us-east-1") for load balancer affinity
+    capacity: u32,           // Max concurrent sessions this node can serve
+    current_sessions: u32,   // Current active session count (updated periodically)
 }
 
 // 6. Upstream Control Envelope: From Spatial Arbiter to Mesh Controller
@@ -349,7 +470,7 @@ struct MergeSnapshot {
     to_arbiter_id: u32,
     topology_epoch: u32,
     source_tick: u64,
-    entities: Vec<(EntityID, SoftState)>,
+    entities: Vec<(EntityID, EntityRecord)>, // Includes both SoftState and OffensiveStats
     projectiles: Vec<ProjectileSnapshot>,
     ghosts: Vec<GhostState2D>,
     pending_global_events: HashMap<UUID, ControllerCommand>,
@@ -406,7 +527,7 @@ struct SplitSnapshot {
     topology_epoch: u32,
     source_tick: u64,
     // Only includes entities and projectiles that fall within the child's assigned region
-    entities: Vec<(EntityID, SoftState)>,
+    entities: Vec<(EntityID, EntityRecord)>,
     projectiles: Vec<ProjectileSnapshot>,
     ghosts: Vec<GhostState2D>,
     pending_global_events: HashMap<UUID, ControllerCommand>,
@@ -2497,6 +2618,32 @@ enum HardEvent {
     PlayerResurrected { healer: EntityID, victim: EntityID }, // Cancels the Meta respawn timer
     ItemDropped { entity_id: EntityID, item_id: u16, location: Vec2F },
     ObjectiveCaptured { team: TeamID, zone: RegionID },
+
+    // Boss/Monster kill event — triggers loot table rolls in Meta
+    MonsterDied {
+        killer: Option<EntityID>,
+        monster_id: EntityID,
+        monster_type_id: u16,                // SpellData monster definition ID
+        participating_entities: Vec<EntityID>, // All entities eligible for kill credit / loot
+    },
+
+    // Confirms that a loot drop was claimed by a player in the simulation
+    LootClaimed {
+        drop_id: UUID,         // Links to the loot spawn generated by Meta
+        character_id: UUID,    // The player who picked it up (resolved from EntityID by Meta)
+        item_id: u16,
+    },
+
+    // Cross-layer transaction confirmation (see Core Architecture § 9.8)
+    TransactionConfirmed { tx_id: UUID },
+}
+
+// Controller → Event Bus notification when an Arbiter is declared dead
+// Consumed by Meta's reconciliation service (see Core Architecture § 9.7)
+struct ArbiterCrashedEvent {
+    arbiter_id: u32,
+    topology_epoch: u32,
+    declared_dead_at: u64,  // Shard Tick at which the Controller declared the crash
 }
 
 struct DatastoreWorker {

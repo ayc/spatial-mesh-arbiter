@@ -80,6 +80,26 @@ The Swarm Tester acts as an army of automated bots. It constructs raw `ActionPro
 2. **Observation:** Winner unions ledger buckets at commit and suppresses duplicate damage post-merge.
 3. **Debugging:** Validate `MAX_EVENT_AGE_TICKS` drain window forwarding completes, then loser can be finalized safely.
 
+#### Scenario I: Arbiter Crash Recovery (Testing Total-Loss + Transaction Refund)
+1. **Action:** Spawn 10 bots on a single Arbiter. Have one bot consume an item (creating a `PendingTransaction` in Meta). Force-kill the Arbiter process (`docker kill`) while bots are active.
+2. **Observation:** The Mesh Controller detects the crash via missed heartbeats, publishes `ArbiterCrashedEvent`, and expands neighbor boundaries to cover the dead cell. Neighboring Arbiters garbage-collect ghost entities sourced from the dead Arbiter.
+3. **Debugging:** Reconnect the bots (simulating player re-login). Verify that the Spawn Handshake routes them to their last save zone, the `PendingTransaction` for the consumed item is reconciled as `REFUNDED`, and the item appears in the Recovery Inbox.
+
+#### Scenario J: Crash During Boss Loot Window (Testing Deferred Loot Data Integrity)
+1. **Action:** Spawn bots, have them kill a boss. Wait for `MonsterDied` to be published and Meta to roll the loot table and send `SpawnLootInteractable`. Force-kill the Arbiter before any bot claims the loot.
+2. **Observation:** Meta's database contains the `MonsterDied` event with `participating_entities`, the rolled loot table results, and no `LootClaimed` record for that drop.
+3. **Debugging:** Verify the data trail is complete: kill credit, loot roll results, and absence of claim are all queryable. This validates that deferred loot recovery (when implemented) will have the data it needs.
+
+#### Scenario K: Edge Node Crash (Testing Session Orphaning + Reconnection)
+1. **Action:** Connect 10 bots through a single Edge Node. Force-kill the Edge Node process (`docker kill`).
+2. **Observation:** The Session Manager detects heartbeat TTL expiry within ~6 seconds, marks all 10 sessions as `ORPHANED`, and publishes `EdgeNodeDead` to the affected Arbiters. Arbiters stop sending `StateUpdate` to the dead address and start logout fuse timers. Entities remain alive under AI control.
+3. **Debugging:** Reconnect the bots through the Edge Node pool (load balancer routes to a healthy instance). Verify each bot's reconnection triggers the fast-path claim flow: Session Manager returns `ORPHANED` status, new Edge Node claims the entity on the Arbiter, Arbiter pushes full `StateUpdate` bootstrap, and the bot resumes movement/combat. Verify Session Manager mappings are updated to the new Edge Node.
+
+#### Scenario L: Edge Node Crash + Reconnection Timeout (Testing Orphan Expiry)
+1. **Action:** Connect 5 bots through a single Edge Node. Force-kill the Edge Node. Do NOT reconnect the bots.
+2. **Observation:** After `logout_fuse_ticks` (60 seconds), the Arbiters despawn the entities. After the session mapping TTL (5 minutes), the Session Manager prunes the orphaned mappings.
+3. **Debugging:** Reconnect one bot after both timers have expired. Verify it goes through the full Spawn Handshake (Section 9.5) — no active entity found, Meta respawns at last save zone. Confirm no stale session mappings or ghost entities remain.
+
 ---
 
 ## 3. Visualizing the Mesh

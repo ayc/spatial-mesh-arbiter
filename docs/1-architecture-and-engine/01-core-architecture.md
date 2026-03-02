@@ -232,7 +232,7 @@ Because these objects have a travel time and can cross server boundaries, they a
 -   **Runtime Boundary Handoff (RUDP):** If a projectile crosses a normal sibling boundary, Arbiters use a dedicated lightweight `ProjectileHandoff` protocol over Reliable-UDP (not the split WAL path). This carries a full mid-flight snapshot so the receiver can reconstruct exact state (position, velocity, fuse/lifetime timers, target lock, pierce counters, impact sequence, data epoch).
 -   **Split-Safe Ownership:** Projectile Actors obey the exact same single-owner spatial invariant as standard entities. During a split, the surrogate Arbiter assigns each in-flight projectile to exactly one child at the cutover tick using the same jurisdiction tie-breaker (depth, then lowest Arbiter_ID). The non-owner child may keep a shadow copy for observability but must never advance simulation or emit `ImpactEvent`.
 -   **Resolution:** The projectile itself carries the detonation logic. When it calculates an impact, it submits a `MeshInternalEvent` (containing an `ImpactEvent` payload) to its host Arbiter. The host Arbiter applies the damage based on Target-Favoring rules (evaluating the victim's position at the exact moment of impact). 
--   **Cross-Boundary Kill Credit:** If a long-range projectile kills a player several Arbiters away, the receiving Arbiter will not have the original attacker in its local memory. This is by design. The receiving Arbiter simply emits the `PlayerDied { killer, victim }` event to the **Meta Services Bus** (Section 9). The Meta Services layer resolves the global IDs and distributes the XP/Loot without the Spatial Mesh ever needing to verify the distant attacker's existence.
+-   **Cross-Boundary Kill Credit:** If a long-range projectile kills a player several Arbiters away, the receiving Arbiter will not have the original attacker in its local memory. This is by design. The receiving Arbiter simply emits the `PlayerDied { killer, victim }` event to the **Meta Services Event Bus** (Section 9.3). The Meta Services layer resolves the global IDs and distributes the XP/Loot without the Spatial Mesh ever needing to verify the distant attacker's existence.
 
 ### 5.2.1 ProjectileHandoff Protocol (Prepare -> Ack -> Commit)
 - **Prepare:** Sender packages `ProjectileSnapshot` plus transfer metadata (`handoff_seq`, `topology_epoch`, `source_tick`, `commit_tick`) and sends to target Arbiter over RUDP.
@@ -482,7 +482,7 @@ To maintain a lock-free 60Hz physics simulation, the architecture explicitly sep
     -   **Social Actors:** Guilds, Parties, Friends Lists, Global Chat.
     -   **Economic Actors:** Inventory, Trading, Auction House, Currency.
     -   **Progression Actors:** Quests, Leveling, Achievement Tracking, WAL Persistence.
-    -   **Session Manager:** A fast, in-memory registry (e.g., Redis) mapping active User Accounts to their current `EntityID` and Host Arbiter.
+    -   **Session Manager:** A fast, in-memory registry (Redis) mapping active User Accounts to their current `EntityID`, Host Arbiter, and serving Edge Node. Also monitors Edge Node liveness via heartbeat TTLs (see Section 9.11).
 
 ## 9.2 The "Sidecar" Dispatch Pattern (The Edge Gateway)
 The **Proxy Actor (Edge Node)** acts as the primary API Gateway and router for the client. The client sends a multiplexed stream of data, which the Edge Node inspects and dispatches based on semantic intent:
@@ -493,19 +493,57 @@ The **Proxy Actor (Edge Node)** acts as the primary API Gateway and router for t
 **Security Invariant:** The Edge Node is a trusted server. When it dispatches Meta Traffic, it explicitly injects the user's verified `character_id` into the envelope. This prevents spoofing exploits where a compromised client attempts to delete another player's inventory by forging an ID. The Meta Services blindly trust the identity headers provided by the Edge Node.
 
 ## 9.3 Cross-Layer Handshake (The Event Bus)
-The Spatial Mesh and Meta Services are decoupled but interact through an asynchronous **Hard State Event Bus** (e.g., Kafka or NATS). 
+The Spatial Mesh and Meta Services are decoupled but interact through an asynchronous **Hard State Event Bus** backed by **Redis Streams**.
 
--   **Outbound (Mesh -> Meta):** When a Spatial Actor resolves a hard state transition (e.g., `PlayerDied`), it emits an event to the bus. Meta Services consume this to update quest progress, XP, and durable database records.
--   **Inbound (Meta -> Mesh):** When a Meta Service needs to mutate the simulation (e.g., applying a "Party Heal" buff or a "Banned" status), it sends an asynchronous mutation request to the relevant Spatial Actor, which applies the change in its next 60Hz tick.
+### Why Redis Streams (Not Kafka / NATS)
+The Event Bus carries only Hard State transitions — low-volume, high-importance events (e.g., `PlayerDied`, `MonsterDied`, `LootSpawned`). All high-frequency 60Hz simulation traffic flows over UDP and never touches the bus. Given the low event volume (hundreds of events/sec at peak, not thousands), single-region scope (the bus is intra-datacenter by design), and the fact that Redis is already in the infrastructure stack for the Session Manager, Redis Streams provides the right balance of durability and operational simplicity without the overhead of a dedicated distributed log (Kafka's JVM brokers, Zookeeper/KRaft coordination, partition rebalancing).
+
+### The Durability Contract
+All producers and consumers of the Event Bus must satisfy the following guarantees:
+
+| Property | Guarantee |
+|:---|:---|
+| **Delivery** | **At-least-once.** Every published event will be delivered to every subscribed consumer group at least once. |
+| **Consumer Acknowledgment** | Consumers must explicitly acknowledge processing via `XACK`. Unacknowledged events are redelivered after a configurable visibility timeout. |
+| **Idempotency** | All consumers must be idempotent. Events carry a unique `event_id` (UUID) that consumers use to deduplicate in case of redelivery. |
+| **Ordering** | Events are ordered per-stream (not globally). Consumers must not depend on cross-stream ordering. |
+| **Retention** | Streams are trimmed by age (e.g., `MAXLEN ~10000` or `MINID` based on time). Events older than the retention window are discarded. |
+| **Persistence** | Redis is configured with AOF persistence (`appendonly yes`) to survive process restarts. This is not a substitute for database durability — the bus is a transport, not a store of record. |
+
+### Trait Abstraction
+To decouple application logic from the transport implementation, Arbiters and Meta Services interact with the bus through an `EventBus` trait defined in `shared-types`:
+
+```rust
+#[async_trait]
+trait EventBus: Send + Sync {
+    /// Publish a serialized event to a named stream. Returns the stream entry ID.
+    async fn publish(&self, stream: &str, event_id: UUID, payload: &[u8]) -> Result<EntryId>;
+
+    /// Subscribe to a stream as part of a named consumer group.
+    async fn subscribe(&self, stream: &str, group: &str, consumer: &str) -> Result<Box<dyn EventStream>>;
+
+    /// Acknowledge successful processing of a delivered event.
+    async fn ack(&self, stream: &str, group: &str, entry_id: &EntryId) -> Result<()>;
+}
+```
+
+The production implementation uses Redis Streams (`XADD`, `XREADGROUP`, `XACK`). If the Meta Services layer grows to require partitioned ordering, multi-day retention, or complex fan-out topologies in the future, a Kafka or NATS JetStream implementation can be swapped in without touching game logic.
+
+### Event Flow
+
+-   **Outbound (Mesh → Meta):** When a Spatial Actor resolves a hard state transition (e.g., `PlayerDied`), it pushes the event to a non-blocking internal channel. A dedicated async worker thread publishes it to the appropriate Redis Stream (e.g., `stream:hard_state`). Meta Services consume from this stream via consumer groups to update quest progress, XP, and durable database records.
+-   **Inbound (Meta → Mesh):** When a Meta Service needs to mutate the simulation (e.g., applying a "Party Heal" buff or a "Banned" status), it publishes a command to a per-Arbiter Redis Stream (e.g., `stream:arbiter:{arbiter_id}:commands`). The Arbiter's async worker thread reads from this stream and pushes commands into the 60Hz loop via a lock-free channel. Failed commands can be retried by Meta; the Arbiter deduplicates by `event_id`.
 
 Invariant: > The Spatial Mesh never waits for a response from Meta Services. The simulation loop is entirely non-blocking.
 
 ## 9.4 Reconnection and Entity Recovery
-If a player disconnects during combat, their `Session` on the Edge Node is destroyed, but their `Entity` persists in the Spatial Arbiter under AI control until the combat timer expires. To allow the player to seamlessly rejoin the fight:
+If a player disconnects during combat (client-side network loss or individual session drop), their `Session` on the Edge Node is destroyed, but their `Entity` persists in the Spatial Arbiter under AI control until the combat timer expires. To allow the player to seamlessly rejoin the fight:
 1. **The Query:** The player logs back in, potentially hitting an entirely different Edge Node. This new Edge Node queries the **Session Manager** in the Meta Services layer.
 2. **The Registry:** The Session Manager responds with the player's active `EntityID` and the IP address of the Spatial Arbiter currently hosting that entity.
-3. **The Hijack & Bootstrap:** The new Edge Node connects directly to that Spatial Arbiter, presenting the player's auth token and claiming the `EntityID`. The Arbiter verifies the token, halts the AI control, and immediately pushes a complete `StateUpdate` (HP, coordinates, cooldowns) down to the new Edge Node.
+3. **The Hijack & Bootstrap:** The new Edge Node connects directly to that Spatial Arbiter, presenting the player's auth token and claiming the `EntityID`. The Arbiter verifies the token, halts the AI control, atomically swaps the downstream `StateUpdate` address to the new Edge Node, and immediately pushes a complete `StateUpdate` (HP, coordinates, cooldowns) down to it.
 4. **Resumption:** The Edge Node uses this initial snapshot to bootstrap its local prediction loop, and the player resumes combat seamlessly.
+
+> **Note:** This section covers individual player disconnections. For bulk session loss caused by an Edge Node crash, see Section 9.11.
 
 ## 9.5 The Spawn & Logout Protocol (Game Logic Boundaries)
 The Spatial Mesh is strictly a physics and combat runner. It does not query databases to find out where a player should spawn. That business logic (e.g., JRPG "Save Zones", Newbie Spawns, and Logout penalties) is entirely orchestrated by the Meta Services.
@@ -540,6 +578,296 @@ Monsters must leave a presence in the world for players to see and loot.
 1. **The Kill:** When a monster dies, the Arbiter removes its AI and attack capabilities but leaves it in a non-colliding `Corpse` state for a set duration to allow client-side death animations to play out.
 2. **Loot Generation (Meta):** The Arbiter emits `MonsterDied` to the Meta Service. The Meta Service calculates RNG drop tables and economy limits asynchronously.
 3. **Loot Spawning (Meta -> Mesh):** If an item drops, the Meta Service sends a command back to the Arbiter to spawn an ephemeral `LootInteractable` actor at the corpse's coordinates, which players can then interact with to claim the item.
+
+## 9.7 Arbiter Crash Recovery Protocol
+
+The Spatial Arbiter is an ephemeral process. All soft state (HP, position, buffs, projectiles, cooldowns) lives exclusively in memory. When an Arbiter crashes — whether from a process panic, OOM kill, or hardware failure — that state is **irrecoverably lost**. The architecture does not attempt WAL-based recovery for Arbiters; doing so would violate the lock-free, zero-I/O-in-the-hot-loop invariant that makes 60Hz simulation possible.
+
+Instead, the system treats Arbiter crashes as a total-loss event and relies on the Meta Services layer to restore players to a safe, consistent state.
+
+### 9.7.1 Detection
+
+The Mesh Controller monitors Arbiters via periodic `ArbiterHeartbeat` messages over TCP. When heartbeats cease:
+
+1. **Declaration:** After 3 consecutive missed heartbeats (~3 seconds), the Controller declares the Arbiter dead and removes it from the active topology.
+2. **Topology Repair:** The Controller issues `UpdateTopology` to neighboring Arbiters, expanding their boundaries to cover the dead cell's region. If the dead cell was too large for a single neighbor to absorb, the Controller may split the region across multiple neighbors.
+3. **Ghost Cleanup:** Neighboring Arbiters receive the topology update and garbage-collect all Ghost entities that were sourced from the dead Arbiter (identified by `source_arbiter_id`).
+4. **Event Bus Notification:** The Controller publishes an `ArbiterCrashed { arbiter_id, topology_epoch }` event to the Meta Services Event Bus (Redis Streams).
+
+### 9.7.2 Entity Fate
+
+All entities (players, monsters, NPCs, projectiles) that were hosted on the dead Arbiter are destroyed. There is no partial recovery from neighbor Ghosts — Ghosts are intentionally lightweight (position, velocity, radius) and lack the full `SoftState` required to reconstruct an entity.
+
+**Player entities:**
+- The Session Manager still maps each affected `character_id` → the dead Arbiter's `arbiter_id`.
+- On the player's next login, the Spawn Handshake (Section 9.5) detects that the mapped Arbiter is no longer in the active topology.
+- Meta clears the stale mapping and executes a standard respawn at the player's last recorded save zone.
+- If the player's Edge Node is still connected and attempting to send proposals, the proposals will fail (dead UDP endpoint). The Edge Node detects the connection loss and initiates reconnection through the standard flow (Section 9.4), which routes through Meta and discovers the stale mapping.
+
+**Monster entities:**
+- Monsters are ephemeral. The world simulation layer (if applicable) re-spawns them according to its standard spawn schedules. No recovery action is needed.
+
+**In-flight projectiles and active effects:**
+- Lost. Projectiles mid-flight are destroyed. Buffs and DoTs active on entities in the dead cell cease to exist. This is consistent with the architecture's position that soft state is expendable — the player simply needs to re-cast.
+
+### 9.7.3 Player Experience
+
+From the player's perspective, an Arbiter crash looks like a brief disconnection followed by respawning at their last save zone. This is identical to the experience of dying and waiting out the respawn timer — a flow the game already supports. The key difference is that the crash bypasses the death penalty (since no `PlayerDied` event was emitted for a crash — the player didn't "die," the server did).
+
+Edge Nodes should present a clear UI message: *"Connection to the battle was lost. You have been returned to your last safe location."* This distinguishes the experience from a player-side network issue.
+
+### 9.7.4 What Is NOT Lost
+
+Because the Meta Services layer is the durable authority, the following survive an Arbiter crash completely intact:
+
+| Data | Why it survives |
+|:---|:---|
+| Inventory & equipment | Stored in Meta's database. The Arbiter never modifies inventory directly. |
+| Currency & gold | Stored in Meta's database. |
+| Level, XP, quest progress | Updated by Meta when it consumes `HardEvent` from the Event Bus. Any event published before the crash is durable in Redis Streams. |
+| Kill credit & boss participation | `MonsterDied` / `PlayerDied` events are published at the moment of death, before loot spawning. If the event reached Redis Streams, it's durable. |
+| Loot table rolls | Meta rolls the drop table upon consuming `MonsterDied` and records the results in its database before sending `SpawnLootInteractable` to the Arbiter. |
+| Last save zone | Updated by Meta whenever the player visits a save point. |
+
+## 9.8 Cross-Layer Transaction Ledger
+
+Some game actions consume a durable resource (e.g., destroy a potion from inventory) and deliver the value as ephemeral state (e.g., apply a buff in the Arbiter). If the Arbiter crashes after the resource is consumed but before the ephemeral effect is confirmed, the player loses both the item and the benefit.
+
+To prevent this, Meta maintains a **Pending Transaction Ledger** for cross-layer operations.
+
+### 9.8.1 The Pattern
+
+```
+Player uses "Elixir of Rage" (consumable item → offensive buff)
+
+1. Edge Node sends "UseItem { item_id: ELIXIR_RAGE }" to Meta (via Meta Traffic path)
+2. Meta opens a database transaction:
+   a. Removes the Elixir from the player's inventory
+   b. Writes PendingTransaction {
+        tx_id: UUID,
+        character_id,
+        tx_type: ConsumeItem,
+        item_id: ELIXIR_RAGE,
+        arbiter_id,       // The Arbiter that should receive the effect
+        created_at: now,
+        status: PENDING
+      }
+   c. Commits both atomically
+3. Meta publishes "ApplyBuff { effect_id: EFFECT_ELIXIR_RAGE }"
+   to the Arbiter's command stream
+4. Arbiter applies the buff and publishes an ack:
+   "TransactionConfirmed { tx_id }" to the Event Bus
+5. Meta consumes the ack → updates PendingTransaction status to CONFIRMED
+```
+
+If step 4 never arrives (Arbiter crash, or timeout), the transaction remains `PENDING` and is eligible for refund.
+
+### 9.8.2 Scope
+
+Not every interaction requires the ledger. It only applies to operations where:
+
+- A **durable resource is consumed** (item destroyed, currency spent), AND
+- The **value is delivered as ephemeral state** (buff applied, heal delivered, teleport executed)
+
+Operations that do NOT require the ledger:
+
+| Operation | Why |
+|:---|:---|
+| Equipment swap | Durable-to-durable. Both old and new states are in Meta's database. |
+| Player-to-player trade | Atomic database transaction in Meta. |
+| Sell item to NPC vendor | Atomic: item removed, gold added, same transaction. |
+| Casting a spell (no consumable) | No durable resource consumed. Cooldowns are ephemeral. |
+
+### 9.8.3 Reconciliation (Login-Time)
+
+Reconciliation is triggered **on the player's next login**, during the Spawn Handshake (Section 9.5):
+
+1. Meta queries: *"Are there any `PENDING` transactions for this `character_id` older than `TRANSACTION_TIMEOUT` (e.g., 30 seconds)?"*
+2. For each expired pending transaction:
+   a. Mark status as `REFUNDED`
+   b. Restore the consumed item to the player's **Recovery Inbox** (Section 9.9)
+   c. Log the refund for auditing
+3. The Spawn Handshake continues normally.
+
+This approach avoids real-time crash detection complexity on the Meta side. If the Arbiter was alive and just slow, the confirmation ack will arrive and flip the status to `CONFIRMED` before the timeout expires. If the Arbiter crashed, the timeout catches it naturally.
+
+## 9.9 Recovery Inbox (Mail System)
+
+Every character has a **Recovery Inbox** — a durable, append-only collection in Meta's database that serves as a holding area for items that could not be delivered to the player in the simulation.
+
+### 9.9.1 Structure
+
+```rust
+struct InboxEntry {
+    entry_id: UUID,
+    character_id: UUID,
+    item_id: u16,
+    quantity: u32,
+    reason: InboxReason,
+    source_tx_id: Option<UUID>,  // Links back to PendingTransaction for audit trail
+    created_at: Timestamp,
+    claimed: bool,
+}
+
+enum InboxReason {
+    CrashRefund,          // Item consumed but Arbiter crashed before effect was applied
+    DeferredLoot,         // Boss loot eligible for deferred recovery (see Section 9.10)
+    AuctionPurchase,      // Bought an item while offline
+    GmCompensation,       // Manual grant by game operations
+    EventReward,          // Seasonal/promotional reward
+}
+```
+
+### 9.9.2 Player Flow
+
+1. On login, the Edge Node queries Meta: *"Does this character have unclaimed inbox entries?"*
+2. If yes, the client displays a notification (e.g., a mailbox icon or NPC indicator).
+3. The player opens the inbox UI and sees entries with human-readable reasons:
+   - *"Server disruption — your Elixir of Rage has been returned."* (`CrashRefund`)
+   - *"Unclaimed reward from the Dragon of Ashenvale."* (`DeferredLoot`)
+4. The player clicks "Claim" → Meta moves the item from the inbox to the player's inventory (a standard atomic database transaction).
+5. Unclaimed entries persist indefinitely (or are pruned after a configurable retention period, e.g., 30 days).
+
+### 9.9.3 Design Rationale
+
+The Recovery Inbox is intentionally general-purpose. While its immediate use case is crash recovery refunds, it provides the foundation for any system that needs to deliver items to a player who may not be online or may not be in a location where direct inventory modification is possible. This includes:
+- Offline auction house purchases
+- Guild bank withdrawals
+- GM compensation for bugs or exploits
+- Seasonal event rewards
+
+## 9.10 Deferred Loot Recovery
+
+When an Arbiter crashes after a boss kill but before loot is claimed, the loot is **not** automatically mailed to players. Unclaimed loot from a crash is treated as a **deferred recovery opportunity**, not an automatic grant.
+
+### 9.10.1 Why Not Auto-Mail
+
+Auto-mailing boss loot on crash creates exploit vectors and design problems:
+- **Duplication risk:** If a player picked up the loot but the `LootClaimed` ack was lost in the crash, auto-mailing would duplicate the item.
+- **Loot rules:** Boss loot often requires player interaction (Need/Greed rolls, party leader distribution, DKP systems). Auto-mailing bypasses these social contracts.
+- **Economy impact:** Rare items entering the economy without player agency undermines the value of the drop.
+
+### 9.10.2 What Meta Knows After a Crash
+
+The data required for deferred recovery is fully durable:
+
+| Data | Source | Durable? |
+|:---|:---|:---|
+| Boss identity and kill event | `MonsterDied` published to Event Bus at moment of death | Yes — in Redis Streams before crash |
+| Kill credit / eligible party | `participating_entities` field in `MonsterDied` | Yes |
+| Loot table roll results | Computed and recorded by Meta upon consuming `MonsterDied` | Yes — in Meta's database |
+| Whether loot was claimed | Absence of a `LootClaimed` event for this drop | Yes — provable by absence |
+
+### 9.10.3 Design Intent (Implementation Deferred)
+
+The specific UX for deferred loot recovery is deliberately left unspecified in this version of the architecture. The data model fully supports recovery — Meta can query: *"Show me all loot drops from `MonsterDied` events where the spawning Arbiter subsequently crashed and no `LootClaimed` was recorded."*
+
+Candidate recovery mechanisms (to be designed):
+- **Guild House NPC:** A "Loot Reclamation" NPC where eligible party members can view and distribute unclaimed drops according to the group's loot rules.
+- **Recovery Inbox with confirmation:** Mail the loot to the party leader with a "distribute" action, preserving social loot rules.
+- **Time-limited claim window:** Eligible players have N hours to claim deferred loot at a designated NPC before it expires.
+
+The critical invariant is: **deferred loot must pass through the same social distribution rules as live loot.** It must never bypass Need/Greed, DKP, or party leader authority.
+
+## 9.11 Edge Node Crash Recovery
+
+Edge Nodes are **ephemeral but stateful**. As "Trusted Headless Game Clients" (Section 2.1), they run a full local copy of the game engine scoped to each player's session. This includes a prediction simulation loop, the `SpellData` dictionary for semantic translation, cooldown tracking, anti-cheat input history, entity interpolation buffers, and topology routing state. This is significant runtime state — an Edge Node is not a thin proxy.
+
+However, none of this state is **authoritative**. The Arbiter is the sole source of truth for entity state, and the `SpellData` dictionary is available from the CDN. When an Edge Node crashes, no game state is permanently lost — but the replacement Edge Node must execute a multi-step bootstrap sequence to reconstruct its runtime state before the player can resume (see Section 9.11.5). The challenge is detecting the crash quickly, cleaning up stale sessions, and minimizing the bootstrap time for reconnecting players.
+
+### 9.11.1 Edge Node Registration and Heartbeat
+
+Edge Nodes register with the Session Manager on boot and maintain liveness via a heartbeat contract:
+
+1. **Registration:** On startup, the Edge Node authenticates with the Session Manager and registers itself, providing its routable address and capacity metadata. The Session Manager records the Edge Node in an active registry.
+2. **Heartbeat:** Every 2 seconds, the Edge Node writes a heartbeat to the Session Manager. This is implemented as a Redis `SET` with a short TTL (e.g., 6 seconds / 3 missed beats):
+   ```
+   SET edge:{edge_node_id}:heartbeat ALIVE EX 6
+   ```
+3. **Liveness Check:** The Session Manager considers an Edge Node dead when its heartbeat key expires. No polling is required — Redis key expiry handles detection automatically.
+
+### 9.11.2 Crash Detection and Session Orphaning
+
+When an Edge Node's heartbeat TTL expires:
+
+1. **Declaration:** The Session Manager marks the Edge Node as `DEAD` in its registry.
+2. **Bulk Session Orphaning:** The Session Manager queries all session mappings associated with the dead Edge Node and marks them as `ORPHANED`. This is a fast batch operation on a Redis set/index keyed by `edge_node_id`.
+3. **Arbiter Notification:** For each unique Arbiter hosting entities from orphaned sessions, the Session Manager publishes an `EdgeNodeDead { edge_node_id, affected_entities: Vec<EntityID> }` notification to the Arbiter's command stream on the Event Bus.
+4. **Arbiter Response:** Upon receiving the notification, the Arbiter:
+   - Stops sending `StateUpdate` packets to the dead Edge Node's UDP address for the affected entities (eliminates wasted bandwidth).
+   - Starts the `logout_fuse_ticks` timer for each affected entity (same as a wilderness disconnect — the entity persists under AI control for 60 seconds).
+   - Does **not** immediately despawn the entities. Players have the full fuse window to reconnect.
+
+### 9.11.3 Client Reconnection Policy
+
+From the client's perspective, an Edge Node crash is indistinguishable from a network interruption — the WebSocket connection drops. The client is responsible for initiating reconnection.
+
+**The Reconnection Flow:**
+
+1. **Detection:** The client detects the WebSocket drop (TCP RST, timeout, or clean close).
+2. **UI Feedback:** The client immediately displays a "Reconnecting..." overlay. Player input is buffered locally but not sent.
+3. **Jittered Backoff:** The client waits a randomized delay before attempting reconnection:
+   - First attempt: 0.5–1.5 seconds (uniform random jitter)
+   - Subsequent attempts: exponential backoff with jitter, capped at 10 seconds
+   - The jitter prevents 100 clients from hitting the Edge Node pool simultaneously.
+4. **Load Balancer Routing:** The client connects to the Edge Node pool address (not the specific dead instance). The load balancer routes the connection to any healthy Edge Node.
+5. **Standard Reconnection:** The new Edge Node runs the standard Section 9.4 flow — queries Session Manager, discovers the `ORPHANED` session and the entity's Arbiter, claims the entity.
+6. **Fast-Path Claim:** Because the session is already marked `ORPHANED`, the new Edge Node skips the "is the old Edge Node still alive?" verification. It presents the player's auth token directly to the Arbiter. The Arbiter validates the token, atomically swaps the downstream address, and pushes a full `StateUpdate` bootstrap snapshot.
+7. **Session Update:** The Session Manager updates the mapping: `character_id → (entity_id, arbiter_id, new_edge_node_id)` and clears the `ORPHANED` flag.
+8. **Resumption:** The new Edge Node executes the full bootstrap sequence (Section 9.11.5) — loading `SpellData`, initializing the prediction loop from the snapshot, deriving cooldowns, and resetting anti-cheat baselines. The player resumes with a brief visual stutter (typically 2-5 seconds total from crash to resumption).
+
+### 9.11.4 Stale Session Cleanup
+
+Not all players will reconnect after an Edge Node crash (some may have already closed the game, lost power, etc.). Orphaned sessions that are never reclaimed must be cleaned up:
+
+| Timer | Duration | What happens |
+|:---|:---|:---|
+| **Logout fuse** (`logout_fuse_ticks`) | 60 seconds | The entity in the Arbiter runs under AI control. If the player reconnects within this window, they resume seamlessly. If not, the entity is despawned and `PlayerDied` is emitted (if in combat) or the entity is cleanly removed (if in a safe zone). |
+| **Session mapping TTL** | 5 minutes | The `ORPHANED` session mapping in the Session Manager persists for 5 minutes to support delayed reconnections (e.g., client restarting). After TTL, the mapping is pruned. |
+| **Next login** | Indefinite | If a player returns after both timers have expired, the Session Manager finds no active mapping. Meta executes a standard Spawn Handshake (Section 9.5), respawning the player at their last save zone. |
+
+### 9.11.5 Edge Node Runtime State and Bootstrap Sequence
+
+Edge Nodes hold significant per-session runtime state. While none of it is authoritative, all of it must be reconstructed before the player can resume gameplay. The following table inventories this state and its recovery path:
+
+| Runtime State | Description | Recovery Source | Bootstrap Cost |
+|:---|:---|:---|:---|
+| **`SpellData` dictionary** | The full ability/balance data required for semantic translation (converting raw inputs into `ActionProposals`). Without it, the Edge Node cannot validate ranges, resolve targeting, or enforce cooldowns. | CDN download or local cache. If the Edge Node pool shares a warm cache (e.g., a local volume mount), this is near-instant. Cold download from CDN adds 100-500ms depending on asset size. | Medium — can be pre-warmed |
+| **Topology routing table** | The current `topology_epoch` and Arbiter boundary map. Required to route proposals to the correct Arbiter. | Pushed by the Arbiter as a `TopologyUpdate` during the claim handshake (step 6 in Section 9.11.3). | Negligible — single packet |
+| **Player entity state** | The player's authoritative position, velocity, HP, resource, buffs, and all visible nearby entities. Seeds the prediction loop. | Pushed by the Arbiter as a full `StateUpdate` bootstrap snapshot during the claim handshake. | Negligible — single packet |
+| **Ability cooldown timers** | Per-ability remaining cooldown times. Required so the Edge Node doesn't propose abilities the player can't cast. | Derived from `active_status_effects` in the bootstrap `StateUpdate`. Each `ActiveStatusEffect` with a matching ability cooldown `effect_id` provides the `remaining_ticks`. The Edge Node reconstructs the cooldown table on first frame. | Negligible — computed locally |
+| **Prediction simulation state** | The local simulation loop that provides immediate movement and combat feedback to the client. | Initialized from the bootstrap `StateUpdate`. The first 2-3 frames may feel slightly "snappy" as the prediction loop converges with the authoritative state. | Low — converges within ~50ms |
+| **Entity interpolation buffers** | Smoothing buffers for rendering nearby entities. Requires a short history of `StateUpdate` frames to interpolate between. | Rebuilt naturally from the first few `StateUpdate` frames after reconnection. During the buffer fill period (~100-200ms), nearby entities may appear to "pop" slightly. | Low — fills within 3-5 frames |
+| **Anti-cheat accumulators** | Input velocity history, action frequency baselines, anomaly detection state. | **Not reconstructable.** Reset to zero. This is intentionally acceptable — a fresh baseline is safer than stale state from a security perspective. A reconnecting player gets a clean slate, which eliminates the risk of false positives from pre-crash input anomalies. | None — fresh start |
+
+### The Bootstrap Sequence
+
+When a new Edge Node claims a session (step 6 in Section 9.11.3), the following sequence executes:
+
+```
+1. [Edge Node]  Load SpellData dictionary (from warm cache or CDN)
+2. [Edge Node]  Present auth token to Arbiter, claim EntityID
+3. [Arbiter]    Validate token, swap downstream address
+4. [Arbiter]    Push TopologyUpdate (routing table + neighbors)
+5. [Arbiter]    Push full StateUpdate bootstrap snapshot
+                (player entity + all visible entities + active_status_effects)
+6. [Edge Node]  Initialize prediction loop from snapshot
+7. [Edge Node]  Derive cooldown table from active_status_effects
+8. [Edge Node]  Reset anti-cheat baselines to zero
+9. [Edge Node]  Begin accepting client input and streaming predictions
+```
+
+**Total bootstrap time:** Steps 2-5 are bounded by a single Arbiter round-trip (~1-5ms intra-datacenter). Step 1 is the variable cost — with a warm `SpellData` cache, the full bootstrap completes in under 10ms. With a cold CDN fetch, it may take 100-500ms. The total player-visible disruption (including client reconnection jitter) is typically 2-5 seconds.
+
+> **Implementation note:** Edge Nodes should pre-load and cache the active `SpellData` dictionary on boot (as part of the `PrepareDataEpoch` flow). A reconnecting session on an already-running Edge Node will always hit the warm path. The cold path only applies if the replacement Edge Node itself just booted.
+
+### 9.11.6 Capacity and Surge Absorption
+
+When an Edge Node serving N players crashes, those N players will reconnect across the remaining healthy Edge Nodes. The infrastructure must have headroom to absorb this surge:
+
+- **Edge Node Pool Sizing:** The pool should be sized with N+1 redundancy (or a percentage-based buffer) so that losing one Edge Node does not push remaining nodes above capacity.
+- **Kubernetes Auto-Scaling:** If Edge Nodes are deployed as a Kubernetes Deployment, the pod replacement is automatic. However, the new pod takes time to boot and register. The reconnection surge will be absorbed by the existing healthy pods, not the replacement.
+- **Load Balancer Health Checks:** The load balancer must remove the dead Edge Node from its rotation immediately (via TCP health check failure) so that reconnecting clients are never routed to the dead instance.
 
 ------------------------------------------------------------------------
 
