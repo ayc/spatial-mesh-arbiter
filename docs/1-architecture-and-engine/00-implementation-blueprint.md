@@ -82,7 +82,7 @@ The local stack is managed via `docker-compose` and optimized for **Apple Silico
 *   Implement basic movement and collision resolution.
 
 ### Phase 4: The Edge Node (`edge-node`)
-*   Implement raw UDP input capture.
+*   Implement raw client input capture over WebSocket (Edge ingress).
 *   Implement semantic translation (turning "Click" into "ActionProposal").
 *   Implement downstream state interpolation.
 

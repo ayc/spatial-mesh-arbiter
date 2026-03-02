@@ -42,7 +42,7 @@ Instead, the system utilizes the **"Headless Twin" Model**. Proxy Actors act as 
 
 ### Responsibilities
 
--   Maintain client connection (WebSocket/UDP).
+-   Maintain client connection (WebSocket).
 -   **Anti-Cheat Validation:** Ingest raw, untrusted client inputs (e.g., `Mouse_Delta`, `Button_Click`) and sanitize them against speed-hacks or impossible angles.
 -   **Semantic Translation (The Headless Engine):** Run the actual game engine locally to translate raw inputs into formal `ActionProposals` (e.g., calculating an initial raycast or validating a cooldown before proposing a `TargetedAbility`).
 -   Provide immediate player feedback (hitmarkers, recoil, VFX) via prediction.
@@ -65,6 +65,17 @@ To support complex game mechanics (like Vehicles, Mind Control, or Combat Discon
 3.  **The Entity (`entity_id: u64`):** The ephemeral, 60Hz physics body currently instantiated inside the Spatial Arbiter.
 
 The Edge Node acts as the bridge. A single `Session` may temporarily take control of a different `Entity` (e.g., entering a Siege Mech), or multiple `Entities` (e.g., controlling summoned pets). If a player unplugs their router during combat, the `Session` is destroyed, but the `Entity` safely remains in the Spatial Arbiter for a "combat log-out" timer, governed by basic server AI until it is safe to despawn.
+
+### 2.1.2 EntityID Allocation Contract
+
+`EntityID` must be globally unique at runtime and safe against delayed-packet ABA hazards.
+
+- **Single allocator authority:** Meta Services allocates `EntityID` values (Arbiters never mint IDs locally).
+- **Bit layout:** `[32-bit slot index | 32-bit generation]`.
+- **Spawn rule:** New entities receive a globally unique slot index with generation initialized to `1`.
+- **Reuse rule:** If a slot is reused after despawn, Meta must increment generation before reassignment.
+- **Handoff rule:** Splits/merges transfer `EntityID` unchanged; ownership may move, identity never does.
+- **Validation rule:** Any duplicate `EntityID` observed during merge import is a protocol fault and must trigger merge abort/quarantine.
 
 ------------------------------------------------------------------------
 
@@ -149,8 +160,11 @@ transitions:
 -   Objective completion
 -   Currency updates
 
-Hard state is: - Finalized by Mesh Arbiter - Emitted to WAL -
-Recoverable after crash
+Hard state is:
+- Finalized by Mesh Arbiter
+- Emitted to the Meta Services Event Bus (Redis Streams)
+- Persisted by Meta into durable databases
+- Recoverable after crash
 
 ------------------------------------------------------------------------
 
@@ -460,7 +474,7 @@ Unlike traditional server-side lag, Kinematic Dilation is treated as an **intent
 ### 8.2.2 Technical Implementation Details
 - **Data-Driven Configuration:** The dilation curve is not hardcoded. Thresholds and exponents are defined in the `DilationConfig` within the active `SpellData` asset dictionary, allowing live-tuning via Data Epoch hot-patches.
 - **Dynamic Ramp-Up (The Formula):** The Arbiter calculates its local `dilation_factor` every tick based on current entity density:
-    1. `density_ratio = (current_entities - safe_threshold) / (critical_threshold - safe_threshold)`
+    1. `density_ratio = (current_entities - safe_entity_threshold) / (critical_entity_threshold - safe_entity_threshold)`
     2. `clamped_ratio = clamp(density_ratio, 0.0, 1.0)`
     3. `curve_mult = clamped_ratio ^ curve_exponent`
     4. `dilation_factor = 1.0 - (curve_mult * (1.0 - minimum_dilation_factor))`
@@ -481,7 +495,7 @@ To maintain a lock-free 60Hz physics simulation, the architecture explicitly sep
 2.  **The Meta Services (The Platform):** A suite of horizontally scaled, stateless microservices handling non-spatial logic on **Eventual Consistency**. This layer manages:
     -   **Social Actors:** Guilds, Parties, Friends Lists, Global Chat.
     -   **Economic Actors:** Inventory, Trading, Auction House, Currency.
-    -   **Progression Actors:** Quests, Leveling, Achievement Tracking, WAL Persistence.
+    -   **Progression Actors:** Quests, Leveling, Achievement Tracking, Hard-State persistence.
     -   **Session Manager:** A fast, in-memory registry (Redis) mapping active User Accounts to their current `EntityID`, Host Arbiter, and serving Edge Node. Also monitors Edge Node liveness via heartbeat TTLs (see Section 9.11).
 
 ## 9.2 The "Sidecar" Dispatch Pattern (The Edge Gateway)
@@ -758,16 +772,23 @@ The data required for deferred recovery is fully durable:
 | Loot table roll results | Computed and recorded by Meta upon consuming `MonsterDied` | Yes — in Meta's database |
 | Whether loot was claimed | Absence of a `LootClaimed` event for this drop | Yes — provable by absence |
 
-### 9.10.3 Design Intent (Implementation Deferred)
+### 9.10.3 V1 Recovery Contract (Specified)
 
-The specific UX for deferred loot recovery is deliberately left unspecified in this version of the architecture. The data model fully supports recovery — Meta can query: *"Show me all loot drops from `MonsterDied` events where the spawning Arbiter subsequently crashed and no `LootClaimed` was recorded."*
+V1 deferred loot recovery is implemented as a strict state machine in Meta:
 
-Candidate recovery mechanisms (to be designed):
-- **Guild House NPC:** A "Loot Reclamation" NPC where eligible party members can view and distribute unclaimed drops according to the group's loot rules.
-- **Recovery Inbox with confirmation:** Mail the loot to the party leader with a "distribute" action, preserving social loot rules.
-- **Time-limited claim window:** Eligible players have N hours to claim deferred loot at a designated NPC before it expires.
+1. `ROLLED`: Meta records loot at `MonsterDied` consume time.
+2. `SPAWNED`: Meta issues `SpawnLootInteractable` to the Arbiter.
+3. `CLAIMED`: Meta receives `LootClaimed` and finalizes distribution.
+4. `DEFERRED`: Arbiter crashes while drop is `SPAWNED` and no `LootClaimed` exists.
+5. `EXPIRED`: Deferred claim window ends without valid claim.
 
-The critical invariant is: **deferred loot must pass through the same social distribution rules as live loot.** It must never bypass Need/Greed, DKP, or party leader authority.
+V1 player flow:
+- Deferred drops are surfaced through a dedicated **Loot Reclamation NPC** (not auto-mailed).
+- Eligibility is restricted to the original `participating_entities` set captured on `MonsterDied`.
+- Claim window is fixed at `24 hours` from crash declaration (`ArbiterCrashed.declared_dead_at`).
+- Distribution rules must reuse the same party loot policy as live drops (Need/Greed/DKP/leader assignment).
+
+The critical invariant is unchanged: **deferred loot must pass through the same social distribution rules as live loot.** It must never bypass Need/Greed, DKP, or party leader authority.
 
 ## 9.11 Edge Node Crash Recovery
 
@@ -835,7 +856,7 @@ Edge Nodes hold significant per-session runtime state. While none of it is autho
 | **`SpellData` dictionary** | The full ability/balance data required for semantic translation (converting raw inputs into `ActionProposals`). Without it, the Edge Node cannot validate ranges, resolve targeting, or enforce cooldowns. | CDN download or local cache. If the Edge Node pool shares a warm cache (e.g., a local volume mount), this is near-instant. Cold download from CDN adds 100-500ms depending on asset size. | Medium — can be pre-warmed |
 | **Topology routing table** | The current `topology_epoch` and Arbiter boundary map. Required to route proposals to the correct Arbiter. | Pushed by the Arbiter as a `TopologyUpdate` during the claim handshake (step 6 in Section 9.11.3). | Negligible — single packet |
 | **Player entity state** | The player's authoritative position, velocity, HP, resource, buffs, and all visible nearby entities. Seeds the prediction loop. | Pushed by the Arbiter as a full `StateUpdate` bootstrap snapshot during the claim handshake. | Negligible — single packet |
-| **Ability cooldown timers** | Per-ability remaining cooldown times. Required so the Edge Node doesn't propose abilities the player can't cast. | Derived from `active_status_effects` in the bootstrap `StateUpdate`. Each `ActiveStatusEffect` with a matching ability cooldown `effect_id` provides the `remaining_ticks`. The Edge Node reconstructs the cooldown table on first frame. | Negligible — computed locally |
+| **Ability cooldown timers** | Per-ability remaining cooldown times. Required so the Edge Node doesn't propose abilities the player can't cast. | Derived from the owning entity's `active_effects_detailed` field in the bootstrap `StateUpdate`. Each effect with a matching cooldown `effect_id` provides `remaining_ticks`. The Edge Node reconstructs the cooldown table on first frame. | Negligible — computed locally |
 | **Prediction simulation state** | The local simulation loop that provides immediate movement and combat feedback to the client. | Initialized from the bootstrap `StateUpdate`. The first 2-3 frames may feel slightly "snappy" as the prediction loop converges with the authoritative state. | Low — converges within ~50ms |
 | **Entity interpolation buffers** | Smoothing buffers for rendering nearby entities. Requires a short history of `StateUpdate` frames to interpolate between. | Rebuilt naturally from the first few `StateUpdate` frames after reconnection. During the buffer fill period (~100-200ms), nearby entities may appear to "pop" slightly. | Low — fills within 3-5 frames |
 | **Anti-cheat accumulators** | Input velocity history, action frequency baselines, anomaly detection state. | **Not reconstructable.** Reset to zero. This is intentionally acceptable — a fresh baseline is safer than stale state from a security perspective. A reconnecting player gets a clean slate, which eliminates the risk of false positives from pre-crash input anomalies. | None — fresh start |
@@ -850,9 +871,9 @@ When a new Edge Node claims a session (step 6 in Section 9.11.3), the following 
 3. [Arbiter]    Validate token, swap downstream address
 4. [Arbiter]    Push TopologyUpdate (routing table + neighbors)
 5. [Arbiter]    Push full StateUpdate bootstrap snapshot
-                (player entity + all visible entities + active_status_effects)
+               (player entity + all visible entities + active_effects_detailed for owner entity)
 6. [Edge Node]  Initialize prediction loop from snapshot
-7. [Edge Node]  Derive cooldown table from active_status_effects
+7. [Edge Node]  Derive cooldown table from active_effects_detailed
 8. [Edge Node]  Reset anti-cheat baselines to zero
 9. [Edge Node]  Begin accepting client input and streaming predictions
 ```

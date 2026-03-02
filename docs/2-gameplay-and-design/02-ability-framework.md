@@ -2,6 +2,8 @@
 
 This document provides concrete examples of how complex ARPG/MOBA mechanics are translated into the engine's `ActionPayload` and `CombatContext` structures. It serves as a guide for Game Designers and Gameplay Engineers to map visual abilities to the networking layer.
 
+Canonical intent keys and stable numeric intent IDs are defined in [04. Intent Taxonomy & ID Registry](04-intent-taxonomy-and-registry.md). This document focuses on mechanics and examples, while the registry document owns intent naming and ID assignment.
+
 ---
 
 ## 1. Core Structures
@@ -30,7 +32,7 @@ struct CombatContext {
     proc_depth: u8,
 }
 ```
-`DamageOrigin` is defined in `Spatial_Mesh_Interfaces.md` and is required for proc recursion safety.
+`DamageOrigin` is defined in [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md) and is required for proc recursion safety.
 
 ---
 
@@ -209,7 +211,7 @@ A player shoots a poison dart.
         }
     }
     ```
-*   **Arbiter Resolution:** The Arbiter applies the 10 damage, then adds `EFFECT_POISON_TICK` to the victim's internal `SoftState.active_buffs` array.
+*   **Arbiter Resolution:** The Arbiter applies the 10 damage, then adds `EFFECT_POISON_TICK` to the victim's internal `SoftState.active_status_effects` array.
 *   **The Engine Loop:** During `simulate_physics_step()`, the Arbiter automatically deducts HP every second based on the active poison buff. Zero network traffic is required to sustain the DoT.
 
 ### Example 5.2: "Infection" (Spreading Status Effect)
@@ -268,7 +270,7 @@ A Paladin activates an aura that slows and damages all nearby enemies. The aura 
 
 ### Example 6.3: "Thorns Armor" (Reactive Procs)
 A player activates a buff that reflects 15 True damage back to anyone who hits them with a melee attack. 
-*   **The Application:** The designer assigns `EFFECT_THORNS_AURA` to a buff spell. The Arbiter adds this to the player's `SoftState.active_buffs`.
+*   **The Application:** The designer assigns `EFFECT_THORNS_AURA` to a buff spell. The Arbiter adds this to the player's `SoftState.active_status_effects`.
 *   **The Engine Trigger:** When an enemy hits the player, the Arbiter executes `apply_combat_math`. It calculates the damage to the victim, then sees the Thorns buff. 
 *   **The Resolution:** The Arbiter does *not* instantly damage the attacker (this avoids memory access violations/Borrow Checker errors). Instead, the Arbiter automatically pushes a new `MeshInternalEvent` with `ActionPayload::InternalPreparedHit` targeting the attacker into its own queue. The attacker takes the 15 True damage on the very next simulation tick.
 *   **The Proc Guard:** The reflected hit is stamped as `damage_origin = ReactiveProc` and `proc_depth = 1`, so it cannot recursively trigger another Thorns reflect. This prevents infinite Thorns-vs-Thorns event loops.
@@ -407,8 +409,8 @@ Abilities like "Shadowstep" or "Blink" don't just apply damage; they forcibly mu
 
 ### 8.2 Hard Crowd Control (Stuns, Polymorphs, and Banishes)
 When a player is Stunned, they lose the ability to propose movement or actions.
-*   **The Application:** A "Kidney Shot" applies `EFFECT_STUN`. The Arbiter adds this to the victim's `SoftState.active_buffs`.
-*   **The Enforcement:** In the next tick, if the victim's Edge Node sends a `Movement` proposal, the Arbiter's `resolve_action` check sees the `STUN` flag and **silently discards the packet**. 
+*   **The Application:** A "Kidney Shot" applies `EFFECT_STUN`. The Arbiter adds this to the victim's `SoftState.active_status_effects`.
+*   **The Enforcement:** In the next tick, if the victim's Edge Node sends a `Movement` proposal, the Arbiter's `resolve_action` check sees the `STUN` flag and drops/coalesces movement under the continuous-stream rule. Discrete actions still receive explicit `ActionFailed` terminal outcomes. 
 *   **The Result:** The player's inputs are ignored by the authoritative mesh until the stun duration expires. The Edge Node (Proxy) also sees the `STUN` flag in the downstream update and locally disables the player's UI/input to prevent prediction jitter.
 
 ### 8.3 "The Nuke" (Area of Effect Escalation)

@@ -1,6 +1,6 @@
 # Technical Blueprint: 2D Spatial Mesh Interfaces
 
-This document serves as the technical companion to `Spatial_Mesh_Arbiter_Architecture_v2.md`. It defines the core data structures, message envelopes, and Actor interfaces required to implement a **2D Spatially-Aware Actor Model**.
+This document serves as the technical companion to [Core Architecture](01-core-architecture.md). It defines the core data structures, message envelopes, and Actor interfaces required to implement a **2D Spatially-Aware Actor Model**.
 
 ---
 
@@ -184,13 +184,21 @@ struct NeighborRegion {
 
 // 4. Downstream Envelope: From Arbiter to Proxy Actor (Edge Node)
 // Defines the strictly quantized wire format for 60Hz state synchronization.
+struct ActiveEffectSnapshot {
+    effect_id: u16,
+    remaining_ticks: u32,
+}
+
 struct EntityStateUpdate {
     id: EntityID,
     position: NetVec2,
     velocity: NetVec2,
     hp: i32,
     resource: i32,
-    active_buffs: Vec<u16>, // IDs of currently active effects for client UI/VFX rendering
+    active_buffs: Vec<u16>, // IDs of active effects for client UI/VFX rendering
+    // Optional detailed effects payload for bootstrap/reconnect of the owning player.
+    // Edge uses remaining_ticks to reconstruct ability cooldown tables.
+    active_effects_detailed: Option<Vec<ActiveEffectSnapshot>>,
     is_authoritative_owner: bool,
     is_ghost: bool,
 }
@@ -459,7 +467,7 @@ enum ProjectileHandoffMessage {
 
 // 7. Sibling Merge Handoff (Arbiter <-> Arbiter, RUDP + WAL stream)
 struct LedgerBucketSnapshot {
-    bucket_index: u16, // 0..MAX_EVENT_AGE_TICKS-1
+    bucket_index: u16, // Source-side ring slot (diagnostic only; do not trust for destination mapping)
     bucket_tick: u64,  // Absolute tick represented by this ring bucket
     entries: Vec<(UUID, EntityID)>,
 }
@@ -800,7 +808,11 @@ enum ActionPayload {
 
 ## 2. Layer 1: The Edge Node (Proxy Actor)
 
-The Proxy Actor maintains the client connection, manages local prediction (Soft State), and translates raw inputs into `ActionProposals`.
+The Proxy Actor maintains the client connection, manages local prediction (Soft State), and translates client intents into `ActionProposals`.
+
+> **Canonical wire source:** The exact client->edge WebSocket envelope, auth bootstrap/resume payloads, `RawInput` contract, and immediate edge response semantics are defined in [03. Client <-> Edge Message Contract](03-client-edge-message-contract.md). The types below are runtime-focused interface excerpts.
+>
+> **Canonical NPC runtime source:** NPC cadence tiers, replication budget/ring behavior, and client smoothing contracts are defined in [04. NPC Runtime and Replication Contract](04-npc-runtime-and-replication-contract.md).
 
 ### 2.1 Interface
 ```rust
@@ -808,8 +820,32 @@ The Proxy Actor maintains the client connection, manages local prediction (Soft 
 
 // The multiplexed envelope sent from the physical game client to the Edge Node
 enum ClientMessage {
-    Simulation(RawInput), // High-frequency movement, aiming, ability clicks
+    Simulation(RawInput), // `RawInput` is the runtime alias of `SimulationInput` in 03-client-edge-message-contract.md
     Meta(MetaRequest),    // Low-frequency chat, inventory, grouping
+    Control(ClientControlPayload), // Keepalive + optional non-authoritative telemetry
+}
+
+enum ClientControlPayload {
+    ClientPing { ping_nonce: u64 },
+    Pong { ping_nonce: u64 },
+    // Optional raw-device samples for analytics/anti-cheat/debug only.
+    // This payload never directly mutates authoritative gameplay state.
+    DeviceTelemetry(DeviceTelemetryEnvelope),
+}
+
+struct DeviceTelemetryEnvelope {
+    sample_seq: u64,
+    source: String,
+    samples: Vec<DeviceTelemetrySample>,
+}
+
+struct DeviceTelemetrySample {
+    dt_ms: u16,
+    mouse_dx: Option<i16>,
+    mouse_dy: Option<i16>,
+    raw_buttons_down: Option<u32>,
+    raw_buttons_up: Option<u32>,
+    raw_key_mask: Option<u64>,
 }
 
 // Low-frequency, strongly consistent interactions forwarded to Tier 2
@@ -831,7 +867,8 @@ struct ProxyActor {
     session_id: UUID,        // Secure, unguessable network token for the client connection
     character_id: UUID,      // The persistent DB identity (injected by Auth, trusted by Meta)
     entity_id: EntityID,     // The fast, compact u64 used for physics and mesh routing
-    client_connection: UdpSocket,
+    // External client transport is WebSocket for browser compatibility and firewall traversal.
+    client_connection: WebSocketStream<TlsOrTcpStream>,
     
     // --- The Dual-Routing Destinations ---
     // 1. Spatial Mesh (60Hz, UDP, Ephemeral)
@@ -952,6 +989,9 @@ impl ProxyActor {
 
                     if entity_update.is_authoritative_owner {
                         if mesh_state.tick > *last_auth_tick {
+                            if let Some(effects) = &entity_update.active_effects_detailed {
+                                self.rebuild_cooldowns_from_effects(entity_update.id, effects);
+                            }
                             self.reconcile_entity(entity_update);
                             self.last_known_authoritative_tick.insert(entity_update.id, mesh_state.tick);
                         }
@@ -1004,7 +1044,7 @@ The Spatial Actor is a single-threaded, lock-free, 60Hz deterministic simulation
 const MAX_EVENT_AGE_TICKS: u64 = 60;
 
 // Configuration structs replacing hardcoded magic numbers
-// (See Engine_Configuration_Registry.md for detailed definitions)
+// (See ../3-infrastructure/02-configuration-registry.md for detailed definitions)
 struct BootConfig {
     proposal_bucket_capacity: u16,
     proposal_bucket_refill_per_tick: u16,
@@ -1132,6 +1172,7 @@ struct SpatialActor {
     stale_proposals_buffer: BoundedQueue<(ActionProposal, u64)>,
 
     entities: HashMap<EntityID, SoftState>, 
+    offense_by_entity: HashMap<EntityID, OffensiveStats>,
     ghost_entities: HashMap<EntityID, GhostState2D>, 
     ghost_grid: SpatialIndex<EntityID>, // Mirrors ghost positions for cheap downstream visibility queries
     proposal_buckets: HashMap<EntityID, TokenBucket>, // Per-entity fairness guard on ingress
@@ -1902,7 +1943,7 @@ impl SpatialActor {
     // --- Deep RPG Combat Engine ---
     // This centralizes all complex ARPG/MOBA math (Armor, Resistance, Weight, Falloff)
     // ensuring it only runs on the true authoritative owner of the target.
-    // (See `RPG_Mechanics_and_State.md` for the full mitigation formula including Evasion and Block).
+    // (See ../2-gameplay-and-design/01-rpg-mechanics-and-state.md for the full mitigation formula including Evasion and Block).
     // 
     // RUST BORROW CHECKER NOTE: This function takes a mutable borrow of the `victim`. 
     // You cannot simultaneously take a mutable borrow of the `attacker` from `self.entities` 
@@ -1925,7 +1966,7 @@ impl SpatialActor {
         let mut incoming_damage = context.base_damage as SimFixed * distance_multiplier;
 
         // 2. Resistance & Penetration Mitigation
-        // Note: For brevity, Evasion and Block checks are omitted here. See `RPG_Mechanics_and_State.md`.
+        // Note: For brevity, Evasion and Block checks are omitted here. See ../2-gameplay-and-design/01-rpg-mechanics-and-state.md.
         if context.damage_type != 99 {
             let mut effective_resistance = victim.defense.resistances[context.damage_type as usize];
             
@@ -2559,7 +2600,8 @@ fn apply_merge_snapshot_atomic(&mut self, merge_id: UUID, new_epoch: u32) {
         }
         self.ghost_entities.remove(&entity_id);
         self.ghost_grid.remove(entity_id);
-        self.entities.insert(entity_id, incoming);
+        self.entities.insert(entity_id, incoming.soft_state);
+        self.offense_by_entity.insert(entity_id, incoming.offense);
     }
 
     // 2) Projectile import with UUID-based deduplication.
@@ -2570,9 +2612,9 @@ fn apply_merge_snapshot_atomic(&mut self, merge_id: UUID, new_epoch: u32) {
         }
     }
 
-    // 3) Idempotency ledger union by ring bucket.
+    // 3) Idempotency ledger union by absolute bucket tick (phase-safe remap).
     for b in staged.ledger_ring {
-        let idx = b.bucket_index as usize;
+        let idx = (b.bucket_tick % MAX_EVENT_AGE_TICKS) as usize;
         if idx >= self.event_idempotency_ledger.len() { continue; }
         for entry in b.entries {
             self.event_idempotency_ledger[idx].insert(entry);
@@ -2604,9 +2646,9 @@ fn tick_merge_forwarding(&mut self) {
 
 ---
 
-## 4. Layer 3: The Datastore (Immutable Ledger)
+## 4. Layer 3: Hard-State Publisher (Event Bus Worker)
 
-The Datastore is an asynchronous worker pool that persists finalized "Hard State" events. It is entirely removed from the 60Hz simulation loop.
+The hard-state publisher is an asynchronous worker that emits finalized Hard Events to the Event Bus. It is entirely removed from the 60Hz simulation loop.
 
 ### 4.1 Interface
 ```rust
@@ -2615,7 +2657,8 @@ enum HardEvent {
     // Killer is an Option to support PvE / Environmental deaths
     PlayerDied { killer: Option<EntityID>, victim: EntityID },
     PlayerResurrected { healer: EntityID, victim: EntityID }, // Cancels the Meta respawn timer
-    ItemDropped { entity_id: EntityID, item_id: u16, location: Vec2F },
+    // Canonical loot spawn event name used across docs.
+    LootSpawned { drop_id: UUID, item_id: u16, location: Vec2F, source_monster_id: Option<EntityID> },
     ObjectiveCaptured { team: TeamID, zone: RegionID },
 
     // Boss/Monster kill event — triggers loot table rolls in Meta
@@ -2645,18 +2688,17 @@ struct ArbiterCrashedEvent {
     declared_dead_at: u64,  // Shard Tick at which the Controller declared the crash
 }
 
-struct DatastoreWorker {
-    db_connection: DatabasePool,
+struct HardStatePublisher {
+    event_bus: Arc<dyn EventBus>,
+    stream: String, // e.g., "stream:hard_state"
 }
 
-impl DatastoreWorker {
-    // Called asynchronously by Spatial Actors (Fire-and-Forget)
-    fn append_event(&self, event: HardEvent) {
-        // 1. Append to the durable Write-Ahead Log (WAL)
-        self.db_connection.insert(event);
-        
-        // 2. Trigger asynchronous progression/analytics pipelines
-        self.trigger_progression_pipelines(event);
+impl HardStatePublisher {
+    // Called asynchronously by Spatial Actors (Fire-and-Forget from the hot loop).
+    async fn publish_event(&self, event: HardEvent) -> Result<EntryId> {
+        let event_id = generate_uuid();
+        let payload = bincode::serialize(&event)?;
+        self.event_bus.publish(&self.stream, event_id, &payload).await
     }
 }
 ```

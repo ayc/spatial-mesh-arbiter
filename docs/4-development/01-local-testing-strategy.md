@@ -34,9 +34,9 @@ spatial_arbiter:
 
 Running 30 full 3D game clients on a local machine to trigger a 10-player split is inefficient and resource-heavy. 
 
-Engineers should utilize a **Headless Swarm Tester**—a lightweight Rust script that bypasses the graphical rendering engine and communicates directly with the local Edge Node (Proxy Actor) via UDP/WebSockets.
+Engineers should utilize a **Headless Swarm Tester**—a lightweight Rust script that bypasses the graphical rendering engine and communicates directly with the local Edge Node (Proxy Actor) over WebSockets.
 
-The Swarm Tester acts as an army of automated bots. It constructs raw `ActionProposals` (defined in `ActionPayloadTypes.md`) and spams them at the server to simulate real player behavior.
+The Swarm Tester acts as an army of automated bots. It constructs client WebSocket frames that follow [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md), primarily `SimulationInput` and discrete simulation intents. The Edge Node then translates those intents into mesh `ActionProposal`s (ability semantics defined in [Ability Framework](../2-gameplay-and-design/02-ability-framework.md)).
 
 ### Recommended Test Scenarios
 
@@ -99,6 +99,21 @@ The Swarm Tester acts as an army of automated bots. It constructs raw `ActionPro
 1. **Action:** Connect 5 bots through a single Edge Node. Force-kill the Edge Node. Do NOT reconnect the bots.
 2. **Observation:** After `logout_fuse_ticks` (60 seconds), the Arbiters despawn the entities. After the session mapping TTL (5 minutes), the Session Manager prunes the orphaned mappings.
 3. **Debugging:** Reconnect one bot after both timers have expired. Verify it goes through the full Spawn Handshake (Section 9.5) — no active entity found, Meta respawns at last save zone. Confirm no stale session mappings or ghost entities remain.
+
+#### Scenario M: Tiered NPC Cadence (Testing Runtime Tier Scheduler)
+1. **Action:** Spawn mixed NPC archetypes (combat, lane creeps, ambient, social) in a single test region and force visibility transitions across `Near`, `Mid`, and `Far` rings while players move.
+2. **Observation:** NPC updates follow tier defaults from [NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md): combat-critical entities remain high cadence, lane creeps downgrade on march state, ambient updates drop first under pressure.
+3. **Debugging:** Inspect per-client batch logs to confirm cadence/tier transitions obey hysteresis and never violate reliable lifecycle ordering.
+
+#### Scenario N: Mass On-Screen NPC Saturation (Testing Budget Degradation Priority)
+1. **Action:** Place 200+ visible mixed-tier NPCs in one viewport and induce simultaneous movement plus periodic combat events.
+2. **Observation:** Per-client NPC replication stays within budget while degradation remains deterministic: lifecycle and interaction events preserved first, ambient/background deltas reduced first.
+3. **Debugging:** Verify no dropped `Spawned`, `Died`, `LootClaimed`, or objective progression events while best-effort movement deltas may be thinned.
+
+#### Scenario O: Interaction Contention (Testing Deterministic Single-Winner Semantics)
+1. **Action:** Have two bots issue `world.interact_entity` against the same loot/objective target within the same contention window.
+2. **Observation:** Exactly one interaction resolves as winner; loser receives deterministic rejection/outcome path (`RejectedContended` class) as defined in [NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md).
+3. **Debugging:** Confirm winner/loser ordering remains stable across retries and that no duplicate claim side effects occur.
 
 ---
 

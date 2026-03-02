@@ -283,7 +283,7 @@ struct CombatContext {
     conditionals: Vec<OffensiveCondition>,
 }
 ```
-`DamageOrigin` is defined in `Spatial_Mesh_Interfaces.md` and shared across all combat envelopes.
+`DamageOrigin` is defined in [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md) and shared across all combat envelopes.
 
 ---
 

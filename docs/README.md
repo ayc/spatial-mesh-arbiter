@@ -12,6 +12,8 @@ Because this is a complex system involving multiple disciplines, the documentati
 Contains the core theoretical foundation, network interfaces, messaging envelopes, and low-level engine design.
 *   [01. Core Architecture](1-architecture-and-engine/01-core-architecture.md)
 *   [02. Network Interfaces](1-architecture-and-engine/02-network-interfaces.md)
+*   [03. Client <-> Edge Message Contract](1-architecture-and-engine/03-client-edge-message-contract.md)
+*   [04. NPC Runtime and Replication Contract](1-architecture-and-engine/04-npc-runtime-and-replication-contract.md)
 
 ## 2. Gameplay & Design
 *Target Audience: Game Designers / Gameplay Engineers*
@@ -20,6 +22,8 @@ Covers the data-driven systems used to build spells, abilities, and RPG stats.
 *   [01. RPG Mechanics & State](2-gameplay-and-design/01-rpg-mechanics-and-state.md)
 *   [02. Ability Framework (Action Payloads)](2-gameplay-and-design/02-ability-framework.md)
 *   [03. Global Events (Map-Wide Mechanics)](2-gameplay-and-design/03-global-events.md)
+*   [04. Intent Taxonomy & ID Registry](2-gameplay-and-design/04-intent-taxonomy-and-registry.md)
+*   [05. NPC and In-World Interaction Design](2-gameplay-and-design/05-npc-and-world-interaction-design.md)
 
 ## 3. Infrastructure
 *Target Audience: DevOps / Platform / Site Reliability Engineers*
