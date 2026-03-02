@@ -55,6 +55,31 @@ The Swarm Tester acts as an army of automated bots. It constructs raw `ActionPro
 2. **Observation:** The Mesh Controller attempts to split the node but hits the `min_cell_size_meters: 20.0` limit. Unable to split geographically, the Arbiter is forced to handle 30 entities (3x its capacity).
 3. **Debugging:** Developers will see the Arbiter automatically trigger **Kinematic Dilation**. The physical speed of the bots will slow down, and the Arbiter will begin interleaving its collision checks to survive the artificial load.
 
+#### Scenario D: Data Epoch Drift (Testing Proposal Epoch Rejection + Recovery)
+1. **Action:** Force one Edge Node to keep an outdated `data_epoch`, then submit non-movement proposals while Arbiters are already on a newer epoch.
+2. **Observation:** Stale proposals are rejected with explicit `ActionFailed { reason: "Data Epoch Mismatch" }`.
+3. **Debugging:** After Edge Node refreshes from downstream epoch fields, proposals should succeed without server restart.
+
+#### Scenario E: Topology Stale Buffer Timeout (Testing Arbiter-Stale Timeout Contract)
+1. **Action:** Artificially delay `UpdateTopology` delivery to one Arbiter while continuing proposal ingress with newer topology epochs.
+2. **Observation:** Proposals buffer up to `MAX_EVENT_AGE_TICKS`; timed-out non-movement proposals are rejected with explicit timeout reasons (never silently dropped).
+3. **Debugging:** Verify stale-buffer saturation emits deterministic `ActionFailed { reason: "Arbiter Queue Saturated" }`.
+
+#### Scenario F: Controller Outage During Global Event (Testing Refund Path)
+1. **Action:** Trigger a map-wide event cast while Mesh Controller RPC is intentionally unavailable.
+2. **Observation:** Arbiter aborts escalation and returns `ActionFailed` to Edge Node so cooldown/resources are refunded immediately.
+3. **Debugging:** Confirm no partial detonation occurs on any Arbiter and no orphaned scheduled global event remains queued.
+
+#### Scenario G: Projectile Handoff Replay (Testing `handoff_seq` Deduplication)
+1. **Action:** Inject duplicate/stale `ProjectileHandoffMessage::Prepare` packets with lower/equal `handoff_seq` during cross-boundary projectile transfer.
+2. **Observation:** Receiver rejects stale sequences and sender remains single authoritative simulator until a valid handoff commits.
+3. **Debugging:** Confirm impacts are emitted exactly once across retries/replays.
+
+#### Scenario H: Merge Ledger Union (Testing No Double-Damage After Merge Commit)
+1. **Action:** Force sibling merge while replaying delayed `ImpactEvent` packets that existed on both winner and loser ledger rings.
+2. **Observation:** Winner unions ledger buckets at commit and suppresses duplicate damage post-merge.
+3. **Debugging:** Validate `MAX_EVENT_AGE_TICKS` drain window forwarding completes, then loser can be finalized safely.
+
 ---
 
 ## 3. Visualizing the Mesh

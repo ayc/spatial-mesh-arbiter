@@ -102,17 +102,51 @@ enum ControllerCommand {
         data_epoch: u32,        // SpellData/Balance version pinned at scheduling time
         context: CombatContext, // The raw damage and status effect payload
         epicenter: Vec2F,
-        radius: SimFixed,
+        geometry: CollisionGeometry,      // Deterministic shape used for execution (not radius-only)
+        target_filters: Option<Vec<u16>>, // Optional tag filters (e.g., TAG_STRUCTURE only)
+        pulse_interval_ticks: Option<u32>,// Optional periodic behavior for zone-style global events
+        duration_ticks: Option<u32>,      // Optional periodic behavior for zone-style global events
         execute_at_tick: u64,   // The synchronized Shard Tick for detonation
     },
     UpdateTopology {
         new_epoch: u32,
+        cutover_tick: u64, // Deterministic tick for boundary shifts (Sliding)
         my_region: Rect,
         neighbors: Vec<NeighborRegion>, // Neighbors and their current dilation factors
+    },
+    SyncHeartbeat {
+        controller_shard_tick: u64, // The authoritative global Metronome
+    },
+    PrepareDataEpoch {
+        new_epoch: u32,
+        asset_uri: String, // e.g., "s3://game-assets/balance/v1.02.fb"
+        checksum: String,
+    },
+    BeginSplit {
+        split_id: UUID,
+        surrogate_arbiter_id: u32, // The currently overloaded Arbiter (A)
+        child_b_id: u32,           // The newly spun-up shadow node (B)
+        child_b_address: String,   // IP/Port of Child B for WAL streaming
+        child_c_id: u32,           // The newly spun-up shadow node (C)
+        child_c_address: String,   // IP/Port of Child C for WAL streaming
+        region_b: Rect,            // The geometric half assigned to B
+        region_c: Rect,            // The geometric half assigned to C
+        new_epoch: u32,            // The topology epoch this split will introduce
+    },
+    CommitSplit {
+        split_id: UUID,
+        surrogate_arbiter_id: u32,
+        cutover_tick: u64,         // Deterministic tick where A stops, and B/C take over
+        new_epoch: u32,
+    },
+    FinalizeSplit {
+        split_id: UUID,
+        surrogate_arbiter_id: u32, // Tells the Surrogate it is safe to terminate/drain
     },
     BeginMerge {
         merge_id: UUID,
         winner_arbiter_id: u32,
+        winner_address: String, // IP/Port where the Loser must stream its WAL
         loser_arbiter_id: u32,
         merged_region: Rect,
         cutover_tick: u64,
@@ -133,23 +167,91 @@ enum ControllerCommand {
     }
 }
 
+// Configurable parameters for Kinematic Dilation (packaged in SpellData assets)
+struct DilationConfig {
+    safe_entity_threshold: u32,      // e.g., 300 - Below this, dilation is always 1.0
+    critical_entity_threshold: u32,  // e.g., 1000 - At/above this, dilation is minimum_dilation_factor
+    minimum_dilation_factor: SimFixed, // e.g., 0.2 (1/5th speed)
+    curve_exponent: SimFixed,        // 1.0 = Linear, 2.0 = Quadratic
+}
+
 struct NeighborRegion {
     region: Rect,
     arbiter_id: u32,
+    address: String, // e.g., "10.0.5.42:7000" (Direct UDP port for RUDP/Ghost traffic)
     dilation_factor: SimFixed, // Used for cross-border prediction
 }
 
 // 4. Downstream Envelope: From Arbiter to Proxy Actor (Edge Node)
+// Defines the strictly quantized wire format for 60Hz state synchronization.
+struct EntityStateUpdate {
+    id: EntityID,
+    position: NetVec2,
+    velocity: NetVec2,
+    hp: i32,
+    resource: i32,
+    active_buffs: Vec<u16>, // IDs of currently active effects for client UI/VFX rendering
+    is_authoritative_owner: bool,
+    is_ghost: bool,
+}
+
+// Internal Engine Representation of a running Buff/Debuff
+struct ActiveStatusEffect {
+    effect_id: u16,
+    caster_id: EntityID,       // Preserved for kill credit if a DoT kills the target
+    remaining_ticks: u32,
+    next_pulse_tick: u64,      // The absolute Shard Tick when this effect should trigger its payload
+    data_epoch: u32,           // The balance version this buff was applied under
+    pulse_context: Option<CombatContext>, // The pre-rolled damage/healing payload to apply every pulse
+}
+
+// Base attributes for physics and gameplay scaling
+struct CoreStats {
+    move_speed: SimFixed,
+    weight: SimFixed,
+    evasion: SimFixed,
+    time_scale: SimFixed, // Gameplay Kinematic Dilation multiplier (e.g., 1.0 is normal, 0.5 is slow motion)
+}
+
+// Core Entity State (Authoritative)
+struct SoftState {
+    hp: i32,
+    max_hp: i32,
+    resource: i32,
+    max_resource: i32,
+    position: Vec2F,
+    velocity: Vec2F,
+    rotation: SimFixed,
+    last_movement_tick: u64,
+    stats: CoreStats,          // Move speed, weight, evasion, etc.
+    defense: DefensiveStats,   // Resistances
+    active_status_effects: Vec<ActiveStatusEffect>,
+    is_invulnerable: bool,
+    is_dead: bool,             // Flags the entity for cleanup/corpse transition
+    resurrect_window_ticks: Option<u32>, // Time remaining for a healer to resurrect before hard despawn
+    logout_fuse_ticks: Option<u32>, // Used for the 60-second wilderness logout mechanic
+}
+
+struct SoftStateSnapshot {
+    tick: u64,
+    entities: Vec<EntityStateUpdate>,
+}
+
 enum DownstreamPayload {
-    StateUpdate(SoftStateSnapshot),
+    StateUpdate {
+        snapshot: SoftStateSnapshot,
+        data_epoch: u32, // Authoritative active SpellData dictionary version
+    },
     ActionApplied {
         proposal_id: UUID, // Terminal success for discrete actions (casts/interactions/consumables)
     },
     TopologyUpdate {
         epoch: u32,
+        data_epoch: u32, // Authoritative active SpellData dictionary version
         my_region: Rect,
         my_dilation: SimFixed,
         neighbors: Vec<NeighborRegion>,
+        redirect_arbiter_id: Option<u32>, // Immediate host override used during split/merge handoffs
     },
     ActionFailed {
         proposal_id: UUID,
@@ -157,7 +259,24 @@ enum DownstreamPayload {
     }
 }
 
-// 5. Upstream Control Envelope: From Spatial Arbiter to Mesh Controller
+// 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Event Bus)
+enum MetaCommand {
+    SpawnEntity {
+        entity_id: EntityID,
+        character_id: UUID,
+        compiled_state: SoftState, // Base stats, JRPG Save Zone coordinates pre-calculated by Meta
+    },
+    InitiateLogout {
+        entity_id: EntityID,
+        is_safe_zone: bool, // If true, instant despawn. If false, starts the 60s fuse.
+    },
+    ApplyCrossServerAura {
+        entity_id: EntityID,
+        buff_id: u16, // e.g., "Guild Buff" activated by a player on another server
+    }
+}
+
+// 6. Upstream Control Envelope: From Spatial Arbiter to Mesh Controller
 // Sent via high-frequency Heartbeat to allow the Controller to orchestrate 
 // deterministic splits/merges based on actor density.
 struct ArbiterHeartbeat {
@@ -278,6 +397,96 @@ enum MergeHandoffMessage {
         reason: String, // e.g., "EpochMismatch", "EntityIdCollision"
     },
 }
+
+// 8. Sibling Split Handoff (Arbiter <-> Arbiter, RUDP + WAL stream)
+struct SplitSnapshot {
+    split_id: UUID,
+    from_arbiter_id: u32,
+    to_arbiter_id: u32, // Specific child (B or C)
+    topology_epoch: u32,
+    source_tick: u64,
+    // Only includes entities and projectiles that fall within the child's assigned region
+    entities: Vec<(EntityID, SoftState)>,
+    projectiles: Vec<ProjectileSnapshot>,
+    ghosts: Vec<GhostState2D>,
+    pending_global_events: HashMap<UUID, ControllerCommand>,
+    ledger_ring: Vec<LedgerBucketSnapshot>,
+}
+
+struct SplitWalDelta {
+    split_id: UUID,
+    from_arbiter_id: u32,
+    to_arbiter_id: u32,
+    topology_epoch: u32,
+    tick: u64,
+    external: Vec<ActionProposal>,
+    internal: Vec<MeshInternalEvent>,
+}
+
+enum SplitHandoffMessage {
+    Prepare {
+        split_id: UUID,
+        surrogate_arbiter_id: u32,
+        assigned_region: Rect,
+        topology_epoch: u32,
+    },
+    SnapshotChunk {
+        split_id: UUID,
+        chunk_seq: u32,
+        is_last: bool,
+        snapshot_chunk: SplitSnapshot,
+    },
+    WalDelta(SplitWalDelta),
+    CatchupAck {
+        split_id: UUID,
+        shadow_arbiter_id: u32,
+        synced_to_tick: u64,
+    },
+    Reject {
+        split_id: UUID,
+        reason: String,
+    },
+}
+
+// 9. Runtime Entity Boundary Handoff (Arbiter <-> Arbiter, Reliable-UDP)
+// Used when a player walks across a static boundary, or when a sliding "Battle Node" 
+// swallows or drops a player.
+struct EntitySnapshot {
+    entity_id: EntityID,
+    state: SoftState,
+    // Active modifiers and cooldowns are embedded within SoftState
+}
+
+enum EntityHandoffMessage {
+    Prepare {
+        entity_id: EntityID,
+        handoff_seq: u64,
+        from_arbiter_id: u32,
+        to_arbiter_id: u32,
+        topology_epoch: u32,
+        source_tick: u64,
+        commit_tick: u64, // Future tick when authority flips
+        snapshot: EntitySnapshot,
+    },
+    Ack {
+        entity_id: EntityID,
+        handoff_seq: u64,
+        from_arbiter_id: u32,
+        to_arbiter_id: u32,
+        commit_tick: u64,
+    },
+    Commit {
+        entity_id: EntityID,
+        handoff_seq: u64,
+        new_owner_arbiter_id: u32,
+        commit_tick: u64,
+    },
+    Reject {
+        entity_id: EntityID,
+        handoff_seq: u64,
+        reason: String,
+    },
+}
 ```
 
 ### 1.1.1 Network Serialization Rules (UDP-Safe)
@@ -297,6 +506,19 @@ enum MergeHandoffMessage {
 - **Per-Entity Token Bucket:** Every inbound `ActionProposal` must pass a lightweight per-entity token bucket before entering `external_inbox`.
 - **Abuse Isolation:** A spammy/buggy session can only exhaust its own bucket and cannot monopolize Arbiter queue capacity for other entities.
 - **Deterministic Failure Contract:** Over-budget non-movement proposals are rejected immediately with `ActionFailed { reason: "Rate Limited" }`; movement proposals may be dropped/coalesced.
+
+### 1.1.4 Terminal Authority & Border-Targeted Contract
+- **Single Terminal Owner:** Only the Arbiter that owns the proposing `actor_id` for a given `proposal_id` may emit terminal `ActionApplied` or `ActionFailed`.
+- **Relay Rule:** Neighbor Arbiters processing relayed `MeshInternalEvent` copies must never emit terminal client outcomes for the original `proposal_id`.
+- **Cross-Border Target-Locked Rule:** If the target is a local Ghost, the actor-owner Arbiter performs pre-roll (`CombatContext`) and relays `InternalPreparedHit` to the target-owner Arbiter. The target-owner applies mitigation/state mutation.
+- **Ack Semantics:** For cross-border target-locked casts, `ActionApplied` means the proposal was accepted and forwarded under valid local checks. It is not a guaranteed damage-commit on the remote owner.
+- **No Split-Brain Outcomes:** The same proposal must never simultaneously produce `ActionFailed` on actor-owner and damage application on target-owner.
+
+### 1.1.5 Data Epoch Handshake
+- **Epoch Match:** Proposal `data_epoch` equals Arbiter `current_data_epoch` -> process normally.
+- **Proposal Stale:** Proposal `data_epoch` older than Arbiter -> immediate `ActionFailed { reason: "Data Epoch Mismatch" }` for non-movement proposals.
+- **Arbiter Behind:** Proposal `data_epoch` newer than Arbiter -> attempt epoch activation; if unavailable, buffer with timeout bounded by `MAX_EVENT_AGE_TICKS`, then fail deterministically.
+- **Downstream Sync Contract:** `StateUpdate` and `TopologyUpdate` include authoritative `data_epoch` so Edge Nodes can refresh dictionaries before submitting new proposals.
 
 ### 1.2 ActionPayload (Polymorphic Logic)
 ```rust
@@ -417,6 +639,8 @@ enum ActionPayload {
     },
     
     // Combat (Target-Favoring Resolution / Skillshots)
+    // Content note: "SpawnZone" is an asset/schema alias compiled into SpawnProjectile
+    // with zero velocity + pulse/duration mechanics.
     SpawnProjectile { 
         direction: Vec2F, 
         target_id: Option<EntityID>, // Used for Homing Missiles or Attached Auras
@@ -460,13 +684,40 @@ The Proxy Actor maintains the client connection, manages local prediction (Soft 
 
 ### 2.1 Interface
 ```rust
+// --- Edge Node / Meta Services Dispatch Envelopes ---
+
+// The multiplexed envelope sent from the physical game client to the Edge Node
+enum ClientMessage {
+    Simulation(RawInput), // High-frequency movement, aiming, ability clicks
+    Meta(MetaRequest),    // Low-frequency chat, inventory, grouping
+}
+
+// Low-frequency, strongly consistent interactions forwarded to Tier 2
+enum MetaRequest {
+    SendChatMessage { channel: ChatChannel, text: String },
+    MoveInventoryItem { from_slot: u8, to_slot: u8 },
+    InviteToParty { target_character_name: String },
+    RequestLogout, // Triggers the Section 9.5 logout handshake
+}
+
+enum MetaResponse {
+    ChatReceived { sender: String, text: String },
+    InventorySync(InventorySnapshot),
+    PartyInviteReceived { from_name: String },
+    SystemAlert { message: String },
+}
+
 struct ProxyActor {
     session_id: UUID,        // Secure, unguessable network token for the client connection
+    character_id: UUID,      // The persistent DB identity (injected by Auth, trusted by Meta)
     entity_id: EntityID,     // The fast, compact u64 used for physics and mesh routing
     client_connection: UdpSocket,
     
-    // The Proxy Actor sends upstream proposals to exactly ONE Spatial Arbiter.
+    // --- The Dual-Routing Destinations ---
+    // 1. Spatial Mesh (60Hz, UDP, Ephemeral)
     authoritative_mesh_node: IPAddress, 
+    // 2. Meta Services (Async, gRPC/TCP, Persistent)
+    meta_rpc_client: RpcClient, 
     
     // Time Synchronization & Deduplication
     latest_mesh_tick: u64,
@@ -501,8 +752,26 @@ impl ProxyActor {
     const PROPOSAL_TIMEOUT_TICKS: u64 = 18; // ~300ms at 60Hz
 
     // 1. Asynchronous Network Receiver: Runs as fast as the client sends data
-    fn on_client_input(&mut self, input: RawInput) {
-        self.pending_inputs.push(input);
+    // Acts as the "API Gateway" routing layer
+    fn on_client_message(&mut self, msg: ClientMessage) {
+        match msg {
+            ClientMessage::Simulation(input) => {
+                // Buffer high-frequency physics inputs for the 60Hz tick
+                self.pending_inputs.push(input);
+            },
+            ClientMessage::Meta(request) => {
+                // Instantly forward to Meta Services, bypassing the Arbiter.
+                // SECURITY: The Edge Node forcibly injects the trusted character_id.
+                // The client cannot spoof who is sending the chat or inventory move.
+                self.meta_rpc_client.send_async(self.character_id, request);
+            }
+        }
+    }
+
+    // 1.b Asynchronous Meta Response Handler
+    fn on_meta_response_received(&mut self, response: MetaResponse) {
+        // Forward back to the physical client UI
+        self.send_to_client_reliable(response);
     }
 
     // 2. Local Simulation Loop: Runs strictly at 60Hz to maintain parity with the Mesh Arbiter
@@ -552,7 +821,10 @@ impl ProxyActor {
 
     fn on_downstream_payload_received(&mut self, payload: DownstreamPayload) {
         match payload {
-            DownstreamPayload::StateUpdate(mesh_state) => {
+            DownstreamPayload::StateUpdate { snapshot: mesh_state, data_epoch } => {
+                if data_epoch > self.current_data_epoch {
+                    self.current_data_epoch = data_epoch;
+                }
                 self.latest_mesh_tick = cmp::max(self.latest_mesh_tick, mesh_state.tick);
                 
                 for entity_update in mesh_state.entities {
@@ -577,11 +849,17 @@ impl ProxyActor {
             DownstreamPayload::ActionApplied { proposal_id } => {
                 self.pending_proposals.remove(&proposal_id);
             },
-            DownstreamPayload::TopologyUpdate { epoch, my_region, my_dilation, neighbors } => {
+            DownstreamPayload::TopologyUpdate { epoch, data_epoch, my_region, my_dilation, neighbors, redirect_arbiter_id } => {
                 self.current_topology_epoch = epoch;
+                if data_epoch > self.current_data_epoch {
+                    self.current_data_epoch = data_epoch;
+                }
                 self.my_region = my_region;
                 self.my_dilation = my_dilation;
                 self.neighbor_regions = neighbors;
+                if let Some(arbiter_id) = redirect_arbiter_id {
+                    self.authoritative_mesh_node = self.resolve_arbiter_address(arbiter_id);
+                }
             },
             DownstreamPayload::ActionFailed { proposal_id, reason } => {
                 // Instantly refund cooldowns/resources and rollback prediction
@@ -603,23 +881,25 @@ The Spatial Actor is a single-threaded, lock-free, 60Hz deterministic simulation
 ### 3.1 Interface
 ```rust
 // Defines how long the engine remembers events (60 ticks = 1.0 second).
-// This inextricably links the network discard window to the ledger's ring buffer size.
-// 
-// Latency Budget Justification:
-// During a worst-case Hitless Handoff, state serialization (~2 ticks), intra-DC network 
-// transfer (~3 ticks), fast-forward catch-up (~2 ticks), and Edge Node routing flips (~4 ticks) 
-// result in an expected maximum transient delay of ~11 ticks (180ms). 
-// Sizing the TTL to 60 ticks provides a robust ~4x safety factor against network jitter 
-// during high-density Blackhole events.
 const MAX_EVENT_AGE_TICKS: u64 = 60;
-const GHOST_ANOMALY_MARGIN: SimFixed = SimFixed::from_num(0.75); // meters in world scale
-const GHOST_DEGRADED_TTL_TICKS: u64 = 2 * KEYFRAME_INTERVAL;
-const GHOST_RENDER_TTL_TICKS: u64 = 3 * KEYFRAME_INTERVAL;
 
-const PROPOSAL_BUCKET_CAPACITY: u16 = 24;
-const PROPOSAL_BUCKET_REFILL_PER_TICK: u16 = 2; // ~120 tokens/sec at 60Hz
-const PROPOSAL_COST_MOVEMENT: u16 = 1;
-const PROPOSAL_COST_DISCRETE: u16 = 3;
+// Configuration structs replacing hardcoded magic numbers
+// (See Engine_Configuration_Registry.md for detailed definitions)
+struct BootConfig {
+    proposal_bucket_capacity: u16,
+    proposal_bucket_refill_per_tick: u16,
+    max_event_age_ticks: u64,
+}
+
+struct LiveConfig {
+    combat_radius: SimFixed,
+    visible_radius: SimFixed,
+    keyframe_interval_ticks: u64,
+    ghost_anomaly_margin: SimFixed,
+    ghost_degraded_ttl_ticks: u64,
+    ghost_render_ttl_ticks: u64,
+    dilation: DilationConfig,
+}
 
 enum GhostMovementClass {
     Normal,
@@ -845,7 +1125,19 @@ impl SpatialActor {
 
             // 3. Execute Scheduled Controller Commands
             self.pending_global_events.retain(|_, cmd| {
-                if let ControllerCommand::ExecuteGlobalEvent { epicenter, event_id, radius, execute_at_tick, caster_id, ability_id, data_epoch, context } = cmd {
+                if let ControllerCommand::ExecuteGlobalEvent {
+                    epicenter,
+                    event_id,
+                    geometry,
+                    target_filters,
+                    pulse_interval_ticks,
+                    duration_ticks,
+                    execute_at_tick,
+                    caster_id,
+                    ability_id,
+                    data_epoch,
+                    context,
+                } = cmd {
                     // Ideal execution is `==`. `>=` acts as an emergency fallback if the 
                     // reliable TCP packet was severely delayed due to a datacenter outage.
                     if self.current_tick >= *execute_at_tick {
@@ -857,8 +1149,29 @@ impl SpatialActor {
                                 return true;
                             }
                         }
-                        self.resolve_aoe_effect(*epicenter, *radius, *event_id, *caster_id, *ability_id, *data_epoch, context.clone());
-                        return false; // Remove from queue after execution
+                        
+                        self.resolve_global_event_effect(
+                            *epicenter,
+                            geometry.clone(),
+                            target_filters.clone(),
+                            *pulse_interval_ticks,
+                            *duration_ticks,
+                            *event_id,
+                            *caster_id,
+                            *ability_id,
+                            *data_epoch,
+                            context.clone(),
+                        );
+                        
+                        // Pulse Lifecycle Management
+                        if let (Some(interval), Some(duration)) = (pulse_interval_ticks, duration_ticks) {
+                            if *duration > *interval {
+                                *duration -= *interval;
+                                *execute_at_tick += *interval as u64;
+                                return true; // Keep in queue for the next pulse
+                            }
+                        }
+                        return false; // Final execution, remove from queue
                     }
                 }
                 true // Keep in queue for the future
@@ -888,7 +1201,35 @@ impl SpatialActor {
                     continue;
                 }
 
-                // --- Epoch Handshake Validation ---
+                // --- Data Epoch Handshake Validation ---
+                if proposal.data_epoch < self.current_data_epoch {
+                    self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                        proposal_id: proposal.proposal_id,
+                        reason: "Data Epoch Mismatch".to_string()
+                    });
+                    continue;
+                } else if proposal.data_epoch > self.current_data_epoch {
+                    if !self.try_activate_data_epoch(proposal.data_epoch) {
+                        if self.current_tick.saturating_sub(local_arrival_tick) >= MAX_EVENT_AGE_TICKS {
+                            self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                                proposal_id: proposal.proposal_id,
+                                reason: "Data Epoch Sync Timeout".to_string()
+                            });
+                        } else {
+                            if next_tick_stale_buffer.is_full() {
+                                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                                    proposal_id: proposal.proposal_id,
+                                    reason: "Arbiter Queue Saturated".to_string()
+                                });
+                            } else {
+                                next_tick_stale_buffer.push_back((proposal, local_arrival_tick));
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // --- Topology Epoch Handshake Validation ---
                 if proposal.topology_epoch < self.topology_epoch {
                     self.forward_to_correct_arbiter(proposal); // Proxy is stale
                     continue;
@@ -935,6 +1276,18 @@ impl SpatialActor {
 
             // Process latest movement per actor after coalescing (no per-proposal terminal acks).
             for (_, (proposal, local_arrival_tick)) in latest_movement_by_actor {
+                if proposal.data_epoch > self.current_data_epoch {
+                    if !self.try_activate_data_epoch(proposal.data_epoch)
+                        && self.current_tick.saturating_sub(local_arrival_tick) < MAX_EVENT_AGE_TICKS
+                    {
+                        let _ = next_tick_stale_buffer.try_push_back((proposal, local_arrival_tick));
+                        continue;
+                    }
+                } else if proposal.data_epoch < self.current_data_epoch {
+                    // Movement has no terminal ack; stale movement is dropped/coalesced.
+                    continue;
+                }
+
                 if proposal.topology_epoch < self.topology_epoch {
                     self.forward_to_correct_arbiter(proposal);
                     continue;
@@ -1079,16 +1432,25 @@ impl SpatialActor {
             ActionPayload::TargetedAbility { target_id, ability_id } => {
                 let actor_id = source_actor_id.expect("TargetedAbility requires a source actor");
                 
-                let target = self.entities.get(&target_id);
-                if target.is_none() || !self.has_jurisdiction_over(target.unwrap().position) {
+                let local_target_pos = self.entities.get(&target_id).and_then(|target| {
+                    if self.has_jurisdiction_over(target.position) { Some(target.position) } else { None }
+                });
+                let ghost_target_owner = self.ghost_entities.get(&target_id).map(|ghost| ghost.authoritative_arbiter_id);
+                let ghost_target_pos = self.ghost_entities.get(&target_id).map(|ghost| ghost.position);
+
+                let target_pos = if let Some(pos) = local_target_pos {
+                    pos
+                } else if let Some(pos) = ghost_target_pos {
+                    pos
+                } else {
                     if let Some(prop_id) = original_proposal_id {
                         self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
                             proposal_id: prop_id,
                             reason: "Invalid Target".to_string()
                         });
                     }
-                    return; 
-                }
+                    return;
+                };
 
                 // Safe Actor Lookup: The attacker might be a Real entity or a Ghost (if relayed)
                 let actor_pos = match self.get_entity_or_ghost_position(actor_id) {
@@ -1128,8 +1490,11 @@ impl SpatialActor {
                         ability_id, 
                         data_epoch,
                         context.clone(),
-                        target.unwrap().position,
-                        ability.geometry.get_max_extent()
+                        target_pos,
+                        ability.geometry.clone(),
+                        ability.target_filters.clone(),
+                        ability.pulse_interval_ticks,
+                        ability.duration_ticks,
                     );
                     if let Some(prop_id) = original_proposal_id {
                         self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
@@ -1137,12 +1502,27 @@ impl SpatialActor {
                     return;
                 }
 
-                let distance = actor_pos.distance_to(target.unwrap().position);
+                let distance = actor_pos.distance_to(target_pos);
                 let prediction_tolerance = calculate_prediction_drift(origin_tick, self.current_tick);
                 let effective_range = ability.max_range + prediction_tolerance;
 
                 if distance <= effective_range {
-                    self.apply_combat_math(target_id, Some(actor_id), context, distance);
+                    if local_target_pos.is_some() {
+                        self.apply_combat_math(target_id, Some(actor_id), context.clone(), distance);
+                    } else if let Some(owner_arbiter_id) = ghost_target_owner {
+                        // Border-targeted cast: actor-owner pre-rolls context, target-owner applies mutation.
+                        self.send_to_arbiter(owner_arbiter_id, MeshInternalEvent {
+                            event_id: generate_uuid(),
+                            source_arbiter_id: self.arbiter_id,
+                            actor_id: Some(actor_id),
+                            origin_tick,
+                            data_epoch,
+                            payload: ActionPayload::InternalPreparedHit {
+                                target_id,
+                                context: context.clone(),
+                            },
+                        });
+                    }
                     if let Some(prop_id) = original_proposal_id {
                         self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
                     }
@@ -1157,7 +1537,7 @@ impl SpatialActor {
                 // Internal-only path: context is already authoritative and must not be recomputed.
                 let target_pos = match self.entities.get(&target_id) {
                     Some(target) if self.has_jurisdiction_over(target.position) => target.position,
-                    _ => return, // Internal relay may race ownership; drop safely.
+                    _ => return, // Internal relay may race ownership during boundary transitions; intentional safe drop.
                 };
 
                 let distance = match source_actor_id.and_then(|id| self.get_entity_or_ghost_position(id)) {
@@ -1205,7 +1585,10 @@ impl SpatialActor {
                         data_epoch,
                         context.clone(),
                         destination, // Ground Coordinate
-                        ability.geometry.get_max_extent()
+                        ability.geometry.clone(),
+                        ability.target_filters.clone(),
+                        ability.pulse_interval_ticks,
+                        ability.duration_ticks,
                     );
                     if let Some(prop_id) = original_proposal_id {
                         self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
@@ -1304,9 +1687,94 @@ impl SpatialActor {
                     }
                 }
             },
-            _ => {
-                // Omitted branches must follow the same terminal contract for non-movement proposals:
-                // exactly one ActionApplied OR ActionFailed for each original_proposal_id.
+            ActionPayload::SpawnProjectile { direction, target_id, spell_id } => {
+                let actor_id = source_actor_id.expect("SpawnProjectile requires a source actor");
+                let actor_pos = match self.get_entity_or_ghost_position(actor_id) {
+                    Some(pos) => pos,
+                    None => {
+                        if let Some(prop_id) = original_proposal_id {
+                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
+                                proposal_id: prop_id,
+                                reason: "Unknown Attacker".to_string()
+                            });
+                        }
+                        return;
+                    }
+                };
+
+                let ability = get_ability_data(spell_id, data_epoch);
+                // Validate cooldowns, resources, and CC states here (omitted for brevity)
+                let context = self.generate_combat_context(actor_id, &ability);
+
+                let projectile = ProjectileActor {
+                    projectile_id: original_proposal_id.unwrap_or_else(|| generate_uuid()),
+                    owner_id: actor_id,
+                    target_id,
+                    position: actor_pos,
+                    // Fixed-point vector math
+                    velocity: direction.normalize() * ability.projectile_speed, 
+                    remaining_lifetime_ticks: ability.duration_ticks.unwrap_or(120),
+                    fuse_remaining_ticks: ability.fuse_timer_ticks.unwrap_or(0),
+                    pierce_remaining: ability.pierce_count.unwrap_or(0),
+                    data_epoch,
+                    damage_origin: DamageOrigin::DirectCast,
+                    proc_depth: 0,
+                    authoritative_arbiter_id: self.arbiter_id,
+                    handoff_topology_epoch: self.topology_epoch,
+                    handoff_cutover_tick: self.current_tick,
+                    handoff_seq: 0,
+                    handoff_state: ProjectileHandoffState::Owned,
+                    impact_sequence: 0,
+                    spell_data: ability,
+                };
+                
+                self.projectiles.insert(projectile.projectile_id, projectile);
+
+                if let Some(prop_id) = original_proposal_id {
+                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
+                }
+            },
+            ActionPayload::Movement { position, velocity, rotation } => {
+                let actor_id = source_actor_id.expect("Movement requires a source actor");
+                if let Some(entity) = self.entities.get_mut(&actor_id) {
+                    if !self.has_jurisdiction_over(entity.position) { return; }
+                    
+                    // Anti-Cheat: Validate displacement against max theoretical speed
+                    let dt = self.current_tick.saturating_sub(entity.last_movement_tick);
+                    let max_displacement = (entity.stats.move_speed * SimFixed::from_num(dt)) + GHOST_ANOMALY_MARGIN;
+                    
+                    if entity.position.distance_to(position) <= max_displacement {
+                        // Validate against static geometry (Navmesh)
+                        if !self.static_grid.is_colliding(position) {
+                            entity.position = position;
+                            entity.velocity = velocity;
+                            entity.rotation = rotation;
+                            entity.last_movement_tick = self.current_tick;
+                            self.local_grid.upsert(actor_id, position);
+                        } else {
+                            // Hit a wall, rubber-band back to last valid
+                            self.trigger_client_rollback(actor_id);
+                        }
+                    } else {
+                        // Speed hack detected, rubber-band back
+                        self.trigger_client_rollback(actor_id);
+                    }
+                }
+            },
+            ActionPayload::UseConsumable { item_id } => {
+                let actor_id = source_actor_id.unwrap();
+                // 1. Verify inventory via asynchronous Meta Service check (or pre-synced local SoftState)
+                // 2. Apply soft state changes (e.g., add HP, start potion cooldown)
+                if let Some(prop_id) = original_proposal_id {
+                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
+                }
+            },
+            ActionPayload::Interact { target_entity } => {
+                let actor_id = source_actor_id.unwrap();
+                // Logic: distance check, type check (NPC, Loot, Resource), trigger UI/Quest event via Meta Services
+                if let Some(prop_id) = original_proposal_id {
+                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
+                }
             }
         }
     }
@@ -1388,9 +1856,9 @@ impl SpatialActor {
                         context: CombatContext { 
                             base_damage: 15, 
                             damage_type: 99, // TRUE DAMAGE
-                            knockback_force: 0, 
-                            armor_penetration_pct: 0.0,
-                            armor_penetration_flat: 0,
+                            knockback_force: SimFixed::from_num(0), 
+                            armor_penetration_pct: SimFixed::from_num(0),
+                            armor_penetration_flat: SimFixed::from_num(0),
                             is_critical_strike: false,
                             status_effect_id: None,
                             damage_origin: DamageOrigin::ReactiveProc,
@@ -1421,7 +1889,69 @@ impl SpatialActor {
             ControllerCommand::FinalizeMerge { merge_id, winner_arbiter_id, loser_arbiter_id, new_epoch } => {
                 self.on_finalize_merge_command(merge_id, winner_arbiter_id, loser_arbiter_id, new_epoch);
             }
-            _ => { /* ExecuteGlobalEvent handled in scheduler block */ }
+            ControllerCommand::SyncHeartbeat { controller_shard_tick } => {
+                // The Metronome Corrector
+                let diff = (controller_shard_tick as i64) - (self.current_tick as i64);
+                // Adjust our frame sleep target (e.g., +/- 100 microseconds per frame) to smoothly catch up 
+                // or slow down without causing a massive temporal snap that would break ghost extrapolation.
+                self.frame_pacing_offset_micros = (diff * 50).clamp(-1000, 1000); 
+            }
+            ControllerCommand::PrepareDataEpoch { new_epoch, asset_uri, checksum } => {
+                // Offload the I/O to a background thread so the 60Hz loop never stalls.
+                // The background thread will download, parse, and push the new dictionary 
+                // into a lock-free queue that the Arbiter reads from at the top of tick().
+                self.asset_loader.async_fetch_and_parse(new_epoch, asset_uri, checksum);
+            }
+            _ => { /* ExecuteGlobalEvent and Splits handled in scheduler block */ }
+        }
+    }
+
+    fn simulate_physics_step(&mut self) {
+        // 1. Resolve discrete physics steps (Movement integration, knockback decay)
+        self.apply_kinematics();
+        
+        // 2. Process all active Status Effects (DoTs, HoTs, CC)
+        self.tick_status_effects();
+    }
+
+    fn tick_status_effects(&mut self) {
+        for (entity_id, entity) in self.entities.iter_mut() {
+            let mut expired = Vec::new();
+            
+            for (i, effect) in entity.active_status_effects.iter_mut().enumerate() {
+                if self.current_tick >= effect.next_pulse_tick {
+                    // Trigger the damage/healing payload
+                    if let Some(context) = &effect.pulse_context {
+                        // We push to the internal inbox to bypass the borrow checker
+                        // and ensure the mitigation math runs cleanly in sequence.
+                        self.internal_inbox.push_back(MeshInternalEvent {
+                            event_id: generate_uuid(),
+                            source_arbiter_id: self.arbiter_id,
+                            actor_id: Some(effect.caster_id),
+                            origin_tick: self.current_tick,
+                            data_epoch: effect.data_epoch,
+                            payload: ActionPayload::InternalPreparedHit {
+                                target_id: *entity_id,
+                                context: context.clone(),
+                            }
+                        });
+                    }
+                    
+                    // Reset the pulse timer based on the SpellData (e.g., 60 ticks for a 1-second DoT)
+                    let spell_data = get_ability_data(effect.effect_id, effect.data_epoch);
+                    effect.next_pulse_tick = self.current_tick + spell_data.pulse_interval_ticks.unwrap_or(60) as u64;
+                }
+                
+                effect.remaining_ticks = effect.remaining_ticks.saturating_sub(1);
+                if effect.remaining_ticks == 0 {
+                    expired.push(i);
+                }
+            }
+            
+            // Remove expired buffs (iterate in reverse to avoid index shifting)
+            for i in expired.into_iter().rev() {
+                entity.active_status_effects.remove(i);
+            }
         }
     }
 
@@ -1435,20 +1965,20 @@ impl SpatialActor {
     }
 
     // --- Interest Management (Downstream Bandwidth Control) ---
-    fn broadcast_with_interest_management(&mut self) {
+    fn broadcast_with_interest_management(&mut self, live_config: &LiveConfig) {
         for proxy_id in self.connected_proxies() {
             let proxy_pos = self.get_proxy_position(proxy_id);
             let mut proxy_payload = Vec::new();
             let mut seen = HashSet::new();
 
-            let close_entities = self.local_grid.query_radius(proxy_pos, COMBAT_RADIUS);
+            let close_entities = self.local_grid.query_radius(proxy_pos, live_config.combat_radius);
             for entity in close_entities {
                 seen.insert(entity.id);
                 proxy_payload.push(entity.get_full_update()); // is_authoritative_owner = true
             }
 
             // Include border-neighbor ghosts for rendering/raycast consistency at Arbiter seams.
-            let close_ghost_ids = self.ghost_grid.query_radius(proxy_pos, COMBAT_RADIUS);
+            let close_ghost_ids = self.ghost_grid.query_radius(proxy_pos, live_config.combat_radius);
             for ghost_id in close_ghost_ids {
                 if seen.contains(&ghost_id) { continue; } // Prefer local owner update if both exist.
                 if let Some(ghost) = self.ghost_entities.get(&ghost_id) {
@@ -1457,15 +1987,15 @@ impl SpatialActor {
                 }
             }
 
-            if self.current_tick % KEYFRAME_INTERVAL == 0 {
-                let far_entities = self.local_grid.query_donut(proxy_pos, COMBAT_RADIUS, VISIBLE_RADIUS);
+            if self.current_tick % live_config.keyframe_interval_ticks == 0 {
+                let far_entities = self.local_grid.query_donut(proxy_pos, live_config.combat_radius, live_config.visible_radius);
                 for entity in far_entities {
                     if seen.insert(entity.id) {
                         proxy_payload.push(entity.get_keyframe_update());
                     }
                 }
 
-                let far_ghost_ids = self.ghost_grid.query_donut(proxy_pos, COMBAT_RADIUS, VISIBLE_RADIUS);
+                let far_ghost_ids = self.ghost_grid.query_donut(proxy_pos, live_config.combat_radius, live_config.visible_radius);
                 for ghost_id in far_ghost_ids {
                     if !seen.insert(ghost_id) { continue; }
                     if let Some(ghost) = self.ghost_entities.get(&ghost_id) {
@@ -1521,7 +2051,8 @@ struct ProjectileActor {
 
 impl ProjectileActor {
     // Projectiles run their own tick within the Host Arbiter's simulation loop.
-    fn tick(&mut self, local_hitboxes: &Vec<Hitbox>) -> Option<MeshInternalEvent> {
+    // The Arbiter passes in the current_target_pos (resolved from Real entities or dead-reckoned Ghosts).
+    fn tick(&mut self, local_hitboxes: &Vec<Hitbox>, current_target_pos: Option<Vec2F>) -> Option<MeshInternalEvent> {
         // Split/Handoff safety: shadow replicas must never simulate or emit impacts.
         if self.authoritative_arbiter_id != current_arbiter_id() { return None; }
 
@@ -1560,6 +2091,14 @@ impl ProjectileActor {
                 commit_tick,
                 snapshot: self.to_snapshot(),
             });
+        }
+
+        // --- Homing "Dumb NPC" Steering Logic ---
+        if let Some(pos) = current_target_pos {
+            let desired_dir = (pos - self.position).normalize();
+            // In a full implementation, apply a max `turn_rate` here to prevent instant 180-degree snaps.
+            // If target is lost (current_target_pos is None), the projectile maintains its current velocity.
+            self.velocity = desired_dir * self.spell_data.projectile_speed;
         }
 
         self.position.x += self.velocity.x;
@@ -1730,6 +2269,10 @@ fn on_projectile_handoff_rudp(&mut self, auth: MeshAuthHeader, msg: ProjectileHa
 ```
 
 #### 3.3.3 Sibling Merge Protocol (Prepare -> Stream -> Controller Commit -> Drain)
+Commit-phase routing contract:
+- At `CommitMerge`, the loser must emit a final downstream `TopologyUpdate` (`new_epoch`) with `redirect_arbiter_id = winner_arbiter_id` before entering `ForwardingOnly`.
+- During the forwarding drain window, the loser must still serve or proxy `RequestRoutingDelta` so stale Edge Nodes can converge to winner routing.
+
 ```rust
 fn on_begin_merge_command(
     &mut self,
@@ -1813,6 +2356,12 @@ fn on_commit_merge_command(
         self.promote_merged_region_ownership();
         self.mark_merge_committed(merge_id);
     } else if self.arbiter_id == loser_arbiter_id {
+        self.topology_epoch = new_epoch;
+        self.broadcast_topology_redirect_to_connected_edges(
+            new_epoch,
+            winner_arbiter_id,
+            self.current_data_epoch,
+        );
         if let Some(state) = self.merge_state.as_mut() {
             state.phase = MergePhase::ForwardingOnly;
             state.forwarding_until_tick = self.current_tick + MAX_EVENT_AGE_TICKS;
@@ -1919,6 +2468,7 @@ fn tick_merge_forwarding(&mut self) {
     if let Some(state) = &self.merge_state {
         if matches!(state.role, MergeRole::Loser) && matches!(state.phase, MergePhase::ForwardingOnly) {
             self.forward_all_external_and_internal_to(state.peer_arbiter_id);
+            self.service_or_proxy_routing_delta_requests(state.peer_arbiter_id);
             if self.current_tick >= state.forwarding_until_tick && self.external_inbox.is_empty() && self.internal_inbox.is_empty() {
                 self.send_merge_handoff_rudp(MergeHandoffMessage::DrainComplete {
                     merge_id: state.merge_id,
@@ -1944,6 +2494,7 @@ The Datastore is an asynchronous worker pool that persists finalized "Hard State
 enum HardEvent {
     // Killer is an Option to support PvE / Environmental deaths
     PlayerDied { killer: Option<EntityID>, victim: EntityID },
+    PlayerResurrected { healer: EntityID, victim: EntityID }, // Cancels the Meta respawn timer
     ItemDropped { entity_id: EntityID, item_id: u16, location: Vec2F },
     ObjectiveCaptured { team: TeamID, zone: RegionID },
 }

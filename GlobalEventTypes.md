@@ -10,9 +10,11 @@ A Global Event is triggered anytime an ability or environmental effect has a rad
 
 As a designer, you do not need to flag an ability as "Global." The engine handles it automatically based on the geometry radius.
 
+`SpawnZone` content is treated as a schema alias that compiles to `SpawnProjectile` with zero velocity plus pulse/duration mechanics.
+
 1. **The Cast:** A player, boss, or script casts a spell.
-2. **The Escalation:** The Host Arbiter notices the `radius` is massive. It stops local processing. Using its authoritative state, the Arbiter performs the **Offensive Pre-Roll** (applying the caster's Crit and Multipliers to the spell's base data) to finalize the `CombatContext`. It then sends the spell and this finalized context to the Mesh Controller.
-3. **The Synchronization:** The Mesh Controller calculates exactly which server nodes (Arbiters) are in the blast zone. It sends them a command: *"Execute this exact spell, from this specific caster, at exactly Shard Tick 50,000."*
+2. **The Escalation:** The Host Arbiter notices the spell geometry max-extent exceeds local resolution bounds. It stops local processing. Using its authoritative state, the Arbiter performs the **Offensive Pre-Roll** (applying the caster's Crit and Multipliers to the spell's base data) to finalize the `CombatContext`. It then sends the spell and this finalized context to the Mesh Controller.
+3. **The Synchronization:** The Mesh Controller calculates exactly which server nodes (Arbiters) are in the blast zone. It sends them a command: *"Execute this exact spell, from this specific caster, at exactly Shard Tick 50,000."* The command carries deterministic execution fields (`geometry`, optional `target_filters`, optional pulse/duration metadata), not just a radius scalar.
 4. **The Execution:** All affected servers independently apply the damage/status effects to their players at the exact same millisecond.
 
 ---
@@ -116,7 +118,7 @@ To avoid flooding the Mesh Controller with requests every second, the Controller
 ```json
 {
   "spell_id": "ARENA_POISON_GAS",
-  "archetype": "SpawnZone", // specialized archetype for pulsing fields
+  "archetype": "SpawnZone", // content alias -> SpawnProjectile + pulse/duration mechanics
   "targeting": { "target": "COORDINATE" },
   "mechanics": {
     "geometry": { "type": "Circle", "radius": 800.0 },
@@ -158,7 +160,10 @@ ControllerCommand::ExecuteGlobalEvent {
         proc_depth: 0
     },
     epicenter: Vec2F { x: SimFixed::from_num(1000), y: SimFixed::from_num(1000) },
-    radius: SimFixed::from_num(500),
+    geometry: CollisionGeometry::Circle { radius: SimFixed::from_num(500) },
+    target_filters: None,             // Optional: Some(vec![TAG_STRUCTURE]) for structure-only events
+    pulse_interval_ticks: None,       // Optional: Some(60) for zone pulses
+    duration_ticks: None,             // Optional: Some(3600) for long-lived zones
     execute_at_tick: 50000              // The exact Shard Tick for detonation
 }
 ```

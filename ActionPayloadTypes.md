@@ -161,7 +161,10 @@ A Mage casts a magic missile that physically travels toward a specific enemy, fo
         spell_id: SPELL_MAGIC_MISSILE 
     }
     ```
-*   *(Note: The ProjectileActor queries the Host Arbiter for the target's current position every tick and mathematically updates its internal velocity vector to steer. Upon impact, it generates a standard single-target `ImpactEvent`.)*
+*   **The "Dumb NPC" Steering:** The `ProjectileActor` functions as a microscopic AI. Every tick, it asks its Host Arbiter for the target's current position. 
+    *   *If the target is a Real Entity:* It steers directly toward them.
+    *   *If the target is a Ghost (on another server):* The Projectile seamlessly steers toward the Ghost's dead-reckoned, locally extrapolated coordinates. No cross-server network traffic is needed for the tracking math.
+    *   *If the target is Lost (dies or teleports away):* The Projectile stops steering and defaults to a dumb-fire trajectory along its last known vector.
 
 ---
 
@@ -282,6 +285,7 @@ Designers create abilities by defining standard JSON, YAML, or proprietary Edito
 
 ### The Designer's Process:
 1.  **Define the Base Archetype:** The designer selects whether the ability is `TargetedAbility` (Instant-Targeted), `GroundTargetedAbility` (Ground AoE), or `SpawnProjectile` (Travel time).
+    -   `SpawnZone` is supported as a **content-layer alias** that compiles to `SpawnProjectile` with zero velocity plus pulse/duration mechanics.
 2.  **Define the Physics:** (Range, Velocity, Bounding Box Radius).
 3.  **Define the `CombatContext`:** (Base Damage, Damage Type, Knockback Weight).
 4.  **Define the FX / Logic Hooks:** Attach particle effect IDs for the client, and Status Effect IDs (like `TRIGGER_PLAGUE_BURST`) for the server.
@@ -362,6 +366,27 @@ A Shaman clicks a location on the ground. Everyone in a 10-meter radius is insta
     "base_damage": 120,
     "damage_type": "CRUSHING",
     "status_effect_id": "EFFECT_SLOW_50"
+  }
+}
+```
+
+#### 6. "Time Bubble" (Gameplay Kinematic Dilation)
+A Time Wizard drops a stationary zone that heavily dilates local time for enemies inside it.
+*Note: Because this modifies the `time_scale` in the `CoreStats`, it automatically slows down the enemy's physical movement speed AND their ability cooldown recovery rates, perfectly mimicking the server's infrastructure-level "Temporal Swamp" but strictly scoped to the victims inside the bubble.*
+```json
+{
+  "spell_id": "WIZARD_TIME_BUBBLE",
+  "archetype": "SpawnZone",
+  "targeting": { "max_range": 20.0 },
+  "mechanics": {
+    "geometry": { "type": "Circle", "radius": 8.0 },
+    "duration_ticks": 600, // Lasts 10 seconds
+    "pulse_interval_ticks": 10 // Rapid checks to apply/refresh the aura
+  },
+  "combat_context": {
+    "base_damage": 0,
+    "damage_type": "TRUE",
+    "status_effect_id": "EFFECT_CHRONO_SLOW" // This buff overrides target time_scale to 0.3
   }
 }
 ```

@@ -130,6 +130,8 @@ To solve cross-boundary combat without creating a massive centralized bottleneck
 -   **Intent vs Authority Split:** Edge-originated payloads remain intent-only (e.g., `TargetedAbility { target_id, ability_id }`). Authoritative precomputed combat envelopes (e.g., Thorns/proc reflections) are internal-only `MeshInternalEvent` payloads and are never accepted directly from Edge Nodes.
 -   **The Overlap Buffer:** Every Spatial Arbiter maintains an internal geographic "Buffer Zone" along its borders (sized to the maximum range of the game's longest spell/projectile). 
 -   **Internal Relaying (TTL=1):** If an Arbiter receives an original `ActionProposal` from a Proxy Actor for an entity standing inside this Buffer Zone, the Arbiter instantly relays a copy to the relevant neighboring Arbiters. To prevent broadcast storms, the Arbiter wraps the payload in a `MeshInternalEvent` envelope. An Arbiter that receives a `MeshInternalEvent` will **never** forward it again, enforcing a strict 1-hop limit based purely on the envelope type.
+-   **Terminal Authority Rule:** For any `proposal_id`, only the Arbiter owning the proposing `actor_id` may emit terminal `ActionApplied`/`ActionFailed` downstream. Relayed peers never issue terminal outcomes.
+-   **Border Target-Locked Rule:** For cross-boundary target-locked hits, the actor-owner Arbiter pre-rolls offensive context and relays an internal authoritative hit envelope to the target-owner Arbiter. The target-owner performs mitigation and state mutation. This prevents fail-vs-hit split-brain outcomes.
 -   **Lock-Free Resolution:** All receiving Arbiters simulate the relayed action simultaneously against their local entities and Ghosts. The deterministic depth/ID tie-breaker ensures only the rightful owner mutates the state.
 
 ------------------------------------------------------------------------
@@ -191,7 +193,7 @@ All contested interactions follow an immediate, forward-moving validation model 
 
 3.  **Mesh Emits Outcome**
 
-    -   ActionApplied (ephemeral terminal ack for accepted non-movement proposals)
+    -   ActionApplied (ephemeral terminal ack for accepted non-movement proposals; in cross-boundary target-locked races this acknowledges accepted/forwarded intent, not guaranteed remote damage commit)
     -   ActionFailed (ephemeral terminal reject/refund for invalid, stale, or saturated proposals)
     -   PlayerDiedCommitted (durable, if threshold crossed)
 
@@ -216,6 +218,7 @@ Algorithm:
 -   The Arbiter evaluates the action against the **current authoritative tick**.
 -   **Range Check:** Is the distance between the actor and the `target_id` less than or equal to the ability's `Max_Range`?
 -   **Prediction Tolerance Margin:** Because the Edge Node (Proxy) is a Trusted Server providing immediate visual prediction to the client, it generates the `origin_tick` when it receives the raw input. The Arbiter expands the `Max_Range` slightly to account *only* for the internal datacenter latency (Edge-to-Arbiter) and microscopic prediction drift. 
+-   **Cross-Border Ownership Rule:** If the target is represented locally as a Ghost, the actor-owner Arbiter must not finalize the target mutation locally. It relays a pre-rolled authoritative hit payload to the target-owner Arbiter for final mitigation/state mutation.
 -   **Anti-Cheat Posture:** Because this margin does not compensate for the player's public internet ping, it is immune to "Lag Switching" or "Long-Arm" exploits. A player intentionally delaying their packets will simply cause the Edge Node to generate the proposal late, resulting in a natural miss.
 
 ------------------------------------------------------------------------
@@ -249,7 +252,7 @@ For abilities whose Area of Effect is larger than the standard Overlap Buffer (e
 
 Instead, these events utilize the **Global Event Escalation Protocol**:
 -   **Escalation:** The Host Arbiter recognizes the ability radius exceeds its local buffer and asynchronously forwards the `ActionProposal` (including the launch `origin_tick` and effect delay) to the **Mesh Controller**.
--   **Fan-Out & Scheduling:** The Mesh Controller calculates exactly which Arbiters intersect with the event's massive radius. It then schedules the explosion by issuing a top-down command: *"Execute Event X at exactly Future Shard Tick Y."* Crucially, this command includes the full combat identity (Caster ID, Spell ID, **Data Epoch**, and Damage Context) to ensure the Arbiters can accurately apply localized damage and attribute kill credit upon detonation.
+-   **Fan-Out & Scheduling:** The Mesh Controller calculates exactly which Arbiters intersect with the event's massive radius. It then schedules the explosion by issuing a top-down command: *"Execute Event X at exactly Future Shard Tick Y."* Crucially, this command includes the full combat identity (Caster ID, Spell ID, **Data Epoch**, Damage Context, deterministic geometry, and optional target filters/pulse metadata) to ensure the Arbiters can accurately apply localized damage and attribute kill credit upon detonation.
 -   **Pragmatic Exception:** While the Mesh Controller is primarily a Control Plane component, it acts as a high-level router for these infrequent, high-radius events to prevent P2P network saturation. In practice, these events represent <0.1% of combat traffic.
 -   **Lock-Free Synchronized Execution:** Because all Arbiters share a synchronized global Shard Tick (see Section 7.1), the receiving Arbiters hold the command in a queue and independently process the event against their local entities the exact millisecond their local loop reaches `Shard Tick Y`. (Note: In the event of a severe datacenter outage that delays the reliable TCP command past `Tick Y`, the engine uses `>=` fallback logic to detonate the event immediately upon arrival, prioritizing event completion over perfect cross-server sync during disasters).
 -   **Epoch Pinning Rule:** Before detonation, each Arbiter validates that the command's `data_epoch` matches its active SpellData dictionary. If mismatched, it must atomically activate that epoch (or delay execution until it can) rather than resolving under a newer/older balance version.
@@ -292,12 +295,13 @@ To avoid latency spikes ("micro-stutters") during cell splits, the system uses a
 
 When a cell (e.g., Microcell A) needs to split into children (B and C):
 
-1.  **Shadow Boot:** Microcells B and C are provisioned in "Shadow Mode" without accepting external traffic.
+1.  **Shadow Boot:** The Mesh Controller provisions Microcells B and C from the Warm Pool in "Shadow Mode" and issues `BeginSplit { split_id, region_b, region_c, new_epoch }` to Arbiter A.
 2.  **Surrogate Operation:** Microcell A continues to operate normally at 60Hz, maintaining absolute authority and acting as a surrogate for the split region.
-3.  **State Streaming:** Microcell A streams a snapshot of its state to B and C, followed by a continuous Write-Ahead Log (WAL) of its 60Hz tick changes. To prevent "amnesia bugs" where a newly booted Arbiter double-applies a delayed network packet, **this serialized state transfer must strictly include the Arbiter's Event Idempotency Ledger and all in-flight Projectile Actors**. B and C fast-forward until their internal state exactly matches A.
-4.  **Projectile Ownership Assignment at Cutover Tick X:** Before routing flips, A computes each in-flight projectile's authoritative child owner at `Tick X` using the same spatial jurisdiction tie-breaker used for entities (depth, then lowest Arbiter_ID). This decision is serialized with the handoff payload (`projectile_id`, `owner_child_id`, `cutover_tick`, `topology_epoch`).
-5.  **Atomic Routing Flip:** Once synchronized (0 frames delta), Microcell A broadcasts a `RoutingUpdate` to the Edge Nodes: "Starting at Tick X, send West traffic to B, East traffic to C."
-6.  **Forwarding & Drain:** Edge Nodes update their routes. Any late packets sent to Microcell A are immediately forwarded to the correct new Arbiter. Once drained, A terminates or converts to a Parent Node.
+3.  **State Streaming:** Microcell A filters its authoritative state based on the new boundaries and streams `SnapshotChunks` plus a continuous Write-Ahead Log (WAL) of its 60Hz tick changes to B and C. To prevent "amnesia bugs," this serialized state transfer must strictly include the Arbiter's Event Idempotency Ledger and all in-flight Projectile Actors.
+4.  **Catch-up:** B and C fast-forward until their internal state exactly matches A. Upon synchronization, they each send `CatchupAck` to A, which A forwards to the Mesh Controller.
+5.  **Controller-Driven Commit at Tick X:** Once B and C are ready, the Mesh Controller issues `CommitSplit { split_id, cutover_tick, new_epoch }`. 
+6.  **Atomic Routing Flip & Redirect:** At `cutover_tick`, Microcell A broadcasts a final `TopologyUpdate` to its Edge Nodes: "Starting at Tick X, send traffic for Region B to B, and Region C to C." Microcell A then flips to forwarding-only mode. B and C simultaneously promote themselves to authoritative status for their respective regions.
+7.  **Drain & Finalize:** For `MAX_EVENT_AGE_TICKS`, A forwards late packets to the new owners. After the drain window, the controller sends `FinalizeSplit` and A returns to the Warm Pool.
 
 ### Requirements & Implementation Constraints for Hitless Handoff:
 
@@ -325,18 +329,42 @@ When sibling Microcells B and C must merge:
     -   pending schedulers/queued deterministic commands
     -   the full Event Idempotency Ledger ring with bucket tick metadata
 4.  **Catch-Up Barrier:** The winner replays WAL deterministically until it is in-sync and sends `CatchupAck`. The loser forwards this readiness signal to the Mesh Controller.
-5.  **Controller-Driven Commit at Tick X:** The Mesh Controller issues `CommitMerge` (reliable TCP, retryable/idempotent). On commit, the winner atomically imports staged state, unions idempotency ledgers, and becomes sole simulator for the merged region; the loser flips immediately to forwarding-only mode (no simulation side effects).
-6.  **Drain & Finalize:** For `MAX_EVENT_AGE_TICKS`, the loser forwards late external/internal packets to the winner. After drain completion, controller sends `FinalizeMerge` and the loser process is terminated or returned to pool.
+5.  **Controller-Driven Commit at Tick X:** The Mesh Controller issues `CommitMerge` (reliable TCP, retryable/idempotent). On commit, the winner atomically imports staged state, unions idempotency ledgers, and becomes sole simulator for the merged region. Before the loser enters forwarding-only mode, it must broadcast a final downstream `TopologyUpdate` stamped with `new_epoch` that explicitly redirects its connected Edge Nodes to the winner Arbiter.
+6.  **Drain & Finalize:** For `MAX_EVENT_AGE_TICKS`, the loser forwards late external/internal packets to the winner and continues serving (or proxying) `RequestRoutingDelta` for lagging Edge Nodes so all sessions can converge routing without disconnect. After drain completion, controller sends `FinalizeMerge` and the loser process is terminated or returned to pool.
 
 ### Merge-Specific Invariants
 - **Single-Simulator Invariant:** At any tick, exactly one Arbiter simulates any entity/projectile in the merged region.
-- **Ledger Union Rule:** The winner computes `merged_ledger[bucket] = union(winner[bucket], loser[bucket])` for all ring buckets before enabling ownership at `Tick X`.
+- **Ledger Re-Mapping Rule:** The winner does not attempt a naive array-index union of the idempotency ledgers, as the two servers may have slight modulo phase drift. Instead, the Winner iterates over the Loser's `LedgerBucketSnapshot`, reads the absolute `bucket_tick`, calculates its own local index (`bucket_tick % MAX_EVENT_AGE_TICKS`), and extends the records into its own ring buffer. This simple mapping guarantees 100% protection against double-damage without complex phase-alignment math.
 - **Identity Collision Policy:** `EntityID` must be globally unique. Any collision during import is a protocol fault and forces merge abort/quarantine. Projectile deduplication is keyed by `projectile_id` (UUID) and monotonic handoff metadata.
 - **Ghost Promotion Rule:** If an incoming real entity collides with a local ghost of the same `EntityID`, the winner atomically removes the ghost and promotes the real entity in the same frame (never both simultaneously present as active state).
 - **Epoch Safety:** Merge stream packets stamped with stale/new topology epochs follow the same surrogate-forwarding or short-buffer rules as proposal epoch handshake.
 - **Commit Reliability Rule:** `CommitMerge` is control-plane authoritative and must be retried until acknowledged by both winner and loser. Replays are safe due to `merge_id` idempotency guards.
+- **Edge Reroute Guarantee:** Merge commit is not complete from a networking perspective until loser-connected Edge Nodes receive a deterministic reroute signal (`TopologyUpdate` with redirect) and have a drain window to pull deltas.
 
 Invariant: > A merge may change routing, never simulation correctness.
+
+------------------------------------------------------------------------
+
+## 6.5 Boundary Sliding & Traveling Nodes (The Spotlight Optimization)
+
+While Splits and Merges add or remove server capacity, **Boundary Sliding** addresses a different problem: the moving dense mass. If a 400-player raid runs East across the map, transferring 400 `SoftState` structures and forcing 400 Edge Nodes to reconnect to a new Arbiter every time they cross a static grid line would cause massive latency spikes and RUDP saturation.
+
+Instead, the R-Tree implements **Traveling Nodes**. Because the dynamic R-Tree allows overlapping regions, a deep, localized "Battle Node" essentially acts as a spotlight that floats above the larger, shallow "Background Nodes."
+
+### The Sliding Mechanics (Zero Handoffs for the Mass)
+1. **Center of Mass Tracking:** The Mesh Controller monitors the geographic center of mass of the entities within a Battle Node.
+2. **The Shift Command:** As the raid moves East, the controller issues an `UpdateTopology` command with a precise `cutover_tick` to the Battle Node and its affected neighbors, shifting the Battle Node's `region_bounds` East.
+3. **Continuous Simulation:** Because the 400 raid members remain inside the shifting bounding box, they experience **zero network handoffs, zero RUDP traffic, and no routing flips**. The simulation simply continues uninterrupted while the server's jurisdiction coordinates translate underneath them.
+
+### The Fringe Handoffs (The "Swallow" and the "Drop")
+While the massive raid remains stable, the edges of the sliding Battle Node will inevitably sweep over or leave behind scattered players in the Background Nodes. These transitions trigger the **Entity Handoff Protocol** (a lightweight Prepare -> Ack -> Commit sequence over RUDP, identical in shape to the Projectile Handoff).
+
+*   **The Leading Edge (The Swallow):** As the Battle Node slides East, its bounding box overlaps a solo player in the Background Node. Because the Battle Node has a higher `rtree_depth`, it claims jurisdiction. The Background Node detects the overlap, relinquishes authority, and initiates an `EntityHandoff` to push the player *into* the Battle Node.
+*   **The Trailing Edge (The Drop):** A raid member goes AFK and stops running. As the Battle Node slides East, the AFK player eventually falls out of the western edge of the bounding box. The Battle Node detects the out-of-bounds entity and initiates an `EntityHandoff` to drop them down into the underlying Background Node.
+*   **Standard Boundary Crossing:** This exact same `EntityHandoff` protocol is used when a player normally walks across any static R-Tree boundary.
+
+### Edge Node Routing Migration
+During an `EntityHandoff` (whether from walking or sliding), the transition must be seamless for the client. At the `commit_tick` of the handoff, the losing Arbiter sends a `TopologyUpdate` stamped with `redirect_arbiter_id` down to the specific Edge Node. The Edge Node instantly updates its `authoritative_mesh_node` address, seamlessly migrating its UDP upstream stream without dropping the player's connection.
 
 ------------------------------------------------------------------------
 
@@ -372,7 +400,13 @@ To ensure system-wide consistency without the performance cost of distributed lo
 To allow bullets and entities to seamlessly cross boundaries, the entire Arbiter mesh must operate on a unified temporal baseline, independent of absolute OS wall-clocks.
 -   **The Genesis Tick:** The Mesh Controller establishes `Tick = 0` when the shard boots. All Arbiters use this as their absolute timeline integer.
 -   **Self-Pacing:** Arbiters run a strict `while(true)` loop, calculating simulation duration and sleeping for the remainder of the 16.6ms frame budget to naturally maintain 60Hz.
--   **Heartbeat Correction:** To prevent micro-drift across different physical machines, the Controller broadcasts a low-frequency UDP Heartbeat (e.g., once per second): *"The current Shard Tick is exactly 360,000."* Arbiters running slightly too fast extend their sleep cycle by 1ms; Arbiters running too slow skip a sleep cycle to snap back into perfect integer alignment.
+-   **Heartbeat Correction:** To prevent micro-drift across different physical machines, the Controller broadcasts a low-frequency UDP Heartbeat (e.g., once per second): *"The current Shard Tick is exactly 360,000."* Arbiters do not instantly snap their clocks; they smoothly adjust their frame sleep duration (+/- a few microseconds) to elegantly catch up or fall back without causing time-travel anomalies.
+
+### Live Game Data Distribution (Hot-Patching)
+To support live balance updates ("Hot-Patching") without restarting the server cluster, the Mesh Controller orchestrates the distribution of the `SpellData` dictionaries.
+-   **The Command:** The Mesh Controller issues `PrepareDataEpoch { new_epoch, asset_uri }` over TCP.
+-   **Asynchronous Loading:** Arbiters spin up a background thread to download the Flatbuffer/JSON assets from the CDN. This ensures the heavy I/O and deserialization do not stall the 60Hz deterministic physics loop.
+-   **Atomic Activation:** Once parsed, the background thread pushes the new dictionary into a lock-free queue. The Arbiter adopts the new dictionary and successfully activates the new `data_epoch` for incoming proposals.
 
 ### Failure State: Topology Freeze
 Because the Mesh Controller is the single source of truth for R-Tree boundaries, its availability is critical for dynamic scaling. If the Mesh Controller cluster becomes temporarily unreachable:
@@ -383,15 +417,16 @@ Because the Mesh Controller is the single source of truth for R-Tree boundaries,
 -   **Expected Survival Window (RTO):** The system is designed to flawlessly absorb standard Raft leader-election outages (2 to 5 seconds) with zero dropped packets and only minor kinematic dilation. However, the degradation cliff occurs around **~30 seconds** of sustained outage. Beyond 30 seconds, severe hotspots will dilate to unacceptable "slideshow" speeds (<0.2x) and risk saturating OS-level connection buffers. Therefore, the Control Plane SLA mandates a Recovery Time Objective (RTO) of < 10 seconds.
 
 ## 7.2 The Epoch Handshake Protocol
-To guarantee that the Proxy Actor and the Spatial Arbiter agree on the rules of jurisdiction, the map version is strictly enforced at the packet level.
+To guarantee that the Proxy Actor and the Spatial Arbiter agree on the rules of jurisdiction and balance data, topology and spell-data epochs are strictly enforced at the packet level.
 
-1.  **Epoch Stamping:** When a Proxy Actor generates an `ActionProposal`, it stamps the packet with its currently known `topology_epoch`.
+1.  **Epoch Stamping:** When a Proxy Actor generates an `ActionProposal`, it stamps the packet with its currently known `topology_epoch` and `data_epoch`.
 2.  **Epoch Validation:** When a Spatial Arbiter receives the proposal, it checks the epoch before applying the deterministic depth/ID tie-breaker math:
     -   **Epoch Match:** The packet is processed normally.
     -   **Proxy is Stale (Late Packet):** If the packet's epoch is older than the Arbiter's epoch, the map has changed. The Arbiter uses the old map rules to act as a **Forwarding Surrogate**, routing the packet to the newly authoritative Arbiter.
     -   **Arbiter is Stale (Split in Progress):** If the packet's epoch is newer than the Arbiter's epoch, the Arbiter buffers the packet for a few milliseconds until it receives the official epoch update from the Mesh Controller. To prevent infinite stalling if the Controller's update is permanently lost, this buffer enforces a strict timeout tied to the engine's global memory horizon (e.g., 1.0 second). If the timeout expires, the Arbiter rejects the proposal and triggers an `ActionFailed` refund back to the Edge Node.
     -   **Stale Buffer Saturation:** If the stale buffer reaches capacity, Arbiters must reject new non-movement proposals immediately with `ActionFailed { reason: "Arbiter Queue Saturated" }` (never silent drop). `Movement` proposals may be coalesced to latest-per-entity and reconciled via downstream `StateUpdate`.
     -   **Ingress Fairness Guard:** Before a proposal enters `external_inbox`, the Arbiter applies a per-entity token bucket. Over-budget non-movement proposals are rejected with `ActionFailed { reason: "Rate Limited" }`; movement is dropped/coalesced. This isolates compromised sessions and prevents one entity from starving queue capacity for everyone else.
+    -   **Data Epoch Gate:** If proposal `data_epoch` is stale, reject with `ActionFailed { reason: "Data Epoch Mismatch" }`. If proposal `data_epoch` is newer than local dictionary, Arbiter must atomically activate/buffer with timeout and never resolve under the wrong balance version.
 
 By binding every action to a specific, agreed-upon version of the R-Tree map, the architecture completely eliminates the transient "double-write" vulnerability without requiring distributed locks during the 60Hz tick.
 
@@ -423,8 +458,13 @@ Unlike traditional server-side lag, Kinematic Dilation is treated as an **intent
 - **Transparency:** This architecture turns a backend infrastructure limitation (CPU ceiling) into a canon gameplay mechanic.
 
 ### 8.2.2 Technical Implementation Details
-- **Dynamic Ramp-Up (The Illusion of Time):** The Arbiter continues to increment its global `Shard Tick` at exactly 60Hz. However, as server load increases, it dynamically ramps up a physical slowdown multiplier (e.g., a sliding scale from `dilation = 0.9` down to `0.1`). This multiplier is applied to all physics velocities and game rules (cooldowns). The more people that enter the blackhole, the slower the physical world becomes.
-- **CPU Savings (Tick Interleaving):** Because the entities are moving slower, the Arbiter safely skips running heavy $O(N^2)$ collision checks every frame. It may only resolve combat once every 10 ticks, sleeping through the intermediate frames to shed CPU load.
+- **Data-Driven Configuration:** The dilation curve is not hardcoded. Thresholds and exponents are defined in the `DilationConfig` within the active `SpellData` asset dictionary, allowing live-tuning via Data Epoch hot-patches.
+- **Dynamic Ramp-Up (The Formula):** The Arbiter calculates its local `dilation_factor` every tick based on current entity density:
+    1. `density_ratio = (current_entities - safe_threshold) / (critical_threshold - safe_threshold)`
+    2. `clamped_ratio = clamp(density_ratio, 0.0, 1.0)`
+    3. `curve_mult = clamped_ratio ^ curve_exponent`
+    4. `dilation_factor = 1.0 - (curve_mult * (1.0 - minimum_dilation_factor))`
+- **CPU Savings (Tick Interleaving):** The Arbiter continues to increment its global `Shard Tick` at exactly 60Hz. However, as `dilation_factor` drops, it safely skips heavy simulation frames. A "Heavy Frame" is triggered if `current_tick % (1.0 / dilation_factor) == 0`. At `0.2` dilation, the heavy collision/combat loop resolves only every 5th tick.
 - **Continuous Collision Detection (CCD):** To prevent fast-moving objects from "tunneling" through targets during these skipped frames, the Arbiter dynamically shifts from discrete hitboxes to Swept-Volume raycasts (evaluating the entire path traveled across the interleaved window) to guarantee collision correctness.
 - **Per-Session Throttling & Upstream Bandwidth Reduction:** The Arbiter broadcasts this `dilation_factor` downstream. The Edge Node receives it and applies the multiplier **strictly to the specific user's Proxy Actor session state**. Because the Proxy Actor dilates its local prediction loop and ability cooldowns, it creates a self-healing throttle: players physically cannot move or cast spells as fast, which drastically reduces the volume of upstream `ActionProposals` spamming the Arbiter.
 - **The Damping Field:** Because dilation is tied to the game's spatial zone and the user's specific session state, a player fighting in the 4,000-player blackhole will experience a cinematic slow-motion battle, while another player connected to the *exact same physical Edge Node* but standing in a quiet forest will continue playing at a flawless 100% speed.
@@ -444,11 +484,13 @@ To maintain a lock-free 60Hz physics simulation, the architecture explicitly sep
     -   **Progression Actors:** Quests, Leveling, Achievement Tracking, WAL Persistence.
     -   **Session Manager:** A fast, in-memory registry (e.g., Redis) mapping active User Accounts to their current `EntityID` and Host Arbiter.
 
-## 9.2 The "Sidecar" Dispatch Pattern
-The **Proxy Actor (Edge Node)** acts as the primary router for the client. It dispatches traffic to the correct layer based on the semantic intent of the packet:
+## 9.2 The "Sidecar" Dispatch Pattern (The Edge Gateway)
+The **Proxy Actor (Edge Node)** acts as the primary API Gateway and router for the client. The client sends a multiplexed stream of data, which the Edge Node inspects and dispatches based on semantic intent:
 
--   **Simulation Traffic:** Movement, Combat, Interactions -> Dispatched to the **Spatial Mesh** (Single Upstream Dispatch).
--   **Meta Traffic:** Chat, Invites, Trading, Inventory Management -> Dispatched directly to the **Meta Services**.
+-   **Simulation Traffic (High-Frequency UDP):** Movement, Combat, Interactions -> Dispatched upstream to the currently assigned **Spatial Arbiter**.
+-   **Meta Traffic (Reliable gRPC/TCP):** Chat, Invites, Trading, Inventory Management -> Dispatched directly to the **Meta Services**.
+
+**Security Invariant:** The Edge Node is a trusted server. When it dispatches Meta Traffic, it explicitly injects the user's verified `character_id` into the envelope. This prevents spoofing exploits where a compromised client attempts to delete another player's inventory by forging an ID. The Meta Services blindly trust the identity headers provided by the Edge Node.
 
 ## 9.3 Cross-Layer Handshake (The Event Bus)
 The Spatial Mesh and Meta Services are decoupled but interact through an asynchronous **Hard State Event Bus** (e.g., Kafka or NATS). 
@@ -464,6 +506,40 @@ If a player disconnects during combat, their `Session` on the Edge Node is destr
 2. **The Registry:** The Session Manager responds with the player's active `EntityID` and the IP address of the Spatial Arbiter currently hosting that entity.
 3. **The Hijack & Bootstrap:** The new Edge Node connects directly to that Spatial Arbiter, presenting the player's auth token and claiming the `EntityID`. The Arbiter verifies the token, halts the AI control, and immediately pushes a complete `StateUpdate` (HP, coordinates, cooldowns) down to the new Edge Node.
 4. **Resumption:** The Edge Node uses this initial snapshot to bootstrap its local prediction loop, and the player resumes combat seamlessly.
+
+## 9.5 The Spawn & Logout Protocol (Game Logic Boundaries)
+The Spatial Mesh is strictly a physics and combat runner. It does not query databases to find out where a player should spawn. That business logic (e.g., JRPG "Save Zones", Newbie Spawns, and Logout penalties) is entirely orchestrated by the Meta Services.
+
+### The Initial Spawn Handshake
+When a player logs in for the first time, or spawns after a death/logout:
+1. **The Login (Client -> Meta):** The Edge Node proxies the user's auth directly to the Meta Services (Login Service).
+2. **Database Resolution (Meta):** The Meta Service checks the database for the character's `last_save_zone` coordinates (or defaults to the `NEWBIE_ZONE`).
+3. **Topology Discovery (Meta -> Mesh Controller):** The Meta Service queries the Mesh Controller: *"Which Arbiter currently owns coordinate [x, y]?"* The Controller replies with the target Arbiter's IP.
+4. **Engine Injection (Meta -> Arbiter):** The Meta Service sends a `SpawnEntity` command containing the player's compiled `SoftState` and coordinates directly to the target Arbiter via the internal Event Bus.
+5. **Connection Handoff (Meta -> Edge Node):** The Meta Service replies to the Edge Node with the target Arbiter's IP address. The Edge Node initiates its UDP stream, and the game begins.
+
+### The Logout Protocol (Combat Logging Prevention)
+To prevent players from force-quitting to avoid death, the engine enforces strict logout rules driven by JRPG Save Zones.
+*   **Safe Zone Logout:** If a player clicks "Log Out" while standing inside a designated Safe Zone, Meta validates the coordinates and sends an `InitiateLogout { is_safe_zone: true }` command to the Arbiter. The Arbiter instantly despawns the entity.
+*   **Wilderness Logout / Force Quit:** If a player logs out in the wild, or their router disconnects, the Arbiter flags their `SoftState` with a 60-second `logout_fuse_ticks`. The character remains fully targetable and killable in the simulation for 60 seconds.
+*   **The Next Login:** Regardless of how the player left the game (Safe Zone, survived the 60s fuse, or died), their next login will *always* trigger the Spawn Handshake at their last recorded JRPG Save Zone. This heavily incentivizes returning to town before logging off.
+
+## 9.6 The Death & Respawn Lifecycle (With Resurrection)
+To keep the Spatial Mesh hyper-optimized, the engine uses strictly decoupled death logic, leaning heavily on the Meta Services for spawn orchestration, but preserving a local "Corpse" state for in-combat resurrections.
+
+### Player Death & The Healer Window
+When a player's HP reaches 0:
+1. **The Kill & Corpse State:** The Arbiter flags the player's `SoftState` as `is_dead = true` and strips their collision geometry. However, the player remains in the Arbiter's memory as a targetable "Corpse" for a brief window (e.g., `resurrect_window_ticks` = 10 seconds). 
+2. **The Meta Handoff:** Simultaneously, the Arbiter emits a `PlayerDied` event to the Meta Service. The Meta Service begins ticking down the total MOBA-style respawn penalty timer (e.g., 15 seconds).
+3. **Branch A: The Healer Succeeds:** Before the 10-second corpse window expires, an ally casts a Resurrection spell on the corpse. The Arbiter flips `is_dead = false`, restores HP/collision, and emits `PlayerResurrected` to the Meta Service. Meta instantly cancels the pending 15-second respawn timer. The player is back in the fight.
+4. **Branch B: The Hard Wipe:** The 10-second corpse window expires with no heal. The Arbiter permanently deletes the player from its memory and broadcasts a `GhostUpdate { is_despawning: true }` to instantly clear neighboring ghosts. 
+5. **The Re-Injection:** 5 seconds later, the Meta Service's 15-second respawn timer finishes. Meta automatically executes the **Spawn Handshake (Section 9.5)**, injecting the player at their designated JRPG Save Zone and redirecting their Edge Node to the new location.
+
+### Monster Death (ARPG Style)
+Monsters must leave a presence in the world for players to see and loot.
+1. **The Kill:** When a monster dies, the Arbiter removes its AI and attack capabilities but leaves it in a non-colliding `Corpse` state for a set duration to allow client-side death animations to play out.
+2. **Loot Generation (Meta):** The Arbiter emits `MonsterDied` to the Meta Service. The Meta Service calculates RNG drop tables and economy limits asynchronously.
+3. **Loot Spawning (Meta -> Mesh):** If an item drops, the Meta Service sends a command back to the Arbiter to spawn an ephemeral `LootInteractable` actor at the corpse's coordinates, which players can then interact with to claim the item.
 
 ------------------------------------------------------------------------
 
