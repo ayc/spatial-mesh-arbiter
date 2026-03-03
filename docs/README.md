@@ -36,4 +36,5 @@ Guides on how the engine is containerized, scaled via Hitless Handoffs, and orch
 *Target Audience: All Developers & QA*
 
 Guides for running and testing the distributed mesh behavior locally.
-*   [01. Local Testing Strategy (The "Mini-Mesh")](4-development/01-local-testing-strategy.md)
+*   [01. Mini-Mesh Conformance & Failure Testing](4-development/01-mini-mesh-conformance-and-failure-testing.md)
+*   [02. Developer Lifecycle (Rust + Docker)](4-development/02-developer-lifecycle.md)

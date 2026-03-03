@@ -1,4 +1,4 @@
-# Local Development & Testing Strategy (The "Mini-Mesh")
+# Mini-Mesh Conformance & Failure Testing
 
 Testing a dynamically scaling, geographically partitioned server mesh on a single local development machine is notoriously difficult. A modern CPU can easily simulate thousands of entities on a single core, meaning a local developer will rarely, if ever, trigger the R-Tree splitting, Hitless Handoffs, or Ghost Propagation logic organically.
 
@@ -6,7 +6,35 @@ To ensure engineers can actively debug and observe the distributed systems logic
 
 ---
 
-## 1. The "Sandbox" Configuration Profile
+## 1. Recommended Development Lifecycle
+
+For the canonical day-to-day workflow (including Rust auto-restart loops and containerized integration flow), see [02. Developer Lifecycle (Rust + Docker)](02-developer-lifecycle.md).
+
+For new developers, the expected flow is:
+1. **Read Core Contracts First**
+   - Read [Core Architecture](../1-architecture-and-engine/01-core-architecture.md), [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md), and [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md).
+   - Read [NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md) and [NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md) when working on NPC-facing changes.
+2. **Configure the Local Mini-Mesh Profile**
+   - Use the reduced-capacity development profile in this document to force split/merge/handoff paths under local load.
+3. **Run Containerized Local Stack**
+   - Use the local Docker Compose stack described in [Implementation Blueprint](../1-architecture-and-engine/00-implementation-blueprint.md) to run core services consistently.
+4. **Execute Conformance Scenarios**
+   - Run the scenario suite in this document (A-O) using the Headless Swarm Tester.
+   - Start with split/handoff/ghost scenarios, then run failure-path scenarios (`docker kill`) and NPC-scale scenarios.
+5. **Validate Failure Recovery Before Merging**
+   - Confirm deterministic behavior for crash/reconnect, contention resolution, and replication budget degradation.
+   - Treat unresolved nondeterminism as a merge blocker for networking/runtime changes.
+
+Lifecycle gate checklist:
+- `Gate 1`: Contracts understood and change scope mapped to canonical docs.
+- `Gate 2`: Mini-Mesh profile applied and services booted in containers.
+- `Gate 3`: Relevant conformance scenarios pass for the modified subsystem.
+- `Gate 4`: At least one failure-path drill passes for modified runtime paths.
+- `Gate 5`: Logs/metrics confirm deterministic outcomes under replay/retry.
+
+---
+
+## 2. The "Sandbox" Configuration Profile
 
 The core of local testing is artificially shrinking the engine's capacity limits so that standard developer tests immediately trigger structural mesh events.
 
@@ -30,7 +58,7 @@ spatial_arbiter:
 
 ---
 
-## 2. The Headless Swarm Tester
+## 3. The Headless Swarm Tester
 
 Running 30 full 3D game clients on a local machine to trigger a 10-player split is inefficient and resource-heavy. 
 
@@ -117,7 +145,7 @@ The Swarm Tester acts as an army of automated bots. It constructs client WebSock
 
 ---
 
-## 3. Visualizing the Mesh
+## 4. Visualizing the Mesh
 
 Because the Headless Swarm Tester has no graphical client, it is highly recommended to build a simple **2D Debug Canvas** (using a lightweight framework like `macroquad` or an HTML5 Canvas hooked to a local WebSocket).
 
