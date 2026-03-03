@@ -8,16 +8,16 @@ To ensure engineers can actively debug and observe the distributed systems logic
 
 ## 1. Recommended Development Lifecycle
 
-For the canonical day-to-day workflow (including Rust auto-restart loops and containerized integration flow), see [02. Developer Lifecycle (Rust + Docker)](02-developer-lifecycle.md).
+For the canonical day-to-day workflow (including Rust auto-restart loops and containerized integration flow), see [Quick Start & Local Development Environment](../0-getting-started/01-quick-start.md).
 
 For new developers, the expected flow is:
 1. **Read Core Contracts First**
-   - Read [Core Architecture](../1-architecture-and-engine/01-core-architecture.md), [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md), and [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md).
-   - Read [NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md) and [NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md) when working on NPC-facing changes.
+   - Read [Core Architecture](../1-architecture/01-core-concepts-and-mesh.md), [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md), and [Client <-> Edge Message Contract](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md).
+   - Read [NPC Runtime and Replication Contract](../1-architecture/02-npc-architecture.md) and [NPC and In-World Interaction Design](../3-gameplay-systems/04-npc-and-world-interaction.md) when working on NPC-facing changes.
 2. **Configure the Local Mini-Mesh Profile**
    - Use the reduced-capacity development profile in this document to force split/merge/handoff paths under local load.
 3. **Run Containerized Local Stack**
-   - Use the local Docker Compose stack described in [Implementation Blueprint](../1-architecture-and-engine/00-implementation-blueprint.md) to run core services consistently.
+   - Use the local Docker Compose stack described in [Implementation Blueprint](../0-getting-started/02-implementation-phases.md) to run core services consistently.
 4. **Execute Conformance Scenarios**
    - Run the scenario suite in this document (A-O) using the Headless Swarm Tester.
    - Start with split/handoff/ghost scenarios, then run failure-path scenarios (`docker kill`) and NPC-scale scenarios.
@@ -64,7 +64,7 @@ Running 30 full 3D game clients on a local machine to trigger a 10-player split 
 
 Engineers should utilize a **Headless Swarm Tester**—a lightweight Rust script that bypasses the graphical rendering engine and communicates directly with the local Edge Node (Proxy Actor) over WebSockets.
 
-The Swarm Tester acts as an army of automated bots. It constructs client WebSocket frames that follow [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md), primarily `SimulationInput` and discrete simulation intents. The Edge Node then translates those intents into mesh `ActionProposal`s (ability semantics defined in [Ability Framework](../2-gameplay-and-design/02-ability-framework.md)).
+The Swarm Tester acts as an army of automated bots. It constructs client WebSocket frames that follow [Client <-> Edge Message Contract](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md), primarily `SimulationInput` and discrete simulation intents. The Edge Node then translates those intents into mesh `ActionProposal`s (ability semantics defined in [Ability Framework](../3-gameplay-systems/02-ability-framework.md)).
 
 ### Recommended Test Scenarios
 
@@ -130,7 +130,7 @@ The Swarm Tester acts as an army of automated bots. It constructs client WebSock
 
 #### Scenario M: Tiered NPC Cadence (Testing Runtime Tier Scheduler)
 1. **Action:** Spawn mixed NPC archetypes (combat, lane creeps, ambient, social) in a single test region and force visibility transitions across `Near`, `Mid`, and `Far` rings while players move.
-2. **Observation:** NPC updates follow tier defaults from [NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md): combat-critical entities remain high cadence, lane creeps downgrade on march state, ambient updates drop first under pressure.
+2. **Observation:** NPC updates follow tier defaults from [NPC Runtime and Replication Contract](../1-architecture/02-npc-architecture.md): combat-critical entities remain high cadence, lane creeps downgrade on march state, ambient updates drop first under pressure.
 3. **Debugging:** Inspect per-client batch logs to confirm cadence/tier transitions obey hysteresis and never violate reliable lifecycle ordering.
 
 #### Scenario N: Mass On-Screen NPC Saturation (Testing Budget Degradation Priority)
@@ -140,7 +140,7 @@ The Swarm Tester acts as an army of automated bots. It constructs client WebSock
 
 #### Scenario O: Interaction Contention (Testing Deterministic Single-Winner Semantics)
 1. **Action:** Have two bots issue `world.interact_entity` against the same loot/objective target within the same contention window.
-2. **Observation:** Exactly one interaction resolves as winner; loser receives deterministic rejection/outcome path (`RejectedContended` class) as defined in [NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md).
+2. **Observation:** Exactly one interaction resolves as winner; loser receives deterministic rejection/outcome path (`RejectedContended` class) as defined in [NPC and In-World Interaction Design](../3-gameplay-systems/04-npc-and-world-interaction.md).
 3. **Debugging:** Confirm winner/loser ordering remains stable across retries and that no duplicate claim side effects occur.
 
 ---

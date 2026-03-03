@@ -2,7 +2,7 @@
 
 This document provides concrete examples of how complex ARPG/MOBA mechanics are translated into the engine's `ActionPayload` and `CombatContext` structures. It serves as a guide for Game Designers and Gameplay Engineers to map visual abilities to the networking layer.
 
-Canonical intent keys and stable numeric intent IDs are defined in [04. Intent Taxonomy & ID Registry](04-intent-taxonomy-and-registry.md). This document focuses on mechanics and examples, while the registry document owns intent naming and ID assignment.
+Canonical intent keys and stable numeric intent IDs are defined in [Intent Taxonomy](../2-contracts-and-interfaces/02-intent-taxonomy.md). This document focuses on mechanics and examples, while the registry document owns intent naming and ID assignment.
 
 ---
 
@@ -30,9 +30,13 @@ struct CombatContext {
     // Direct casts start at depth 0. Reactive procs must increment depth.
     damage_origin: DamageOrigin,
     proc_depth: u8,
+
+    // Attacker-owned conditional logic (e.g., Executioner's Ring) to be evaluated by the target.
+    // ArrayVec keeps the struct stack-allocated to prevent heap allocations in the 60Hz loop.
+    conditionals: ArrayVec<OffensiveCondition, 4>,
 }
 ```
-`DamageOrigin` is defined in [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md) and is required for proc recursion safety.
+`DamageOrigin` is defined in [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md) and is required for proc recursion safety.
 
 ---
 

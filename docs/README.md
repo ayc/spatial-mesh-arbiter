@@ -2,39 +2,38 @@
 
 Welcome to the Spatial Mesh Arbiter engine documentation. This project is a large-scale, lock-free, 2D distributed multiplayer game engine designed to solve the "Blackhole" density problem without relying on generic distributed locks or heavy time-travel buffers.
 
-Because this is a complex system involving multiple disciplines, the documentation is organized by **Audience and Domain** to help you find what you need quickly.
+## Developer-First Organization
 
----
+The documentation is organized to support the lifecycle of developers and systems engineers working on the engine:
 
-## 1. Architecture & Engine
-*Target Audience: Core Engine / Systems / Network Engineers*
+### [0. Getting Started](0-getting-started/)
+Start here to set up your environment, understand the development lifecycle, and read the implementation blueprints.
+* [01. Quick Start & Local Environment](0-getting-started/01-quick-start.md)
+* [02. Implementation Phases & Mandates](0-getting-started/02-implementation-phases.md)
 
-Contains the core theoretical foundation, network interfaces, messaging envelopes, and low-level engine design.
-*   [01. Core Architecture](1-architecture-and-engine/01-core-architecture.md)
-*   [02. Network Interfaces](1-architecture-and-engine/02-network-interfaces.md)
-*   [03. Client <-> Edge Message Contract](1-architecture-and-engine/03-client-edge-message-contract.md)
-*   [04. NPC Runtime and Replication Contract](1-architecture-and-engine/04-npc-runtime-and-replication-contract.md)
+### [1. Architecture](1-architecture/)
+Core theoretical foundation and engine design for the Spatial Actor Model.
+* [01. Core Concepts and Mesh](1-architecture/01-core-concepts-and-mesh.md)
+* [02. NPC Architecture](1-architecture/02-npc-architecture.md)
 
-## 2. Gameplay & Design
-*Target Audience: Game Designers / Gameplay Engineers*
+### [2. Contracts & Interfaces](2-contracts-and-interfaces/)
+The API and definitive "Source of Truth" for wire protocols and message types.
+* [01. Client-Edge Wire Protocol](2-contracts-and-interfaces/01-client-edge-wire-protocol.md)
+* [02. Intent Taxonomy](2-contracts-and-interfaces/02-intent-taxonomy.md)
+* [Internal Mesh Types](2-contracts-and-interfaces/internal-mesh-types/) (Core primitives, envelopes, state)
 
-Covers the data-driven systems used to build spells, abilities, and RPG stats.
-*   [01. RPG Mechanics & State](2-gameplay-and-design/01-rpg-mechanics-and-state.md)
-*   [02. Ability Framework (Action Payloads)](2-gameplay-and-design/02-ability-framework.md)
-*   [03. Global Events (Map-Wide Mechanics)](2-gameplay-and-design/03-global-events.md)
-*   [04. Intent Taxonomy & ID Registry](2-gameplay-and-design/04-intent-taxonomy-and-registry.md)
-*   [05. NPC and In-World Interaction Design](2-gameplay-and-design/05-npc-and-world-interaction-design.md)
+### [3. Gameplay Systems](3-gameplay-systems/)
+Data-driven systems used to build spells, abilities, and RPG stats.
+* [01. RPG Mechanics](3-gameplay-systems/01-rpg-mechanics.md)
+* [02. Ability Framework](3-gameplay-systems/02-ability-framework.md)
+* [03. Global Events](3-gameplay-systems/03-global-events.md)
+* [04. NPC and World Interaction](3-gameplay-systems/04-npc-and-world-interaction.md)
 
-## 3. Infrastructure
-*Target Audience: DevOps / Platform / Site Reliability Engineers*
+### [4. Infrastructure](4-infrastructure/)
+Guides on how the engine is containerized, scaled, and configured.
+* [01. Deployment & Orchestration](4-infrastructure/01-deployment-and-orchestration.md)
+* [02. Configuration Registry](4-infrastructure/02-configuration-registry.md)
 
-Guides on how the engine is containerized, scaled via Hitless Handoffs, and orchestrated safely in production.
-*   [01. Deployment & Orchestration](3-infrastructure/01-deployment-and-orchestration.md)
-*   [02. Engine Configuration Registry](3-infrastructure/02-configuration-registry.md)
-
-## 4. Development
-*Target Audience: All Developers & QA*
-
-Guides for running and testing the distributed mesh behavior locally.
-*   [01. Mini-Mesh Conformance & Failure Testing](4-development/01-mini-mesh-conformance-and-failure-testing.md)
-*   [02. Developer Lifecycle (Rust + Docker)](4-development/02-developer-lifecycle.md)
+### [5. Testing & Conformance](5-testing-and-conformance/)
+Scenarios for proving the distributed mesh behaviors locally.
+* [01. Mini-Mesh Conformance](5-testing-and-conformance/01-mini-mesh-conformance.md)

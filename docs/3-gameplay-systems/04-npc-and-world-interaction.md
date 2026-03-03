@@ -4,8 +4,8 @@ This document is the canonical gameplay/design specification for NPC behavior ta
 
 Canonical split:
 - Gameplay/design semantics are canonical here.
-- Runtime cadence, replication, interest management, and client smoothing are canonical in [04. NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md).
-- Wire envelopes and session/auth behavior remain canonical in [03. Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md).
+- Runtime cadence, replication, interest management, and client smoothing are canonical in [NPC Runtime and Replication Contract](../1-architecture/02-npc-architecture.md).
+- Wire envelopes and session/auth behavior remain canonical in [Client-Edge Wire Protocol](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md).
 
 This document is normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used in RFC-style.
 
@@ -156,6 +156,6 @@ Standard outcomes:
 
 ## 6. Cross-References
 
-- Intent taxonomy and `intent_id=0114`: [04. Intent Taxonomy & ID Registry](04-intent-taxonomy-and-registry.md)
-- Runtime cadence/replication contract: [04. NPC Runtime and Replication Contract](../1-architecture-and-engine/04-npc-runtime-and-replication-contract.md)
-- Wire ingress envelope/auth semantics: [03. Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md)
+- Intent taxonomy and `intent_id=0114`: [Intent Taxonomy](../2-contracts-and-interfaces/02-intent-taxonomy.md)
+- Runtime cadence/replication contract: [NPC Runtime and Replication Contract](../1-architecture/02-npc-architecture.md)
+- Wire ingress envelope/auth semantics: [Client-Edge Wire Protocol](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md)

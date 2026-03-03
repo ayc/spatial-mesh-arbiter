@@ -4,8 +4,8 @@ This document is the canonical wire-level contract for traffic between physical 
 
 Canonical ownership note:
 - This document is canonical for wire schema, transport, ingress validation, sequencing, and immediate edge response behavior.
-- Intent taxonomy and stable `intent_id` assignments are canonical in [04. Intent Taxonomy & ID Registry](../2-gameplay-and-design/04-intent-taxonomy-and-registry.md).
-- NPC runtime cadence/replication behavior is canonical in [04. NPC Runtime and Replication Contract](04-npc-runtime-and-replication-contract.md).
+- Intent taxonomy and stable `intent_id` assignments are canonical in [Intent Taxonomy](02-intent-taxonomy.md).
+- NPC runtime cadence/replication behavior is canonical in [NPC Runtime and Replication Contract](../1-architecture/02-npc-architecture.md).
 - NPC documentation additions in this phase do not introduce required client->edge wire schema or intent ID changes.
 
 It defines:
@@ -211,7 +211,7 @@ struct AuthResult {
 
 The client sends **intent-only** simulation messages. The client MUST NOT send authoritative outcomes or mutate-only server payloads.
 
-For runtime interface alignment with [02. Network Interfaces](02-network-interfaces.md):
+For runtime interface alignment with [Core Primitives](internal-mesh-types/01-core-primitives.md):
 
 ```rust
 // Canonical wire alias used by edge ingress in runtime-facing docs/code.
@@ -770,6 +770,6 @@ Invalid telemetry batch (empty `samples`):
 
 ## 17. Cross-References
 
-- Runtime edge/arbiter interfaces: [02. Network Interfaces](02-network-interfaces.md)
-- Architecture and trust boundaries: [01. Core Architecture](01-core-architecture.md)
-- Ability/action semantics referenced by translation map: [Ability Framework](../2-gameplay-and-design/02-ability-framework.md)
+- Runtime edge/arbiter interfaces: [Core Primitives](internal-mesh-types/01-core-primitives.md)
+- Architecture and trust boundaries: [Core Concepts and Mesh](../1-architecture/01-core-concepts-and-mesh.md)
+- Ability/action semantics referenced by translation map: [Ability Framework](../3-gameplay-systems/02-ability-framework.md)

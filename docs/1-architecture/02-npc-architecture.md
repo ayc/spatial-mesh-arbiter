@@ -3,8 +3,8 @@
 This document is the canonical architecture/runtime contract for NPC simulation cadence, replication, interest management, reliability classes, and client smoothing behavior.
 
 Canonical split:
-- NPC gameplay taxonomy and interaction semantics are canonical in [05. NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md).
-- Wire envelope/auth/session contracts remain canonical in [03. Client <-> Edge Message Contract](03-client-edge-message-contract.md).
+- NPC gameplay taxonomy and interaction semantics are canonical in [NPC and World Interaction](../3-gameplay-systems/04-npc-and-world-interaction.md).
+- Wire envelope/auth/session contracts remain canonical in [Client-Edge Wire Protocol](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md).
 
 This document is normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used in RFC-style.
 
@@ -269,6 +269,6 @@ Deterministic recovery rule:
 
 ## 9. Cross-References
 
-- NPC gameplay taxonomy and semantics: [05. NPC and In-World Interaction Design](../2-gameplay-and-design/05-npc-and-world-interaction-design.md)
-- Edge wire and ingress contract: [03. Client <-> Edge Message Contract](03-client-edge-message-contract.md)
-- Runtime interfaces companion: [02. Network Interfaces](02-network-interfaces.md)
+- NPC gameplay taxonomy and semantics: [NPC and World Interaction](../3-gameplay-systems/04-npc-and-world-interaction.md)
+- Edge wire and ingress contract: [Client-Edge Wire Protocol](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md)
+- Runtime interfaces companion: [Core Primitives](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md)

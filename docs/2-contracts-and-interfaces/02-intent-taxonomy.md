@@ -9,7 +9,7 @@ It defines:
 - design-archetype to intent mapping.
 
 Canonical split:
-- Wire schemas, envelopes, auth, sequencing, and reject behavior remain canonical in [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md).
+- Wire schemas, envelopes, auth, sequencing, and reject behavior remain canonical in [Client <-> Edge Message Contract](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md).
 - Protobuf-style wire encoding profile guidance remains in architecture documentation (appendix in the client-edge contract family).
 - Intent taxonomy and IDs are canonical in this document.
 
@@ -86,7 +86,7 @@ Field conventions:
 | `0111` | `ability.cast_ground_targeted` | `SIMULATION` | `yes` | `DiscreteIntent::GroundTargetedAbility` | `world_point(destination_x,destination_y)` | `ActionPayload::GroundTargetedAbility` | Immediate `EdgeAck` on acceptance; deterministic reject semantics on invalid destination/schema | `ACTIVE` | AoE placement cast |
 | `0112` | `ability.cast_directional_projectile` | `SIMULATION` | `yes` | `DiscreteIntent::SpawnProjectile` | `direction(direction_x,direction_y)` + optional `entity_ref(target_id)` hint | `ActionPayload::SpawnProjectile` | Immediate `EdgeAck` on acceptance; deterministic reject semantics on invalid direction/schema | `ACTIVE` | Skillshot and projectile launch intent |
 | `0113` | `item.use_consumable` | `SIMULATION` | `yes` | `DiscreteIntent::UseConsumable` | `item_ref(item_id)` | `ActionPayload::UseConsumable` | Immediate `EdgeAck` on acceptance; reject on invalid item/rate-limit/session | `ACTIVE` | Gameplay consumable activation |
-| `0114` | `world.interact_entity` | `SIMULATION` | `yes` | `DiscreteIntent::Interact` | `entity_ref(target_entity)` | `ActionPayload::Interact` | Immediate `EdgeAck` on acceptance; reject on invalid target/session/rules | `ACTIVE` | Interaction semantics are canonical in 05-npc-and-world-interaction-design.md |
+| `0114` | `world.interact_entity` | `SIMULATION` | `yes` | `DiscreteIntent::Interact` | `entity_ref(target_entity)` | `ActionPayload::Interact` | Immediate `EdgeAck` on acceptance; reject on invalid target/session/rules | `ACTIVE` | Interaction semantics are canonical in [NPC and World Interaction](../3-gameplay-systems/04-npc-and-world-interaction.md) |
 | `0300` | `meta.send_chat_message` | `META` | `yes` (meta domain) | `MetaRequest::SendChatMessage` | `chat_payload(channel,text)` | Meta service forward | Immediate `EdgeAck` on accepted forward; `EdgeReject` on local schema/rate/session failure | `ACTIVE` | Low-frequency social intent |
 | `0301` | `meta.move_inventory_item` | `META` | `yes` (meta domain) | `MetaRequest::MoveInventoryItem` | `inventory_slot_pair(from_slot,to_slot)` | Meta service forward | Immediate `EdgeAck` on accepted forward; deterministic reject on invalid slot/schema | `ACTIVE` | Strongly consistent inventory workflow |
 | `0302` | `meta.invite_to_party` | `META` | `yes` (meta domain) | `MetaRequest::InviteToParty` | `player_name(target_character_name)` | Meta service forward | Immediate `EdgeAck` on accepted forward; reject on invalid schema/rules/session | `ACTIVE` | Party/social workflow |
@@ -165,7 +165,7 @@ This is additive documentation guidance and does not require wire-schema changes
 
 ## 10. References
 
-- Wire contract and ingress behavior: [Client <-> Edge Message Contract](../1-architecture-and-engine/03-client-edge-message-contract.md)
-- Runtime-facing interfaces and translation layer: [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md)
-- Ability semantics and content examples: [Ability Framework](02-ability-framework.md)
-- NPC and world interaction semantics for `0114`: [05. NPC and In-World Interaction Design](05-npc-and-world-interaction-design.md)
+- Wire contract and ingress behavior: [Client-Edge Wire Protocol](01-client-edge-wire-protocol.md)
+- Runtime-facing interfaces and translation layer: [Core Primitives](internal-mesh-types/01-core-primitives.md)
+- Ability semantics and content examples: [Ability Framework](../3-gameplay-systems/02-ability-framework.md)
+- NPC and world interaction semantics for `0114`: [NPC and World Interaction](../3-gameplay-systems/04-npc-and-world-interaction.md)

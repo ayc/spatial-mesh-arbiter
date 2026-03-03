@@ -2,15 +2,15 @@
 
 This document outlines the core RPG attribute system, combat formulas, and how offensive and defensive stats are reconciled across distributed server nodes.
 
-Because the game engine uses a lock-free, geographically partitioned mesh (see [Core Architecture](../1-architecture-and-engine/01-core-architecture.md)), an attacking player and a defending player may exist on two completely different servers. Therefore, combat calculations are strictly divided into a **Two-Phase Pipeline**: Pre-Rolling (Offense) and Resolution (Defense).
+Because the game engine uses a lock-free, geographically partitioned mesh (see [Core Architecture](../1-architecture/01-core-concepts-and-mesh.md)), an attacking player and a defending player may exist on two completely different servers. Therefore, combat calculations are strictly divided into a **Two-Phase Pipeline**: Pre-Rolling (Offense) and Resolution (Defense).
 
-> **Canonical Type Source:** The authoritative struct definitions for `SoftState`, `CoreStats`, `ActiveStatusEffect`, and all wire envelopes live in the [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md) document. This document provides gameplay-focused context and defines `OffensiveStats`, `DefensiveStats`, and the combat formulas that operate on them.
+> **Canonical Type Source:** The authoritative struct definitions for `SoftState`, `CoreStats`, `ActiveStatusEffect`, and all wire envelopes live in the [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md) document. This document provides gameplay-focused context and defines `OffensiveStats`, `DefensiveStats`, and the combat formulas that operate on them.
 
 ---
 
 ## 1. The Core Entity State (`SoftState`)
 
-Every living entity (Player, Boss, Minion) instantiated in the Spatial Mesh possesses a `SoftState` struct. This contains the ephemeral, authoritative state required for the 60Hz physics and combat loop. The canonical definition lives in [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md); it is reproduced here for gameplay context.
+Every living entity (Player, Boss, Minion) instantiated in the Spatial Mesh possesses a `SoftState` struct. This contains the ephemeral, authoritative state required for the 60Hz physics and combat loop. The canonical definition lives in [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md); it is reproduced here for gameplay context.
 
 ```rust
 // Base attributes for physics and gameplay scaling
@@ -118,7 +118,8 @@ struct OffensiveStats {
     conversion_table: [SimFixed; 16],
 
     // Attacker-Owned Logic resolved during Phase 2 (e.g., Executioner's Axe)
-    conditionals: Vec<OffensiveCondition>,
+    // ArrayVec keeps the struct stack-allocated to prevent heap allocations in the 60Hz loop.
+    conditionals: ArrayVec<OffensiveCondition, 4>,
 }
 ```
 
@@ -280,10 +281,10 @@ struct CombatContext {
     proc_depth: u8,
     
     // Attacker-owned conditional logic (e.g., Executioner's Ring) to be evaluated by the target
-    conditionals: Vec<OffensiveCondition>,
+    conditionals: ArrayVec<OffensiveCondition, 4>,
 }
 ```
-`DamageOrigin` is defined in [Network Interfaces](../1-architecture-and-engine/02-network-interfaces.md) and shared across all combat envelopes.
+`DamageOrigin` is defined in [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md) and shared across all combat envelopes.
 
 ---
 
