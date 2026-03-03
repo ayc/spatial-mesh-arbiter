@@ -297,7 +297,7 @@ Instead, these events utilize the **Global Event Escalation Protocol**:
 -   **Pragmatic Exception:** While the Mesh Controller is primarily a Control Plane component, it acts as a high-level router for these infrequent, high-radius events to prevent P2P network saturation. In practice, these events represent <0.1% of combat traffic.
 -   **Lock-Free Synchronized Execution:** Because all Arbiters share a synchronized global Shard Tick (see Section 7.1), the receiving Arbiters hold the command in a queue and independently process the event against their local entities the exact millisecond their local loop reaches `Shard Tick Y`. (Note: In the event of a severe datacenter outage that delays the reliable TCP command past `Tick Y`, the engine uses `>=` fallback logic to detonate the event immediately upon arrival, prioritizing event completion over perfect cross-server sync during disasters).
 -   **Epoch Pinning Rule:** Before detonation, each Arbiter validates that the command's `data_epoch` matches its active SpellData dictionary. If mismatched, it must atomically activate that epoch (or delay execution until it can) rather than resolving under a newer/older balance version.
--   **Priority Interrupt (Dilation Override):** Global Events always override Tick Interleaving. Even if an Arbiter is currently skipping frames via Kinematic Dilation (Section 8.2), it is forced to wake up and execute a full simulation frame on the exact scheduled `Shard Tick Y`. This guarantees that simultaneous cross-shard events are never delayed by localized server load.
+-   **No Special Dilation Handling:** Because every Arbiter tick is a full simulation tick regardless of Kinematic Dilation (see [Kinematic Dilation](06-kinematic-dilation.md)), Global Events execute on their scheduled tick like any other tick. No priority interrupt or dilation override is needed.
 
 ------------------------------------------------------------------------
 
@@ -349,7 +349,12 @@ When a cell (e.g., Microcell A) needs to split into children (B and C):
 -   **Strict Idempotency:** Edge proposals must use unique IDs (e.g., `action_id: 99482`). During the routing flip, Edge Nodes may send duplicate proposals to both the surrogate and the new authority. Arbiters must deduplicate these.
 -   **Projectile Single-Simulator Rule:** During and after split cutover, only the assigned owner child may tick a projectile forward or generate `ImpactEvent`. Non-owner replicas are shadow-only and are forbidden from simulation side effects.
 -   **Over-Provisioning:** The surrogate node will experience a CPU/Memory spike as it simulates combat *while* serializing state and streaming tick updates.
--   **Strict Determinism (The Floating-Point Problem):** Because B and C rely on "fast-forwarding" a WAL of inputs to mathematically catch up to A, the engine's physics simulation must be perfectly deterministic across different CPU architectures. Standard floating-point math (`f32/f64`) will cause microscopic state drift, preventing convergence. **The engine must utilize Fixed-Point Arithmetic** and enforce canonical iteration ordering (e.g., processing entities by ID) to guarantee a byte-for-byte identical state during handoff.
+-   **Strict Determinism (The Floating-Point Problem):** Because B and C rely on "fast-forwarding" a WAL of inputs to mathematically catch up to A, the engine's physics simulation must be perfectly deterministic across different CPU architectures. Standard floating-point math (`f32/f64`) will cause microscopic state drift, preventing convergence. **The engine must utilize Fixed-Point Arithmetic** (`I32F32` via the `fixed` crate) and enforce canonical iteration ordering to guarantee a byte-for-byte identical state during handoff. The determinism contract is:
+    -   **WAL Self-Containment:** Every WAL entry and inter-Arbiter message MUST be self-contained. Any non-deterministic value (RNG roll, external input) used during event resolution MUST be captured in the entry, so that replay produces byte-identical state without re-executing non-deterministic operations.
+    -   **RNG is Local:** Combat rolls (crit, evasion, block) use a local PRNG (`WyRand`, OS entropy seed). Roll results are baked into outgoing messages (`CombatContext.is_critical_strike`, `InternalPreparedHit.base_damage`, etc.) and WAL entries. No cross-Arbiter RNG synchronization is needed.
+    -   **Rounding:** All `SimFixed` arithmetic uses the `fixed` crate's default truncation toward zero. No banker's rounding. Division and `to_num` truncate.
+    -   **Overflow:** All `SimFixed` arithmetic in the simulation loop MUST use saturating variants (`saturating_mul`, `saturating_add`, `saturating_div`). The default `*` operator panics in debug and wraps in release — both unacceptable.
+    -   **Iteration Order:** Entity collections use `BTreeMap<EntityID, _>` for deterministic iteration in ascending EntityID order. `HashMap` is permitted only for collections where iteration order does not affect authoritative state (e.g., `ghost_entities`).
 
 Invariant: > No entity is owned by two arbiters simultaneously, and the simulation never pauses.
 
@@ -485,30 +490,23 @@ To prevent players from stacking on a single `[x, y]` coordinate, Arbiters enfor
 -   This acts as an "incompressible fluid," forcing the physical radius of the crowd to expand.
 -   As the crowd expands geographically, the dynamic R-Tree regains the ability to slice the hotspot into multiple Arbiter nodes, naturally load-balancing the mass.
 
-## 8.2 Containment via Kinematic Dilation (Tick Interleaving)
+## 8.2 Containment via Kinematic Dilation
 
-If the spatial density exceeds the `max_entities_per_arbiter` limit, but the Arbiter cannot be geographically split further because it has hit the `min_cell_size` structural constraint (e.g., 4,000 players intentionally squeezed into a single room), the architecture does *not* slow down the global clock. Doing so would break cross-boundary bullet travel and Mesh Controller synchronization. 
+If the spatial density exceeds the `max_entities_per_arbiter` limit, but the Arbiter cannot be geographically split further because it has hit the `min_cell_size` structural constraint (e.g., 4,000 players intentionally squeezed into a single room), the architecture does *not* slow down the global clock or skip simulation frames. Doing so would break cross-boundary bullet travel and Mesh Controller synchronization.
 
-Instead, the overloaded Arbiter implements **Kinematic Dilation**:
+Instead, the overloaded Arbiter implements **Kinematic Dilation** — a per-entity time multiplier that physically slows all entities within the zone. The Arbiter always runs at full 60Hz; every tick is a full simulation tick. Entities move slower, cast slower, and recover slower — as if wading through thick temporal mud.
 
-### 8.2.1 The "Temporal Swamp" Philosophy (Diegetic Load Balancing)
-Unlike traditional server-side lag, Kinematic Dilation is treated as an **intentional, diegetic environmental hazard**. It is a "Temporal Swamp" that physically slows down the world as density increases.
+**Kinematic Dilation is a core feature of this engine.** The authoritative reference for KiDi — including the formula, what gets dilated, how load reduction works, cross-boundary blending, the client-side KiDi Pressure Gauge, patterns and anti-patterns — is in [Kinematic Dilation](06-kinematic-dilation.md).
 
-- **Self-Correcting Incentive:** By making overloaded zones unpleasant to play in (slow movement, delayed ability execution), the engine creates a natural, systemic incentive for players to disperse. This "pushes" the load back out to the R-Tree, allowing the Mesh to subdivide the hotspot naturally.
-- **Predictable Degradation:** Because dilation is tied to spatial coordinates and propagated to the Edge Node, it is a deterministic part of the simulation. A player shooting into a dilated zone will see their projectile smoothly decelerate at the boundary (see Section 5.2.2 for the normative blend equation).
-- **Transparency:** This architecture turns a backend infrastructure limitation (CPU ceiling) into a canon gameplay mechanic.
+### 8.2.1 Summary
 
-### 8.2.2 Technical Implementation Details
-- **Data-Driven Configuration:** The dilation curve is not hardcoded. Thresholds and exponents are defined in the `DilationConfig` within the active `SpellData` asset dictionary, allowing live-tuning via Data Epoch hot-patches.
-- **Dynamic Ramp-Up (The Formula):** The Arbiter calculates its local `dilation_factor` every tick based on current entity density:
-    1. `density_ratio = (current_entities - safe_entity_threshold) / (critical_entity_threshold - safe_entity_threshold)`
-    2. `clamped_ratio = clamp(density_ratio, 0.0, 1.0)`
-    3. `curve_mult = clamped_ratio ^ curve_exponent`
-    4. `dilation_factor = 1.0 - (curve_mult * (1.0 - minimum_dilation_factor))`
-- **CPU Savings (Tick Interleaving):** The Arbiter continues to increment its global `Shard Tick` at exactly 60Hz. However, as `dilation_factor` drops, it safely skips heavy simulation frames. A "Heavy Frame" is triggered if `current_tick % (1.0 / dilation_factor) == 0`. At `0.2` dilation, the heavy collision/combat loop resolves only every 5th tick.
-- **Continuous Collision Detection (CCD):** To prevent fast-moving objects from "tunneling" through targets during these skipped frames, the Arbiter dynamically shifts from discrete hitboxes to Swept-Volume raycasts (evaluating the entire path traveled across the interleaved window) to guarantee collision correctness.
-- **Per-Session Throttling & Upstream Bandwidth Reduction:** The Arbiter broadcasts this `dilation_factor` downstream. The Edge Node receives it and applies the multiplier **strictly to the specific user's Proxy Actor session state**. Because the Proxy Actor dilates its local prediction loop and ability cooldowns, it creates a self-healing throttle: players physically cannot move or cast spells as fast, which drastically reduces the volume of upstream `ActionProposals` spamming the Arbiter.
-- **The Damping Field:** Because dilation is tied to the game's spatial zone and the user's specific session state, a player fighting in the 4,000-player blackhole will experience a cinematic slow-motion battle, while another player connected to the *exact same physical Edge Node* but standing in a quiet forest will continue playing at a flawless 100% speed.
+- **KiDi is a gameplay mechanic, not a server optimization.** It creates a diegetic "Temporal Swamp" that incentivizes players to disperse.
+- **The Arbiter does not skip frames.** Every tick runs the full simulation loop. Entities are slower, not the server.
+- **Load reduction is indirect:** the Edge Node throttles player input proportionally to dilation, reducing upstream proposal volume. Slower entities also generate fewer collision and combat events per tick.
+- **Cross-boundary blending** ensures smooth projectile deceleration at zone boundaries (see Section 5.2.2).
+- **The KiDi Pressure Gauge** is a client-side UI indicator (displayed when `dilation_factor < 1.0`) that telegraphs to players that they are in or approaching a Temporal Swamp.
+
+See [Kinematic Dilation](06-kinematic-dilation.md) for the full specification.
 
 ------------------------------------------------------------------------
 

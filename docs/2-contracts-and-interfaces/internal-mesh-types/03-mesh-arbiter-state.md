@@ -212,9 +212,11 @@ struct SpatialActor {
     metronome_degraded: bool,               // True after prolonged heartbeat loss warning emitted
     
     // The "Temporal Swamp" Factor (0.0 to 1.0)
-    // 1.0 = Full speed (60Hz resolution)
-    // 0.2 = 1/5th speed (Physics resolution every 5th tick)
-    dilation_factor: SimFixed, 
+    // Per-entity time multiplier for this zone. Entities move, cast, and recover at
+    // (dilation_factor * entity.time_scale) rate. The Arbiter always runs at full 60Hz;
+    // every tick is a full simulation tick. See docs/1-architecture/06-kinematic-dilation.md.
+    // 1.0 = Full speed, 0.2 = entities at 1/5th speed
+    dilation_factor: SimFixed,
     
     // Bounded Queues (Network layer pushes here. Must have explicit capacity limits 
     // to prevent OOM failure modes during blackhole density events).
@@ -346,21 +348,12 @@ impl SpatialActor {
             }
         }
 
-        // 2. Priority Check: Do we have a Nuke scheduled for RIGHT NOW (or earlier)?
-        let mut has_priority_event = false;
-        for cmd in self.pending_global_events.values() {
-            if let ControllerCommand::ExecuteGlobalEvent { execute_at_tick, .. } = cmd {
-                if self.current_tick >= *execute_at_tick { has_priority_event = true; }
-            }
-        }
+        // 2. Every tick is a full simulation tick. The Arbiter always runs at 60Hz.
+        // Kinematic Dilation slows entities, not the server. See 06-kinematic-dilation.md.
+        // Recalculate dilation_factor from current entity count.
+        self.recalculate_dilation();
 
-        // Heavy frames occur more frequently as dilation_factor approaches 1.0.
-        // Formula: is_heavy if (current_tick % (1.0 / dilation_factor) == 0)
-        let frame_interval = (SimFixed::from_num(1) / self.dilation_factor).to_num::<u64>();
-        let is_heavy_frame = (self.current_tick % frame_interval == 0) || has_priority_event;
-
-        if is_heavy_frame {
-            self.simulate_physics_step(); 
+        self.simulate_physics_step();
 
             // 3. Execute Scheduled Controller Commands
             self.pending_global_events.retain(|_, cmd| {
@@ -539,12 +532,8 @@ impl SpatialActor {
                 self.resolve_action(proposal.payload, Some(proposal.actor_id), proposal.origin_tick, None, proposal.data_epoch);
             }
             
-            // Save the held-over proposals for the next simulation tick
-            self.stale_proposals_buffer = next_tick_stale_buffer;
-        } else {
-            // Light Frame: External/Internal inboxes are NOT drained. They accumulate safely.
-            self.simulate_light_physics();
-        }
+        // Save the held-over proposals for the next simulation tick
+        self.stale_proposals_buffer = next_tick_stale_buffer;
 
         // Integrate dead-reckoned Ghosts with low-cost anomaly guards.
         self.integrate_ghosts_lightweight();
@@ -1270,12 +1259,36 @@ impl SpatialActor {
     }
 
     fn simulate_physics_step(&mut self) {
-        // 1. Resolve discrete physics steps (Movement integration, knockback decay)
+        // 1. Resolve discrete physics steps (NPC movement, knockback decay, soft collision)
         self.apply_kinematics();
-        
+
         // 2. Process all active Status Effects (DoTs, HoTs, CC)
         self.tick_status_effects();
     }
+
+    // --- Physics Implementation (see T0-03 Collision Algorithm) ---
+    //
+    // apply_kinematics() runs every tick and handles:
+    //   1. NPC movement: position += velocity * effective_time (where effective_time =
+    //      dilation_factor * entity.core_stats.time_scale). Player movement is client-proposed
+    //      and validated on arrival, NOT integrated server-side.
+    //   2. Knockback decay: dilated per-entity. Knockback fades slower in the Temporal Swamp.
+    //      knockback_velocity is a field on SoftState (serialized during handoffs).
+    //   3. Soft collision push-out: Boids-style separation steering ("incompressible fluid").
+    //      Push displacement is dilated. O(n²) is acceptable for n ≤ 400.
+    //      Config: separation_radius (1.5m), max_push_per_tick (0.3m) — live-configurable.
+    //
+    // static_grid is a uniform grid of AABB cells loaded from map asset at boot.
+    //   - is_colliding(position) -> bool: point-in-obstacle test
+    //   - query_segment_aabb(a, b) -> Vec<AABB>: swept-segment test (CCD, ghost anomaly, LOS)
+    //
+    // calculate_collisions() tests projectile geometry against local entities (BTreeMap,
+    // deterministic order) and ghosts (HashMap, order doesn't affect authoritative state).
+    // Fuse guard: unarmed projectiles (fuse_remaining_ticks > 0) don't register hits.
+    // All victims collected independently; pierce decrements per hit.
+    //
+    // Wall rejection is intentional: server validates position legality, client handles sliding.
+    // See docs/6-spec-drafts/tier-0-foundations/03-collision-algorithm.md for full pseudocode.
 
     fn tick_status_effects(&mut self) {
         for (entity_id, entity) in self.entities.iter_mut() {
