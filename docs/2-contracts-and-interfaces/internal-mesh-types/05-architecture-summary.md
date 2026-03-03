@@ -1,3 +1,5 @@
+# Internal Mesh Types: Architecture Summary
+
 ## 5. Summary of Architecture Rules
 
 1.  **No Shared Memory:** Actors only communicate via message envelopes.

@@ -15,12 +15,15 @@ Start here to set up your environment, understand the development lifecycle, and
 Core theoretical foundation and engine design for the Spatial Actor Model.
 * [01. Core Concepts and Mesh](1-architecture/01-core-concepts-and-mesh.md)
 * [02. NPC Architecture](1-architecture/02-npc-architecture.md)
+* [03. Mesh Controller](1-architecture/03-mesh-controller.md)
+* [04. Meta Services](1-architecture/04-meta-services.md)
+* [05. AI Node Protocol](1-architecture/05-ai-node-protocol.md)
 
 ### [2. Contracts & Interfaces](2-contracts-and-interfaces/)
 The API and definitive "Source of Truth" for wire protocols and message types.
 * [01. Client-Edge Wire Protocol](2-contracts-and-interfaces/01-client-edge-wire-protocol.md)
 * [02. Intent Taxonomy](2-contracts-and-interfaces/02-intent-taxonomy.md)
-* [Internal Mesh Types](2-contracts-and-interfaces/internal-mesh-types/) (Core primitives, envelopes, state)
+* [Internal Mesh Types Index](2-contracts-and-interfaces/internal-mesh-types/README.md) (Core primitives, envelopes, state)
 
 ### [3. Gameplay Systems](3-gameplay-systems/)
 Data-driven systems used to build spells, abilities, and RPG stats.

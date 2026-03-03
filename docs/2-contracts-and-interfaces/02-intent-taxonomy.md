@@ -9,7 +9,7 @@ It defines:
 - design-archetype to intent mapping.
 
 Canonical split:
-- Wire schemas, envelopes, auth, sequencing, and reject behavior remain canonical in [Client <-> Edge Message Contract](../2-contracts-and-interfaces/01-client-edge-wire-protocol.md).
+- Wire schemas, envelopes, auth, sequencing, and reject behavior remain canonical in [Client <-> Edge Message Contract](01-client-edge-wire-protocol.md).
 - Protobuf-style wire encoding profile guidance remains in architecture documentation (appendix in the client-edge contract family).
 - Intent taxonomy and IDs are canonical in this document.
 

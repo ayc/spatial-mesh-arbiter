@@ -8,7 +8,256 @@ Because the game engine uses a lock-free, geographically partitioned mesh (see [
 
 ---
 
-## 1. The Core Entity State (`SoftState`)
+## 1. The Attribute System
+
+Every player character is defined by a hierarchical attribute system that feeds into the combat stats used by the Spatial Mesh. The Arbiter never sees these attributes directly — they are compiled into flat `OffensiveStats`, `DefensiveStats`, and `CoreStats` structs by the Meta Inventory Service (see Section 2). This section defines the attributes themselves and the conversion framework.
+
+### 1.1 Major and Minor Attributes
+
+Attributes are organized into **4 Major Attributes**, each composed of **3 Minor Attributes** (12 total). A Major Attribute's value is the sum of its three Minors. Major totals are used for equipment requirements, content gating, and broad archetype identification. Minor values drive the actual derived stat formulas.
+
+```
+PrimaryAttributes {
+    // --- Body (Physical Domain) ---
+    vigor: u16,         // Raw power and force
+    agility: u16,       // Speed, reflexes, coordination
+    endurance: u16,     // Toughness and stamina
+
+    // --- Mind (Mental Domain) ---
+    intellect: u16,     // Cognitive power and knowledge
+    perception: u16,    // Awareness and precision
+    willpower: u16,     // Discipline and concentration
+
+    // --- Soul (Spiritual Domain) ---
+    spirit: u16,        // Inner energy and healing
+    attunement: u16,    // Connection to the world's magical fabric
+    resolve: u16,       // Spiritual conviction and fortitude
+
+    // --- Fate (Metaphysical Domain) ---
+    fortune: u16,       // Luck and probability
+    presence: u16,      // Force of personality
+    cunning: u16,       // Resourcefulness and exploitation
+}
+
+// Derived Major totals (not stored — computed on read)
+Body = vigor + agility + endurance
+Mind = intellect + perception + willpower
+Soul = spirit + attunement + resolve
+Fate = fortune + presence + cunning
+```
+
+A character's Minor Attribute values come from three additive sources:
+1. **Base allocation** — Level-up points distributed by the player (or a base stat source, e.g., class tables — deferred).
+2. **Equipment** — Items grant Minor Attribute points via affixes (see Section 1.4).
+3. **Buffs** — Temporary status effects can grant or reduce attribute points. These are layered at evaluation time (see Section 1.3 for the existing base + modifier pattern).
+
+#### Body — Physical Domain
+
+*How the character exists as a physical being in the world.*
+
+| Minor | Combat | World |
+|:---|:---|:---|
+| **Vigor** | Physical/melee damage scaling, knockback force, block effectiveness | Carry capacity, mining yield, break barriers, salvage returns, intimidation dialogue |
+| **Agility** | Attack/cast speed, evasion rating, movement speed | Lockpicking, trap disarming, acrobatics, stealth, crafting dexterity, fishing |
+| **Endurance** | Max HP, HP regen, physical resistances (Slashing, Piercing, Crushing) | Sprint duration, swim speed, environmental hazard survival, durability loss reduction, potion effectiveness |
+
+#### Mind — Mental Domain
+
+*How the character processes, analyzes, and exerts cognitive force.*
+
+| Minor | Combat | World |
+|:---|:---|:---|
+| **Intellect** | Spell damage scaling, max resource pool, cooldown reduction | Enchanting potency, recipe discovery, puzzle interactions, item identification, lore decryption |
+| **Perception** | Crit chance, armor penetration, AoE targeting precision | Detect hidden (doors, chests, stealthed players), tracking, trap detection, appraise item value, rare node detection |
+| **Willpower** | CC resistance (reduced duration), your CCs last longer, resource cost reduction, resist interrupts | Corruption resistance, crafting focus (fewer failures), resist fear/charm, maintain enchantments |
+
+#### Soul — Spiritual Domain
+
+*The character's inner essence and connection to forces beyond the physical.*
+
+| Minor | Combat | World |
+|:---|:---|:---|
+| **Spirit** | Resource regen, healing power (given and received), buff/debuff duration | Creature taming, alchemy potency, meditation speed, commune with ghost NPCs, shrine duration |
+| **Attunement** | Elemental damage bonus (all), elemental resistances (all non-physical), summon bond strength, thorns/reflect | Detect magical anomalies, ley line bonuses, ritual crafting, enchantment stability, weather sense |
+| **Resolve** | Curse/corruption resistance, death penalty reduction, cleanse effectiveness, buff duration on self | Protection in corrupted zones, divine faction standing, persist through debuff zones, holy site access |
+
+#### Fate — Metaphysical Domain
+
+*The intangible forces that shape destiny — fortune, influence, and cunning. These are not personal capabilities but how the universe responds to the character.*
+
+Fate as a Major Attribute gates content that rewards "soft power" builds. Certain quests, legendary items, NPC factions, and world events require minimum Fate thresholds, making the merchant prince and treasure hunter first-class archetypes rather than afterthoughts.
+
+| Minor | Combat | World |
+|:---|:---|:---|
+| **Fortune** | Crit multiplier, proc chance on item effects, secondary "lucky dodge" | Loot rarity/quantity, gold find, rare crafting outcomes, gambling NPC results, random world event triggers, treasure map quality |
+| **Presence** | Party aura radius and strength, summon/pet effectiveness, threat/aggro generation | Vendor prices, reputation gain speed, NPC dialogue branches, hire mercenaries, guild leadership bonuses, quest reward bonuses |
+| **Cunning** | Bonus damage to debuffed/CC'd targets, ambush/first-strike damage, counter-attack chance, trap damage | Barter override, disguise, smuggling routes, sabotage, reverse-engineer items, exploit quest shortcuts |
+
+### 1.2 Primary → Derived Stat Conversion
+
+During stat compilation (Section 2), each Minor Attribute feeds one or more **derived combat stats** via designer-configurable conversion formulas. The conversion rates are defined in the designer configuration (`meta/attribute-formulas/v1`) and can be rebalanced without code changes.
+
+The conversion framework follows this pattern:
+
+```
+derived_stat = Σ (minor_attribute_value × coefficient) + direct_item_bonuses
+```
+
+Multiple Minor Attributes can feed the same derived stat with different weights. This creates cross-stat synergies — there is always more than one way to increase a given combat stat, but through different tradeoffs.
+
+#### Derived Stat Mapping
+
+The following table defines WHICH Minor Attributes contribute to WHICH derived stats. The specific coefficients are designer-tuned values in the configuration file, not hardcoded.
+
+**Offensive Derived Stats:**
+
+| Derived Stat | Fed By | Notes |
+|:---|:---|:---|
+| Physical damage multiplier | Vigor (primary) | Scales physical-origin damage |
+| Spell damage multiplier | Intellect (primary) | Scales spell-origin damage |
+| Elemental damage multiplier | Attunement (primary) | Scales all elemental damage types |
+| Global damage multiplier | (direct affixes only) | Multiplicative with type-specific multipliers |
+| Crit chance | Perception (primary), Agility (minor) | Capped (see stat caps config) |
+| Crit multiplier | Fortune (primary) | Base 1.5 (150%), scales with Fortune |
+| Armor penetration (%) | Perception (primary) | |
+| Armor penetration (flat) | Perception (minor) | |
+| Attack/cast speed | Agility (primary) | Multiplier on ability cast/recovery times |
+| Cooldown reduction | Intellect (minor) | Capped (see stat caps config) |
+| Lifesteal % | (direct affixes only) | % of physical damage returned as HP |
+| Spell vamp % | (direct affixes only) | % of spell damage returned as HP |
+| Status effect duration | Spirit (primary), Willpower (minor) | +% duration on effects you apply |
+| AoE radius multiplier | Perception (minor) | +% radius on area abilities |
+| Projectile speed multiplier | Agility (minor) | +% velocity on projectile abilities |
+| Proc chance multiplier | Fortune (primary) | +% chance for item/ability proc effects |
+| Debuff bonus damage | Cunning (primary) | +% damage to debuffed/CC'd targets |
+| Ambush damage multiplier | Cunning (primary) | +% damage on first strike from stealth/surprise |
+| Counter-attack chance | Cunning (minor) | Chance to auto-retaliate on melee hit received |
+| Conversion table | (direct affixes only) | Elemental damage conversions (existing) |
+| Conditionals | (item affixes only) | Executioner, Giant Slayer, etc. (existing) |
+
+**Defensive Derived Stats:**
+
+| Derived Stat | Fed By | Notes |
+|:---|:---|:---|
+| Resistances (physical) | Endurance (primary) | Slashing, Piercing, Crushing |
+| Resistances (elemental) | Attunement (primary) | Fire, Cold, Lightning, Poison, Holy, Shadow |
+| Evasion rating | Agility (primary) | Chance to dodge |
+| Block chance | (direct affixes only) | From shield/off-hand equipment |
+| Block effectiveness | Vigor (minor) | How much block reduces damage (default 50%) |
+| Thorns damage | Attunement (minor) | Flat damage reflected to melee attackers |
+| Damage reduction % | (direct affixes only) | Flat % DR after all mitigation |
+| Healing received multiplier | Spirit (minor) | +% effectiveness of incoming heals |
+| Status effect resistance | Willpower (primary), Resolve (minor) | -% duration on debuffs applied to you |
+| Curse resistance | Resolve (primary) | Separate from general status effect resistance |
+| Poise | Endurance (minor), Vigor (minor) | Hidden stagger resistance (see Section 1.5) |
+
+**Vital Derived Stats:**
+
+| Derived Stat | Fed By | Notes |
+|:---|:---|:---|
+| Max HP bonus | Endurance (primary), Vigor (minor) | Added to base max HP |
+| Max resource bonus | Intellect (primary), Spirit (minor) | Added to base max resource |
+| HP regen per second | Endurance (minor), Spirit (minor) | Flat regen rate |
+| Resource regen per second | Spirit (primary), Intellect (minor) | Flat regen rate |
+
+**Utility Derived Stats:**
+
+| Derived Stat | Fed By | Notes |
+|:---|:---|:---|
+| Movement speed | Agility (minor) | Multiplier on base movement |
+| Weight (knockback resist) | Vigor (minor), Endurance (minor) | Higher = harder to displace |
+| Loot rarity bonus | Fortune (primary) | % increase on loot quality rolls |
+| Gold find | Fortune (minor) | % increase on gold drops |
+| Vendor price modifier | Presence (primary) | Buy cheaper, sell higher |
+| Reputation gain | Presence (minor) | +% reputation earned |
+| XP bonus | (direct affixes only) | % increase on XP gains |
+
+> **Design note — "(primary)" vs. "(minor)" contribution:** Where a Minor Attribute is listed as the "primary" contributor, it has a higher coefficient in the conversion formula. Where listed as "minor," it contributes at a lower rate. This distinction is purely about the designer-configured weights — the compilation algorithm treats all contributions identically (sum of `value × coefficient`).
+
+### 1.3 Discoverable Secondary Attributes
+
+In addition to the 12 Minor Attributes, there exist **Secondary Attributes** that appear on certain items and equipment. These are displayed as raw numeric values on item tooltips — `+22 Poise`, `+6 Momentum` — but the game provides **no explanation of what they do**. Players must discover their mechanics through experimentation and community research.
+
+Secondary Attributes are compiled and pushed to the Arbiter alongside primary-derived stats, but their effects involve hidden thresholds and interaction rules that are not surfaced in any UI.
+
+```
+SecondaryAttributes {
+    momentum: u16,
+    poise: u16,
+    echo: u16,
+    affinity: u16,
+    synchrony: u16,
+}
+```
+
+#### Momentum
+
+Builds as an entity lands consecutive hits without a gap exceeding a hidden tick threshold. At hidden breakpoints, attack speed and damage receive escalating bonuses. Resets to zero after the gap threshold is exceeded. Items with `+Momentum` lower the breakpoint thresholds and increase the ramp rate.
+
+#### Poise
+
+Hidden stagger and interrupt resistance. When an entity receives a hit, the game compares the entity's current Poise against the attack's hidden **impact force** value. If Poise exceeds the impact force, the entity is not staggered and cast animations are not interrupted. If Poise is lower, the entity suffers a stagger proportional to the deficit. Armor and heavy weapons carry hidden Poise values. The specific thresholds are intentionally undocumented.
+
+#### Echo
+
+Grows as a player repeatedly defeats the same monster type. At hidden thresholds, the player deals incrementally more damage to that monster type, takes less damage from them, and receives improved drop rates. Decays slowly over time when the player stops hunting that type. Functions as a hidden bestiary mastery system that rewards specialization. Items with `+Echo` increase the accumulation rate and slow the decay.
+
+#### Affinity
+
+Tracks cumulative usage of specific damage types and elements. A character who primarily deals Fire damage gradually develops a hidden Fire affinity that provides subtle bonuses to Fire damage and Fire resistance. Spreading damage across many elements prevents any single affinity from reaching its thresholds. Items with `+Affinity` lower the activation thresholds, making it easier to develop and maintain an elemental identity.
+
+#### Synchrony
+
+Accumulates while a player remains in the same party with the same members. At hidden thresholds, the entire party receives subtle bonuses: slightly improved healing received, marginally wider aura radius, and a small XP bonus. Resets when party composition changes. Items with `+Synchrony` accelerate the accumulation rate. This mechanic rewards stable group play over constant matchmaking cycling — but the game never tells players it exists.
+
+### 1.4 The Three-Tier Affix Model
+
+Items can grant stats through three distinct affix tiers, creating layered optimization choices:
+
+**Tier 1 — Major Primary Affixes** (rare, high-tier items only):
+
+Grant points to an entire Major Attribute. `+3 Body` adds +3 to Vigor, Agility, AND Endurance simultaneously. Effectively triple value per point, making these the most sought-after affix rolls. Restricted to Epic and Legendary quality tiers.
+
+**Tier 2 — Minor Primary Affixes** (standard):
+
+Grant points to a single Minor Attribute. `+10 Vigor` feeds all of Vigor's derived stats through the conversion formulas. Broad value — a single affix improves multiple combat and world stats.
+
+**Tier 3 — Direct Derived Affixes** (surgical):
+
+Grant a specific derived stat directly, bypassing the attribute conversion. `+3% Crit Chance` adds exactly 3% crit and nothing else. Less total value than an equivalent Minor Attribute investment, but allows precise targeting of breakpoints.
+
+#### The Optimization Tradeoff
+
+Consider a player who needs more crit chance:
+- `+3 Mind` (Major) → grants Intellect, Perception, and Willpower → improves crit (via Perception) but also spell damage, CDR, CC resistance, and more. Maximum breadth.
+- `+15 Perception` (Minor) → improves crit, armor pen, AoE radius, detection. Focused but multi-faceted.
+- `+4% Crit Chance` (Direct) → exactly 4% crit. Surgical. Nothing else.
+
+Each tier is optimal in different build contexts. A character near multiple breakpoints benefits from the broad investment. A character that just needs 2% more crit to reach a cap benefits from the surgical affix.
+
+### 1.5 Hidden Stats
+
+The following systems affect gameplay but are **never surfaced in any UI, tooltip, character sheet, or game documentation**. They exist purely as discoverable mechanics — emergent patterns that the player community must identify and map through observation and data collection.
+
+#### Karma
+
+Tracks cumulative player behavior: sparing enemies vs. executing them, donating gold vs. hoarding, helping NPCs vs. ignoring them. Subtly shifts NPC reactions, available quest branches, and which world events trigger in the player's vicinity. Two characters with identical attributes and gear may experience different content based on their Karma divergence. The game never acknowledges Karma exists.
+
+#### Soul Weight
+
+A function of the player's total accumulated power — level, equipped gear score, and wealth. Subtly influences the difficulty and reward profile of the ambient world around the player. Higher Soul Weight attracts tougher ambient spawns but shifts loot tables upward. Lower Soul Weight encounters a gentler world. This creates a hidden dynamic difficulty system that players gradually notice when comparing experiences.
+
+#### Rhythm
+
+Certain ability sequences trigger hidden combo bonuses when cast in specific orders. These are not documented anywhere in the ability framework. Players who accidentally discover a sequence — and notice the anomalous damage spike — must systematically test to map the valid chains. Rhythm combos are defined in the designer configuration alongside ability data.
+
+#### Adaptive Resistance
+
+When an entity takes repeated damage of the same type within a time window, a hidden resistance to that type gradually builds, decaying over time once the damage source stops. The game's version of "what doesn't kill you makes you stronger." Players who notice the pattern may develop strategies around intentional resistance training or exploit it defensively against sustained elemental damage.
+
+---
+
+## 2. The Core Entity State (`SoftState`)
 
 Every living entity (Player, Boss, Minion) instantiated in the Spatial Mesh possesses a `SoftState` struct. This contains the ephemeral, authoritative state required for the 60Hz physics and combat loop. The canonical definition lives in [Network Interfaces](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md); it is reproduced here for gameplay context.
 
@@ -60,7 +309,7 @@ struct ActiveStatusEffect {
     next_pulse_tick: u64,      // The absolute Shard Tick when this effect should trigger its payload
     data_epoch: u32,           // The balance version this buff was applied under
     pulse_context: Option<CombatContext>, // The pre-rolled damage/healing payload to apply every pulse
-    modifiers: Vec<StatModifier>, // Stat modifications active while this effect is alive (see Section 1.3)
+    modifiers: Vec<StatModifier>, // Stat modifications active while this effect is alive (see Section 2.3)
 }
 
 // Core Entity State (Authoritative)
@@ -94,13 +343,13 @@ struct SoftState {
 }
 ```
 
-> **Why no `OffensiveStats` inside `SoftState`?** Offensive attributes (crit, penetration, damage multipliers) are only read during Phase 1: Pre-Roll — the moment a spell is cast. They are never mutated by the 60Hz physics loop and are not needed for movement, collision, or mitigation. Keeping them out of `SoftState` reduces the serialization payload during Hitless Handoffs and WAL streaming, where `SoftState` is the primary unit of transfer. See Section 1.1 below for where they live.
+> **Why no `OffensiveStats` inside `SoftState`?** Offensive attributes (crit, penetration, damage multipliers) are only read during Phase 1: Pre-Roll — the moment a spell is cast. They are never mutated by the 60Hz physics loop and are not needed for movement, collision, or mitigation. Keeping them out of `SoftState` reduces the serialization payload during Hitless Handoffs and WAL streaming, where `SoftState` is the primary unit of transfer. See Section 2.1 below for where they live.
 
-### 1.1 Offensive Stats (Companion Struct — Immutable Base)
+### 2.1 Offensive Stats (Companion Struct — Immutable Base)
 
-`OffensiveStats` is stored as a **companion struct alongside `SoftState`** in the Arbiter's per-entity storage. It represents the **immutable base** compiled from the player's equipment by the Meta Services layer and pushed to the Arbiter via `UpdateEntityStats` (see Section 2).
+`OffensiveStats` is stored as a **companion struct alongside `SoftState`** in the Arbiter's per-entity storage. It represents the **immutable base** compiled from the player's attributes and equipment by the Meta Inventory Service and pushed to the Arbiter via `UpdateEntityStats` (see Section 3).
 
-The Arbiter **never mutates** this struct during gameplay. Temporary buffs and procs that modify offensive attributes are expressed as `StatModifier` entries on `ActiveStatusEffect` and layered on top of the base at evaluation time (see Section 1.3). This ensures that Meta can push updated base stats at any time (e.g., the player equips a new weapon) without conflicting with active buff state.
+The Arbiter **never mutates** this struct during gameplay. Temporary buffs and procs that modify offensive attributes are expressed as `StatModifier` entries on `ActiveStatusEffect` and layered on top of the base at evaluation time (see Section 2.3). This ensures that Meta can push updated base stats at any time (e.g., the player equips a new weapon) without conflicting with active buff state.
 
 ```rust
 struct OffensiveStats {
@@ -123,7 +372,7 @@ struct OffensiveStats {
 }
 ```
 
-### 1.2 Defensive Stats
+### 2.2 Defensive Stats
 
 `DefensiveStats` lives inside `SoftState` because it is read during Phase 2: Resolution on every incoming hit — a hot-path operation that must be cache-local to the entity being damaged.
 
@@ -141,7 +390,7 @@ struct DefensiveStats {
 
 > **Resolved:** `evasion` has been removed from `CoreStats` in the Network Interfaces doc and consolidated here in `DefensiveStats` as `evasion_rating`. The mitigation path is fully self-contained within `DefensiveStats`.
 
-### 1.3 Buff Modifier Evaluation (Base + Modifiers Pattern)
+### 2.3 Buff Modifier Evaluation (Base + Modifiers Pattern)
 
 Temporary buffs and procs that alter stats (offensive or defensive) do **not** mutate the stored `OffensiveStats` or `DefensiveStats` structs. Instead, the Arbiter computes **effective stats** on-the-fly by layering `StatModifier` entries from active status effects on top of the immutable base.
 
@@ -243,18 +492,19 @@ A Warrior activates Berserker Rage, gaining +50% Crit Chance and +30% Damage for
 
 ---
 
-## 2. The Stat Compilation Pattern (Meta to Mesh)
+## 3. The Stat Compilation Pattern (Meta to Mesh)
 
-The Spatial Arbiter has absolutely no concept of "Inventory," "Swords," "Rarities," or "Set Bonuses." Evaluating complex inventory graphs during a 60Hz physics loop would destroy the CPU budget. Instead, the engine uses a strictly decoupled **Compilation Pattern**:
+The Spatial Arbiter has absolutely no concept of "Inventory," "Swords," "Rarities," "Attributes," or "Set Bonuses." Evaluating complex inventory and attribute graphs during a 60Hz physics loop would destroy the CPU budget. Instead, the engine uses a strictly decoupled **Compilation Pattern**:
 
-1. **The Inventory Action (Meta Service):** The player equips the *"Executioner's Axe"* (+10% Crit, +50% Damage to low HP targets). The client sends this request directly to the stateless Inventory Service.
-2. **The Compilation:** The Inventory Service queries the database, calculates the player's base stats, adds the Axe's stats, and compiles this into the flat, highly-optimized `OffensiveStats` and `DefensiveStats` structs.
-3. **The Handshake:** The Meta Service pushes an async `UpdateEntityStats` command over the internal Event Bus to the Spatial Arbiter hosting the player.
-4. **The 60Hz Loop:** The Arbiter atomically overwrites the entity's `OffensiveStats` companion struct and the `DefensiveStats` within `SoftState`. When the player attacks, the Arbiter reads `crit_chance = 0.15` from the companion `OffensiveStats` and copies the `conditionals` into the `CombatContext` envelope; it doesn't know *why* the crit chance is 15%, just that it is. This guarantees unhackable, blazing-fast physics execution.
+1. **The Inventory Action (Meta Service):** The player equips the *"Executioner's Axe"* (+10 Perception, +5 Cunning, +50% Damage to low HP targets). The client sends this request directly to the stateless Inventory Service.
+2. **The Attribute Aggregation:** The Inventory Service sums all Minor Attribute points from base allocation + all equipped items + all item affixes to produce the character's total `PrimaryAttributes`.
+3. **The Stat Compilation:** Each Minor Attribute is converted to derived combat stats via the designer-configurable conversion formulas (Section 1.2). Direct derived affixes (e.g., `+3% Crit Chance`) are added on top. Stat caps are enforced. The result is flat, highly-optimized `OffensiveStats`, `DefensiveStats`, and `CoreStats` structs.
+4. **The Push:** The Meta Service pushes an async `UpdateEntityStats` command over the internal Event Bus to the Spatial Arbiter hosting the player.
+5. **The 60Hz Loop:** The Arbiter atomically overwrites the entity's `OffensiveStats` companion struct, `DefensiveStats`, and `CoreStats` within `SoftState`. When the player attacks, the Arbiter reads `crit_chance = 0.15` from the companion `OffensiveStats` and copies the `conditionals` into the `CombatContext` envelope; it doesn't know *why* the crit chance is 15% (whether it came from Perception, a direct affix, or both), just that it is. This guarantees unhackable, blazing-fast physics execution.
 
 ---
 
-## 3. The Cross-Boundary Combat Context
+## 4. The Cross-Boundary Combat Context
 
 To support deep ARPG math across server boundaries without passing massive player data structures, we must upgrade the `CombatContext` payload defined in the interface blueprint.
 
@@ -288,12 +538,12 @@ struct CombatContext {
 
 ---
 
-## 4. The Two-Phase Combat Pipeline
+## 5. The Two-Phase Combat Pipeline
 
 To guarantee deterministic outcomes when combat crosses boundaries, the calculation is split into two distinct phases. 
 
 ### Phase 1: The Pre-Roll (Originating Server)
-When a player clicks "Fire", the Arbiter that owns that player reads the entity's companion `OffensiveStats` (Section 1.1), layers active buff modifiers on top (Section 1.3), and constructs the `CombatContext`.
+When a player clicks "Fire", the Arbiter that owns that player reads the entity's companion `OffensiveStats` (Section 2.1), layers active buff modifiers on top (Section 2.3), and constructs the `CombatContext`.
 
 1. **Compute Effective Offense:** Call `compute_effective_offense(base_offense, active_status_effects)` to produce the effective `OffensiveStats` with all active buff modifiers applied. This is a read-only computation — the stored base is never touched.
 2. **Calculate Base:** Start with the Spell's base damage (e.g., 100).
@@ -387,11 +637,14 @@ if victim.defense.thorns_damage > 0
 
 ---
 
-## 5. Itemization Strategy & Engine Constraints
+## 6. Itemization Strategy & Engine Constraints
 
 By splitting the math this way, Game Designers gain massive flexibility for itemization:
 
-*   **Weapons / Rings:** Provide `OffensiveStats` (Crit, Penetration, Conversions). These modify the projectile at launch.
-*   **Armor / Shields:** Provide `DefensiveStats` (Resistances, Block, Evasion). These mitigate the incoming projectile upon impact.
+*   **Weapons / Rings:** Primarily grant offensive Minor Attributes (Vigor, Perception, Cunning) and direct offensive affixes (Crit, Penetration, Conversions). These shape the projectile at launch.
+*   **Armor / Shields:** Primarily grant defensive Minor Attributes (Endurance, Willpower, Resolve) and direct defensive affixes (Resistances, Block, Evasion). These mitigate the incoming projectile upon impact.
+*   **Accessories (Amulets, Belts):** Can grant any attribute domain, enabling hybrid builds. A Fate-heavy amulet (+Fortune, +Presence) creates a fundamentally different character than a Body-heavy one (+Vigor, +Endurance).
+
+The three-tier affix model (Section 1.4) means a single item can carry Major Attributes (+3 Body), Minor Attributes (+10 Perception), and Direct Derived stats (+2% Crit Chance) simultaneously. The compilation pipeline (Section 3) flattens all of this into the optimized structs the Arbiter consumes.
 
 Because the `CombatContext` envelope carries the bridge data (`penetration`, `is_crit`), the engine supports incredibly deep ARPG math without ever requiring two servers to synchronously query each other's databases during a 60Hz loop.

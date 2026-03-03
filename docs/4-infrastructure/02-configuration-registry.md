@@ -53,7 +53,8 @@ These variables dictate memory allocation and security rate limits. They are loa
 ### 2.2 Memory Horizons & Queue Sizes
 | Variable | Recommended Default | Description |
 | :--- | :--- | :--- |
-| `max_event_age_ticks` | `60` ticks | **Horizon for Idempotency Ledger.** Packets older than 1s are dropped. |
+| `max_event_age_ticks` | `60` ticks | **Replay horizon for Idempotency Ledger.** Packets older than 1s are dropped. |
+| `idempotency_bucket_capacity` | `8192` keys | Max `(impact_id, target_id)` entries per tick-bucket. Total key budget ~= `max_event_age_ticks * idempotency_bucket_capacity`; over-cap inserts degrade fail-closed (drop impact/relay + metric). |
 | `external_inbox_cap` | `5000` slots | Capacity for Edge Node proposals. |
 | `internal_inbox_cap` | `2000` slots | Capacity for cross-server relays and procs. |
 | `stale_buffer_cap` | `1000` slots | Capacity for proposals waiting on topology sync. |
@@ -64,6 +65,14 @@ These variables dictate memory allocation and security rate limits. They are loa
 | :--- | :--- | :--- |
 | `max_entities_per_arbiter` | `400` entities | Deterministic split trigger threshold per active Arbiter. |
 | `min_cell_size_meters` | `40.0` meters | Structural floor for subdivision; below this, Arbiter dilates instead of splitting. |
+
+### 2.4 Warm Pool Capacity
+| Variable | Recommended Default | Description |
+| :--- | :--- | :--- |
+| `warm_pool_target_size` | `25` Arbiters | Desired steady-state pool size. Replenishment stops when reached. |
+| `warm_pool_low_watermark` | `10` Arbiters | Pool size below which the Controller begins requesting new capacity. |
+| `warm_pool_critical_watermark` | `3` Arbiters | Pool size at which conservation mode activates (split suppression, merge eagerness). |
+| `conservation_split_multiplier` | `1.5` | During conservation mode, `max_entities_per_arbiter` is multiplied by this factor. |
 
 ---
 
@@ -83,3 +92,4 @@ The keys above are canonical. Legacy aliases are accepted for backward compatibi
 | `bucket_capacity` | `proposal_bucket_capacity` |
 | `bucket_refill` | `proposal_bucket_refill_per_tick` |
 | `max_event_age` | `max_event_age_ticks` |
+| `idempotency_bucket_cap` | `idempotency_bucket_capacity` |

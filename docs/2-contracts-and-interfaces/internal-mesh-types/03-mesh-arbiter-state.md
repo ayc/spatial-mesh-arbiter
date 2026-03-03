@@ -1,3 +1,5 @@
+# Internal Mesh Types: Mesh Arbiter State
+
 ## 3. Layer 2: The Mesh Arbiter (Spatial Actor)
 
 The Spatial Actor is a single-threaded, lock-free, 60Hz deterministic simulation loop. 
@@ -13,6 +15,7 @@ struct BootConfig {
     proposal_bucket_capacity: u16,
     proposal_bucket_refill_per_tick: u16,
     max_event_age_ticks: u64,
+    idempotency_bucket_capacity: u32, // Max dedupe keys per tick-bucket (memory guardrail)
 }
 
 struct LiveConfig {
@@ -47,6 +50,47 @@ impl<T> BoundedQueue<T> {
     fn is_full(&self) -> bool { self.buffer.len() >= self.capacity }
     fn len(&self) -> usize { self.buffer.len() }
     fn is_empty(&self) -> bool { self.buffer.is_empty() }
+}
+
+enum LedgerInsertResult {
+    Inserted,
+    Duplicate,
+    Overflow,
+}
+
+// Capacity-limited idempotency bucket (one slot in the MAX_EVENT_AGE_TICKS ring).
+// Keeps dedupe memory bounded under spikes.
+struct BoundedLedgerBucket {
+    entries: HashSet<(UUID, EntityID)>,
+    capacity: usize,
+    overflowed_this_tick: bool,
+}
+
+impl BoundedLedgerBucket {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashSet::with_capacity(capacity),
+            capacity,
+            overflowed_this_tick: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.overflowed_this_tick = false;
+    }
+
+    fn try_insert(&mut self, key: (UUID, EntityID)) -> LedgerInsertResult {
+        if self.entries.contains(&key) {
+            return LedgerInsertResult::Duplicate;
+        }
+        if self.entries.len() >= self.capacity {
+            self.overflowed_this_tick = true;
+            return LedgerInsertResult::Overflow;
+        }
+        self.entries.insert(key);
+        LedgerInsertResult::Inserted
+    }
 }
 
 // Thin wrapper over an R-Tree (rstar crate) for O(log n) spatial queries on entity positions.
@@ -161,6 +205,11 @@ struct SpatialActor {
     rtree_depth: u8,
     region_bounds: Rect,
     current_tick: u64,
+    frame_pacing_offset_micros: i64,        // Applied to sleep budget each frame
+    target_frame_pacing_offset_micros: i64, // Set by SyncHeartbeat correction target
+    last_sync_heartbeat_tick: u64,          // current_tick at last accepted SyncHeartbeat
+    metronome_outlier_count: u64,           // Diagnostics only
+    metronome_degraded: bool,               // True after prolonged heartbeat loss warning emitted
     
     // The "Temporal Swamp" Factor (0.0 to 1.0)
     // 1.0 = Full speed (60Hz resolution)
@@ -189,15 +238,29 @@ struct SpatialActor {
     ghost_entities: HashMap<EntityID, GhostState2D>, 
     ghost_grid: SpatialIndex<EntityID>, // Mirrors ghost positions for cheap downstream visibility queries
     proposal_buckets: HashMap<EntityID, TokenBucket>, // Per-entity fairness guard on ingress
+    commander_bindings: HashMap<EntityID, CommanderBinding>, // commander_entity_id -> binding metadata
+    creep_overrides: HashMap<EntityID, (CreepDirective, u64)>, // creep_id -> (directive, expires_at_tick)
+    ai_controlled_entities: HashSet<EntityID>, // Named NPCs currently controlled by an AI Node
     merge_state: Option<MergeState>,
     processed_proposals: LruCache<UUID, bool>, 
     
     // Event Idempotency Ledger: Prevents double-damage from delayed or duplicate relays.
-    // Dynamically sized to the max event age to survive delayed packets and Hitless Handoffs.
-    event_idempotency_ledger: [HashSet<(UUID, EntityID)>; MAX_EVENT_AGE_TICKS as usize], 
+    // Memory-bounded ring: max keys ~= idempotency_bucket_capacity * MAX_EVENT_AGE_TICKS.
+    event_idempotency_ledger: [BoundedLedgerBucket; MAX_EVENT_AGE_TICKS as usize], // each bucket initialized with boot_config.idempotency_bucket_capacity
+    idempotency_overflow_drop_count: u64, // Impacts dropped fail-closed due to dedupe cap
+    idempotency_merge_overflow_drop_count: u64, // Imported merge dedupe keys dropped due to cap
 }
 
 impl SpatialActor {
+    const FRAME_BUDGET_US: i64 = 16_666;
+    const METRONOME_GAIN_US_PER_TICK: i64 = 50;
+    const METRONOME_OFFSET_CLAMP_US: i64 = 1000;
+    const METRONOME_SLEW_CLAMP_US_PER_FRAME: i64 = 50;
+    const METRONOME_DECAY_US_PER_FRAME: i64 = 10;
+    const METRONOME_DIFF_OUTLIER_TICKS: i64 = 300;
+    const METRONOME_HEARTBEAT_STALE_TICKS: u64 = 180;    // 3 seconds @ 60Hz
+    const METRONOME_HEARTBEAT_DEGRADED_TICKS: u64 = 600; // 10 seconds @ 60Hz
+
     fn verify_mesh_auth<T>(&self, header: &MeshAuthHeader, payload: &T) -> bool {
         // Pseudocode:
         // 1) validate auth_epoch/key-id is currently accepted
@@ -223,6 +286,7 @@ impl SpatialActor {
                 | ActionPayload::SpawnProjectile { .. }
                 | ActionPayload::UseConsumable { .. }
                 | ActionPayload::Interact { .. }
+                | ActionPayload::IssueCreepCommand { .. }
         ) {
             self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
                 proposal_id: proposal.proposal_id,
@@ -266,6 +330,7 @@ impl SpatialActor {
 
     // Core Loop: Runs strictly every 16.6ms (60Hz)
     fn tick(&mut self) {
+        let frame_start = monotonic_now();
         self.current_tick += 1;
         
         // 0. O(1) Ledger Cleanup
@@ -486,6 +551,12 @@ impl SpatialActor {
         self.broadcast_ghosts_to_neighbors();
         self.broadcast_with_interest_management(); 
         self.tick_merge_forwarding();
+        self.gc_expired_projectile_prepares();
+        self.update_metronome_correction();
+
+        let sim_elapsed_us = monotonic_elapsed_micros(frame_start);
+        let sleep_us = self.compute_frame_sleep_micros(sim_elapsed_us);
+        sleep_micros(sleep_us as u64);
     }
 
     // --- Ghost Integration (Low-Cost / Anomaly-Gated) ---
@@ -803,14 +874,13 @@ impl SpatialActor {
                 }
             },
             ActionPayload::ImpactEvent { impact_id, target_ids, epicenter, geometry, impact_tick, context } => {
-                // Network Discard Window: Drop packets that are older than our ledger's memory capacity.
+                // Network Discard Window: Drop packets older than the replay horizon.
                 // Using `>=` ensures we don't accidentally write to the bucket currently being cleared.
                 if self.current_tick.saturating_sub(impact_tick) >= MAX_EVENT_AGE_TICKS { return; }
 
                 for target_id in target_ids {
                     let ledger_key = (impact_id, target_id);
                     let bucket_index = (impact_tick % MAX_EVENT_AGE_TICKS) as usize;
-                    if self.event_idempotency_ledger[bucket_index].contains(&ledger_key) { continue; }
 
                     // SCENARIO A: Target is a REAL entity owned by this Arbiter
                     if let Some(target) = self.entities.get(&target_id) {
@@ -824,8 +894,16 @@ impl SpatialActor {
                             let ghost_drift_tolerance = calculate_ghost_drift(impact_tick, self.current_tick);
                             
                             if geometry.is_inside_with_tolerance(target.position, epicenter, ghost_drift_tolerance) {
-                                self.event_idempotency_ledger[bucket_index].insert(ledger_key);
-                                self.apply_combat_math(target_id, source_actor_id, context.clone(), distance_to_impact);
+                                match self.try_insert_idempotency_key(bucket_index, ledger_key) {
+                                    LedgerInsertResult::Inserted => {
+                                        self.apply_combat_math(target_id, source_actor_id, context.clone(), distance_to_impact);
+                                    }
+                                    LedgerInsertResult::Duplicate => {}
+                                    LedgerInsertResult::Overflow => {
+                                        // Fail-closed: never apply when dedupe cannot be guaranteed.
+                                        self.idempotency_overflow_drop_count = self.idempotency_overflow_drop_count.saturating_add(1);
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -834,7 +912,15 @@ impl SpatialActor {
                     // SCENARIO B: Target is a GHOST entity owned by a neighboring Arbiter
                     if let Some(ghost) = self.ghost_entities.get(&target_id) {
                         if ghost.position.is_inside_geometry(epicenter, &geometry) {
-                            self.event_idempotency_ledger[bucket_index].insert(ledger_key);
+                            match self.try_insert_idempotency_key(bucket_index, ledger_key) {
+                                LedgerInsertResult::Inserted => {}
+                                LedgerInsertResult::Duplicate => { continue; }
+                                LedgerInsertResult::Overflow => {
+                                    // Fail-closed: do not relay if dedupe key cannot be reserved.
+                                    self.idempotency_overflow_drop_count = self.idempotency_overflow_drop_count.saturating_add(1);
+                                    continue;
+                                }
+                            }
                             
                             // Package the ImpactEvent and relay it to the Ghost's true owner
                             let relay_payload = MeshInternalEvent {
@@ -935,6 +1021,62 @@ impl SpatialActor {
                     }
                 }
             },
+            ActionPayload::IssueCreepCommand { target_creeps, directive } => {
+                let commander_id = source_actor_id.expect("IssueCreepCommand requires a commander source actor");
+
+                let commander_pos = match self.entities.get(&commander_id) {
+                    Some(entity) if !entity.is_dead => entity.position,
+                    _ => {
+                        if let Some(prop_id) = original_proposal_id {
+                            self.send_downstream(commander_id, DownstreamPayload::ActionFailed {
+                                proposal_id: prop_id,
+                                reason: "CommanderDead".to_string()
+                            });
+                        }
+                        return;
+                    }
+                };
+
+                let binding = match self.commander_bindings.get(&commander_id) {
+                    Some(binding) => binding,
+                    None => {
+                        if let Some(prop_id) = original_proposal_id {
+                            self.send_downstream(commander_id, DownstreamPayload::ActionFailed {
+                                proposal_id: prop_id,
+                                reason: "NoBinding".to_string()
+                            });
+                        }
+                        return;
+                    }
+                };
+
+                for creep_id in target_creeps {
+                    // Binding membership and locality are both required.
+                    if !binding.subordinate_entities.contains(&creep_id) {
+                        continue;
+                    }
+
+                    let creep_pos = match self.entities.get(&creep_id) {
+                        Some(creep) if self.has_jurisdiction_over(creep.position) => creep.position,
+                        _ => {
+                            continue; // Non-local creeps are ignored under Arbiter-local Commander rules.
+                        }
+                    };
+
+                    if commander_pos.distance_to(creep_pos) > binding.command_range {
+                        continue;
+                    }
+
+                    self.creep_overrides.insert(
+                        creep_id,
+                        (directive.clone(), self.current_tick + binding.override_ttl_ticks as u64),
+                    );
+                }
+
+                if let Some(prop_id) = original_proposal_id {
+                    self.send_downstream(commander_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
+                }
+            },
             ActionPayload::UseConsumable { item_id } => {
                 let actor_id = source_actor_id.unwrap();
                 // 1. Verify inventory via asynchronous Meta Service check (or pre-synced local SoftState)
@@ -956,7 +1098,7 @@ impl SpatialActor {
     // --- Deep RPG Combat Engine ---
     // This centralizes all complex ARPG/MOBA math (Armor, Resistance, Weight, Falloff)
     // ensuring it only runs on the true authoritative owner of the target.
-    // (See ../2-gameplay-and-design/01-rpg-mechanics-and-state.md for the full mitigation formula including Evasion and Block).
+    // (See ../../3-gameplay-systems/01-rpg-mechanics.md for the full mitigation formula including Evasion and Block).
     // 
     // RUST BORROW CHECKER NOTE: This function takes a mutable borrow of the `victim`. 
     // You cannot simultaneously take a mutable borrow of the `attacker` from `self.entities` 
@@ -979,7 +1121,7 @@ impl SpatialActor {
         let mut incoming_damage = context.base_damage as SimFixed * distance_multiplier;
 
         // 2. Resistance & Penetration Mitigation
-        // Note: For brevity, Evasion and Block checks are omitted here. See ../2-gameplay-and-design/01-rpg-mechanics-and-state.md.
+        // Note: For brevity, Evasion and Block checks are omitted here. See ../../3-gameplay-systems/01-rpg-mechanics.md.
         if context.damage_type != 99 {
             let mut effective_resistance = victim.defense.resistances[context.damage_type as usize];
             
@@ -1064,11 +1206,18 @@ impl SpatialActor {
                 self.on_finalize_merge_command(merge_id, winner_arbiter_id, loser_arbiter_id, new_epoch);
             }
             ControllerCommand::SyncHeartbeat { controller_shard_tick } => {
-                // The Metronome Corrector
                 let diff = (controller_shard_tick as i64) - (self.current_tick as i64);
-                // Adjust our frame sleep target (e.g., +/- 100 microseconds per frame) to smoothly catch up 
-                // or slow down without causing a massive temporal snap that would break ghost extrapolation.
-                self.frame_pacing_offset_micros = (diff * 50).clamp(-1000, 1000); 
+
+                // Outlier guard: ignore improbable one-off samples.
+                if diff.abs() > Self::METRONOME_DIFF_OUTLIER_TICKS {
+                    self.metronome_outlier_count = self.metronome_outlier_count.saturating_add(1);
+                    return;
+                }
+
+                self.last_sync_heartbeat_tick = self.current_tick;
+                self.metronome_degraded = false;
+                self.target_frame_pacing_offset_micros = (diff * Self::METRONOME_GAIN_US_PER_TICK)
+                    .clamp(-Self::METRONOME_OFFSET_CLAMP_US, Self::METRONOME_OFFSET_CLAMP_US);
             }
             ControllerCommand::PrepareDataEpoch { new_epoch, asset_uri, checksum } => {
                 // Offload the I/O to a background thread so the 60Hz loop never stalls.
@@ -1076,8 +1225,48 @@ impl SpatialActor {
                 // into a lock-free queue that the Arbiter reads from at the top of tick().
                 self.asset_loader.async_fetch_and_parse(new_epoch, asset_uri, checksum);
             }
+            ControllerCommand::AbortPendingHandoffs { crashed_arbiter_id } => {
+                self.abort_pending_projectile_handoffs_from(crashed_arbiter_id);
+            }
             _ => { /* ExecuteGlobalEvent and Splits handled in scheduler block */ }
         }
+    }
+
+    // Called once per frame before sleeping.
+    fn update_metronome_correction(&mut self) {
+        let since_last = self.current_tick.saturating_sub(self.last_sync_heartbeat_tick);
+
+        if since_last > Self::METRONOME_HEARTBEAT_STALE_TICKS {
+            // Heartbeat stale: freeze target updates and decay toward zero.
+            self.target_frame_pacing_offset_micros = 0;
+            let step = self.frame_pacing_offset_micros
+                .abs()
+                .min(Self::METRONOME_DECAY_US_PER_FRAME);
+            self.frame_pacing_offset_micros -= self.frame_pacing_offset_micros.signum() * step;
+        } else {
+            // Normal correction: slew-limited convergence.
+            let delta = self.target_frame_pacing_offset_micros - self.frame_pacing_offset_micros;
+            self.frame_pacing_offset_micros += delta
+                .clamp(-Self::METRONOME_SLEW_CLAMP_US_PER_FRAME, Self::METRONOME_SLEW_CLAMP_US_PER_FRAME);
+        }
+
+        if since_last > Self::METRONOME_HEARTBEAT_DEGRADED_TICKS && !self.metronome_degraded {
+            self.emit_control_plane_warning("SyncHeartbeat missing >10s".to_string());
+            self.metronome_degraded = true;
+        }
+    }
+
+    // Sleep budget contract for the 60Hz loop:
+    // sleep_us = max(0, 16_666 - sim_elapsed_us + frame_pacing_offset_micros)
+    fn compute_frame_sleep_micros(&self, sim_elapsed_us: i64) -> i64 {
+        (Self::FRAME_BUDGET_US - sim_elapsed_us + self.frame_pacing_offset_micros).max(0)
+    }
+
+    fn try_insert_idempotency_key(&mut self, bucket_index: usize, key: (UUID, EntityID)) -> LedgerInsertResult {
+        if bucket_index >= self.event_idempotency_ledger.len() {
+            return LedgerInsertResult::Overflow;
+        }
+        self.event_idempotency_ledger[bucket_index].try_insert(key)
     }
 
     fn simulate_physics_step(&mut self) {
@@ -1197,8 +1386,15 @@ enum ProjectileHandoffState {
         to_arbiter_id: u32,
         handoff_seq: u64,
         commit_tick: u64,
+        prepare_expiry_tick: u64,
         acked: bool,
     },
+    ShadowPendingCommit {
+        from_arbiter_id: u32,
+        handoff_seq: u64,
+        commit_tick: u64,
+        prepare_expiry_tick: u64,
+    }, // Replica staged from Prepare; never simulates unless Commit promotes ownership
     Shadow, // Replica kept briefly after commit; never simulates
 }
 
@@ -1231,7 +1427,12 @@ impl ProjectileActor {
         if self.authoritative_arbiter_id != current_arbiter_id() { return None; }
 
         // Runtime cross-boundary transfer: lightweight RUDP Prepare/Ack/Commit.
-        if let ProjectileHandoffState::TransferPending { to_arbiter_id, handoff_seq, commit_tick, acked } = self.handoff_state {
+        if let ProjectileHandoffState::TransferPending { to_arbiter_id, handoff_seq, commit_tick, prepare_expiry_tick, acked } = self.handoff_state {
+            if !acked && current_shard_tick() > prepare_expiry_tick {
+                // Fail-closed: unresolved ownership window cancels projectile rather than risking dual simulation.
+                self.cancel_due_to_handoff_timeout();
+                return None;
+            }
             if acked && current_shard_tick() >= commit_tick {
                 self.send_projectile_handoff_rudp(ProjectileHandoffMessage::Commit {
                     projectile_id: self.projectile_id,
@@ -1249,10 +1450,12 @@ impl ProjectileActor {
             self.handoff_seq = self.handoff_seq.saturating_add(1);
             let destination = choose_neighbor_by_depth_then_id(self.position, self.velocity);
             let commit_tick = current_shard_tick() + 2; // deterministic small future window
+            let prepare_expiry_tick = commit_tick + MAX_EVENT_AGE_TICKS;
             self.handoff_state = ProjectileHandoffState::TransferPending {
                 to_arbiter_id: destination,
                 handoff_seq: self.handoff_seq,
                 commit_tick,
+                prepare_expiry_tick,
                 acked: false,
             };
             self.send_projectile_handoff_rudp(ProjectileHandoffMessage::Prepare {
@@ -1263,6 +1466,7 @@ impl ProjectileActor {
                 topology_epoch: current_topology_epoch(),
                 source_tick: current_shard_tick(),
                 commit_tick,
+                prepare_expiry_tick,
                 snapshot: self.to_snapshot(),
             });
         }
@@ -1275,8 +1479,16 @@ impl ProjectileActor {
             self.velocity = desired_dir * self.spell_data.projectile_speed;
         }
 
-        self.position.x += self.velocity.x;
-        self.position.y += self.velocity.y;
+        // Cross-boundary Temporal Swamp transition:
+        // Blend source/destination dilation across the overlap band to avoid velocity snaps.
+        let step_dilation = compute_projectile_step_dilation(
+            self.position,
+            current_arbiter_region(),
+            current_arbiter_dilation(),
+            current_neighbor_regions(),
+            live_config().dilation.cross_boundary_blend_width_meters,
+        );
+        self.position = self.position + (self.velocity * step_dilation);
         self.remaining_lifetime_ticks = self.remaining_lifetime_ticks.saturating_sub(1);
         self.fuse_remaining_ticks = self.fuse_remaining_ticks.saturating_sub(1);
 
@@ -1337,6 +1549,47 @@ impl ProjectileActor {
             proc_depth: self.proc_depth,
         }
     }
+
+    fn cancel_due_to_handoff_timeout(&mut self) {
+        // Deterministic fail-closed behavior for rare ambiguous ownership windows.
+        self.remaining_lifetime_ticks = 0;
+        self.authoritative_arbiter_id = u32::MAX; // Sentinel: no owner; prevents further simulation.
+        self.handoff_state = ProjectileHandoffState::Shadow;
+    }
+}
+
+fn compute_projectile_step_dilation(
+    position: Vec2F,
+    source_region: Rect,
+    source_dilation: SimFixed,
+    neighbors: &Vec<NeighborRegion>,
+    blend_width_meters: SimFixed,
+) -> SimFixed {
+    let Some((neighbor, signed_distance)) = find_crossing_neighbor_and_signed_distance(position, source_region, neighbors) else {
+        return source_dilation;
+    };
+
+    // alpha = clamp((s + w/2) / w, 0, 1)
+    // effective = lerp(source, destination, alpha)
+    let half = blend_width_meters / SimFixed::from_num(2);
+    let alpha = ((signed_distance + half) / blend_width_meters)
+        .clamp(SimFixed::from_num(0), SimFixed::from_num(1));
+    source_dilation + ((neighbor.dilation_factor - source_dilation) * alpha)
+}
+
+// Deterministic requirement:
+// - signed_distance must be derived from topology-epoch boundary geometry in fixed-point.
+// - both Arbiters and Edge prediction run the same equation; no side-specific variants.
+fn find_crossing_neighbor_and_signed_distance(
+    position: Vec2F,
+    source_region: Rect,
+    neighbors: &Vec<NeighborRegion>,
+) -> Option<(&NeighborRegion, SimFixed)> {
+    // Pseudocode:
+    // 1) pick the deterministic destination neighbor (depth then ArbiterID tie-break)
+    // 2) compute signed distance to shared boundary plane (source->destination normal)
+    // 3) return neighbor + signed distance
+    todo!()
 }
 ```
 
@@ -1380,9 +1633,15 @@ fn on_projectile_handoff_rudp(&mut self, auth: MeshAuthHeader, msg: ProjectileHa
     match msg {
         ProjectileHandoffMessage::Prepare {
             projectile_id, handoff_seq, from_arbiter_id, to_arbiter_id,
-            topology_epoch, source_tick, commit_tick, snapshot
+            topology_epoch, source_tick, commit_tick, prepare_expiry_tick, snapshot
         } => {
             if to_arbiter_id != self.arbiter_id { return; }
+            if current_shard_tick() > prepare_expiry_tick {
+                self.send_projectile_handoff_rudp(ProjectileHandoffMessage::Reject {
+                    projectile_id, handoff_seq, reason: "PrepareExpired".to_string()
+                });
+                return;
+            }
 
             // Epoch safety mirrors proposal-epoch rules.
             if topology_epoch < self.topology_epoch {
@@ -1406,10 +1665,17 @@ fn on_projectile_handoff_rudp(&mut self, auth: MeshAuthHeader, msg: ProjectileHa
             // Reconstruct full mid-flight state from snapshot.
             let mut p = ProjectileActor::from_snapshot(snapshot);
             p.authoritative_arbiter_id = from_arbiter_id; // Owner flips at commit_tick only.
-            p.handoff_state = ProjectileHandoffState::Shadow;
+            p.handoff_state = ProjectileHandoffState::ShadowPendingCommit {
+                from_arbiter_id,
+                handoff_seq,
+                commit_tick,
+                prepare_expiry_tick,
+            };
             p.handoff_seq = handoff_seq;
             p.handoff_topology_epoch = topology_epoch;
             p.handoff_cutover_tick = commit_tick;
+            // Do not rewrite velocity/position for dilation. Continuity comes from the shared
+            // blend-band equation and deterministic topology geometry.
             self.projectiles.insert(projectile_id, p);
 
             self.send_projectile_handoff_rudp(ProjectileHandoffMessage::Ack {
@@ -1424,21 +1690,76 @@ fn on_projectile_handoff_rudp(&mut self, auth: MeshAuthHeader, msg: ProjectileHa
             }
         }
         ProjectileHandoffMessage::Commit { projectile_id, handoff_seq, new_owner_arbiter_id, commit_tick } => {
+            let mut remove_expired_shadow = false;
             if let Some(p) = self.projectiles.get_mut(&projectile_id) {
-                if handoff_seq >= p.handoff_seq && current_shard_tick() >= commit_tick {
-                    p.authoritative_arbiter_id = new_owner_arbiter_id;
-                    p.handoff_state = if new_owner_arbiter_id == self.arbiter_id {
-                        ProjectileHandoffState::Owned
-                    } else {
-                        ProjectileHandoffState::Shadow
-                    };
+                let expired_prepare = match p.handoff_state {
+                    ProjectileHandoffState::ShadowPendingCommit { prepare_expiry_tick, .. } => {
+                        current_shard_tick() > prepare_expiry_tick
+                    }
+                    _ => false,
+                };
+                if expired_prepare {
+                    remove_expired_shadow = true;
+                } else if handoff_seq >= p.handoff_seq && current_shard_tick() >= commit_tick {
+                    if matches!(
+                        p.handoff_state,
+                        ProjectileHandoffState::ShadowPendingCommit { handoff_seq: seq, commit_tick: ct, .. }
+                            if seq == handoff_seq && ct == commit_tick
+                    ) || matches!(p.handoff_state, ProjectileHandoffState::TransferPending { .. }) {
+                        p.authoritative_arbiter_id = new_owner_arbiter_id;
+                        p.handoff_state = if new_owner_arbiter_id == self.arbiter_id {
+                            ProjectileHandoffState::Owned
+                        } else {
+                            ProjectileHandoffState::Shadow
+                        };
+                    }
                 }
+            }
+            if remove_expired_shadow {
+                self.projectiles.remove(&projectile_id);
             }
         }
         ProjectileHandoffMessage::Reject { .. } => {
             // Sender remains authoritative and retries with updated destination/epoch.
         }
+        ProjectileHandoffMessage::Abort { projectile_id, handoff_seq, from_arbiter_id, to_arbiter_id, .. } => {
+            if to_arbiter_id != self.arbiter_id { return; }
+            let mut remove_shadow = false;
+            if let Some(p) = self.projectiles.get(&projectile_id) {
+                if matches!(
+                    p.handoff_state,
+                    ProjectileHandoffState::ShadowPendingCommit { from_arbiter_id: src, handoff_seq: seq, .. }
+                        if src == from_arbiter_id && seq == handoff_seq
+                ) {
+                    remove_shadow = true;
+                }
+            }
+            if remove_shadow {
+                self.projectiles.remove(&projectile_id);
+            }
+        }
     }
+}
+
+fn gc_expired_projectile_prepares(&mut self) {
+    let now = self.current_tick;
+    self.projectiles.retain(|_, p| {
+        !matches!(
+            p.handoff_state,
+            ProjectileHandoffState::ShadowPendingCommit { prepare_expiry_tick, .. }
+                if now > prepare_expiry_tick
+        )
+    });
+}
+
+fn abort_pending_projectile_handoffs_from(&mut self, crashed_arbiter_id: u32) {
+    self.projectiles.retain(|_, p| {
+        !matches!(
+            p.handoff_state,
+            ProjectileHandoffState::ShadowPendingCommit { from_arbiter_id, .. }
+                if from_arbiter_id == crashed_arbiter_id
+        )
+    });
 }
 ```
 
@@ -1625,12 +1946,14 @@ fn apply_merge_snapshot_atomic(&mut self, merge_id: UUID, new_epoch: u32) {
         }
     }
 
-    // 3) Idempotency ledger union by absolute bucket tick (phase-safe remap).
+    // 3) Idempotency ledger union by absolute bucket tick (phase-safe remap, capacity-bounded).
     for b in staged.ledger_ring {
         let idx = (b.bucket_tick % MAX_EVENT_AGE_TICKS) as usize;
         if idx >= self.event_idempotency_ledger.len() { continue; }
         for entry in b.entries {
-            self.event_idempotency_ledger[idx].insert(entry);
+            if matches!(self.try_insert_idempotency_key(idx, entry), LedgerInsertResult::Overflow) {
+                self.idempotency_merge_overflow_drop_count = self.idempotency_merge_overflow_drop_count.saturating_add(1);
+            }
         }
     }
 
@@ -1652,6 +1975,47 @@ fn tick_merge_forwarding(&mut self) {
                 });
                 self.shutdown_or_return_to_pool();
             }
+        }
+    }
+}
+```
+
+### 3.2 AI Node + Commander Addendum
+
+The sections above define the core Arbiter runtime. The following minimal addendum pins the integration points for `MetaCommand::BindCommander`, `MetaCommand::EdgeNodeDead`, and AI-node passive mode recovery.
+
+```rust
+fn on_meta_command(&mut self, cmd: MetaCommand) {
+    match cmd {
+        MetaCommand::BindCommander {
+            commander_entity_id,
+            subordinate_entities,
+            command_range,
+            override_ttl_ticks,
+        } => {
+            self.commander_bindings.insert(
+                commander_entity_id,
+                CommanderBinding {
+                    commander_entity_id,
+                    subordinate_entities,
+                    command_range,
+                    override_ttl_ticks,
+                },
+            );
+        }
+        MetaCommand::EdgeNodeDead { affected_entities, .. } => {
+            for entity_id in affected_entities {
+                if self.ai_controlled_entities.contains(&entity_id) {
+                    // Named NPC fallback path: passive mode, no logout fuse.
+                    self.set_npc_passive_mode(entity_id); // Idle + zero velocity + aggro disabled
+                } else {
+                    // Player fallback path: existing wilderness logout fuse.
+                    self.start_logout_fuse(entity_id);
+                }
+            }
+        }
+        _ => {
+            // Existing Meta command handlers (SpawnEntity, UpdateEntityStats, etc.) omitted for brevity.
         }
     }
 }

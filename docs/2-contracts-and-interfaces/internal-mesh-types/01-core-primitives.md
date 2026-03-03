@@ -1,3 +1,5 @@
+# Internal Mesh Types: Core Primitives
+
 ## 1. Core Messaging Primitives
 
 The system communicates exclusively via asynchronous message passing. The `ActionProposal` is the universal envelope used by Proxy Actors (Edge Nodes) to propose state changes to Spatial Actors (Mesh Arbiters).
@@ -143,6 +145,9 @@ enum ControllerCommand {
         asset_uri: String, // e.g., "s3://game-assets/balance/v1.02.fb"
         checksum: String,
     },
+    AbortPendingHandoffs {
+        crashed_arbiter_id: u32, // Controller-declared dead sender; purge uncommitted handoffs from this source
+    },
     BeginSplit {
         split_id: UUID,
         surrogate_arbiter_id: u32, // The currently overloaded Arbiter (A)
@@ -194,6 +199,7 @@ struct DilationConfig {
     critical_entity_threshold: u32,  // e.g., 1000 - At/above this, dilation is minimum_dilation_factor
     minimum_dilation_factor: SimFixed, // e.g., 0.2 (1/5th speed)
     curve_exponent: SimFixed,        // 1.0 = Linear, 2.0 = Quadratic
+    cross_boundary_blend_width_meters: SimFixed, // Blend band for deterministic source->neighbor dilation transitions
 }
 
 struct NeighborRegion {
@@ -274,8 +280,51 @@ struct EntityStateUpdate {
     is_ghost: bool,
 }
 
+// --- Primary Attributes (Meta-Owned, Compiled into Combat Stats) ---
+// The character's 12 Minor Attributes organized into 4 Major Attribute domains.
+// Meta compiles these from base allocation + equipment + affixes, then converts to
+// derived combat stats via designer-configurable formulas (see RPG Mechanics § 1).
+// The Arbiter never sees PrimaryAttributes — it only receives the compiled result
+// as OffensiveStats, DefensiveStats, and CoreStats via UpdateEntityStats.
+// Major Attribute totals (Body, Mind, Soul, Fate) are computed as sums of their
+// three Minors and used for equipment requirements and content gating.
+struct PrimaryAttributes {
+    // Body (Physical Domain)
+    vigor: u16,         // Physical power: melee damage, knockback, block effectiveness, carry capacity
+    agility: u16,       // Speed/reflexes: attack speed, evasion, movement, lockpicking, stealth
+    endurance: u16,     // Toughness: max HP, HP regen, physical resistances, stamina, durability
+
+    // Mind (Mental Domain)
+    intellect: u16,     // Cognitive power: spell damage, max resource, CDR, enchanting, recipes
+    perception: u16,    // Awareness: crit chance, armor pen, AoE precision, detect hidden, tracking
+    willpower: u16,     // Discipline: CC resist/duration, resource cost, crafting focus, corruption resist
+
+    // Soul (Spiritual Domain)
+    spirit: u16,        // Inner energy: resource regen, healing power, buff duration, taming, alchemy
+    attunement: u16,    // Elemental connection: elemental damage/resist, summon bond, thorns, ley lines
+    resolve: u16,       // Conviction: curse resist, death penalty reduction, cleanse, corrupted zone protection
+
+    // Fate (Metaphysical Domain)
+    fortune: u16,       // Luck: crit multiplier, proc chance, loot rarity, gold find, gambling
+    presence: u16,      // Personality: aura radius, summon/pet power, threat, vendor prices, reputation
+    cunning: u16,       // Resourcefulness: debuff bonus damage, ambush damage, counter-attack, traps
+}
+
+// --- Discoverable Secondary Attributes ---
+// Appear on item tooltips as raw numbers (e.g., "+22 Poise") with NO in-game explanation.
+// Players must discover their mechanics through experimentation and community research.
+// Compiled from equipment and pushed to the Arbiter alongside primary-derived stats.
+// See RPG Mechanics § 1.3 for detailed descriptions of each secondary attribute.
+struct SecondaryAttributes {
+    momentum: u16,      // Builds on consecutive hits; hidden breakpoints boost attack speed and damage
+    poise: u16,         // Hidden stagger/interrupt resistance threshold system
+    echo: u16,          // Bestiary mastery accumulation rate for repeated monster kills
+    affinity: u16,      // Elemental identity development threshold reduction
+    synchrony: u16,     // Party stability bonus accumulation rate
+}
+
 // --- Stat Modifier System (Buff/Debuff Stat Layering) ---
-// See RPG Mechanics § 1.3 for the full evaluation algorithm and examples.
+// See RPG Mechanics § 2.3 for the full evaluation algorithm and examples.
 // Modifiers are carried on ActiveStatusEffect and layered on top of the
 // immutable base OffensiveStats/DefensiveStats at evaluation time (Pre-Roll
 // for offense, Resolution for defense). The stored base structs are never mutated.
@@ -284,10 +333,12 @@ enum StatModifier {
     // Additive: base_value + flat_value (applied first, before multiplicative)
     FlatOffense { field: OffenseField, value: SimFixed },
     FlatDefense { field: DefenseField, value: SimFixed },
+    FlatCore { field: CoreField, value: SimFixed },
 
     // Multiplicative: base_value * multiplier (applied after all additives)
     MultOffense { field: OffenseField, multiplier: SimFixed },
     MultDefense { field: DefenseField, multiplier: SimFixed },
+    MultCore { field: CoreField, multiplier: SimFixed },
 
     // Appends a temporary conditional to the effective OffensiveStats at Pre-Roll time
     AddConditional { conditional: OffensiveCondition },
@@ -295,51 +346,114 @@ enum StatModifier {
 
 enum OffenseField {
     GlobalDamageMultiplier,
+    PhysicalDamageMultiplier,
+    SpellDamageMultiplier,
+    ElementalDamageMultiplier,
     CritChance,
     CritMultiplier,
     ArmorPenetrationPct,
     ArmorPenetrationFlat,
+    AttackSpeed,
+    CooldownReduction,
+    LifestealPct,
+    SpellVampPct,
+    StatusEffectDuration,
+    AoeRadiusMultiplier,
+    ProjectileSpeedMultiplier,
+    ProcChanceMultiplier,
+    DebuffBonusDamage,
+    AmbushDamageMultiplier,
+    CounterAttackChance,
 }
 
 enum DefenseField {
     Resistance { damage_type: u8 },
     EvasionRating,
     BlockChance,
+    BlockEffectiveness,
     ThornsDamage,
+    DamageReductionPct,
+    HealingReceivedMultiplier,
+    StatusEffectResistance,
+    CurseResistance,
+    Poise,
+}
+
+enum CoreField {
+    MoveSpeed,
+    Weight,
+    TimeScale,
+    MaxHpBonus,
+    MaxResourceBonus,
+    HpRegenPerTick,
+    ResourceRegenPerTick,
 }
 
 // --- Offensive Stats (Companion Struct — Immutable Base) ---
 // Stored alongside SoftState in the Arbiter's per-entity storage, NOT inside SoftState.
-// Compiled by Meta Services from equipment/inventory and pushed via UpdateEntityStats.
+// Compiled by Meta from PrimaryAttributes + equipment affixes and pushed via UpdateEntityStats.
 // The Arbiter never mutates this struct during gameplay; temporary buffs are layered
 // on top via StatModifier entries on ActiveStatusEffect at cast time.
-// See RPG Mechanics § 1.1 for gameplay context and § 1.3 for the modifier pattern.
+// See RPG Mechanics § 2.1 for gameplay context and § 2.3 for the modifier pattern.
 struct OffensiveStats {
-    global_damage_multiplier: SimFixed, // e.g., 1.2 (+20% all damage)
-    crit_chance: SimFixed,              // 0.0 to 1.0
-    crit_multiplier: SimFixed,          // e.g., 1.5 (150% damage)
-    armor_penetration_pct: SimFixed,    // e.g., 0.3 (Ignores 30% of target armor)
-    armor_penetration_flat: SimFixed,   // e.g., 10 (Ignores 10 flat armor)
+    // --- Damage Scaling ---
+    global_damage_multiplier: SimFixed, // Multiplicative with type-specific multipliers
+    physical_damage_multiplier: SimFixed, // Derived from Vigor; scales physical-origin damage
+    spell_damage_multiplier: SimFixed,    // Derived from Intellect; scales spell-origin damage
+    elemental_damage_multiplier: SimFixed, // Derived from Attunement; scales all elemental types
 
-    // Elemental Damage Conversions (Path of Exile style)
+    // --- Critical Strikes ---
+    crit_chance: SimFixed,              // 0.0 to 1.0; derived from Perception (primary), Agility (minor)
+    crit_multiplier: SimFixed,          // Base 1.5; derived from Fortune
+
+    // --- Penetration ---
+    armor_penetration_pct: SimFixed,    // Derived from Perception
+    armor_penetration_flat: SimFixed,   // Derived from Perception (minor contribution)
+
+    // --- Speed & Efficiency ---
+    attack_speed: SimFixed,             // Derived from Agility; multiplier on ability cast/recovery times
+    cooldown_reduction: SimFixed,       // Derived from Intellect (minor); capped per designer config
+
+    // --- Sustain ---
+    lifesteal_pct: SimFixed,            // Direct affixes only; % physical damage → HP
+    spell_vamp_pct: SimFixed,           // Direct affixes only; % spell damage → HP
+
+    // --- Effect Modifiers ---
+    status_effect_duration: SimFixed,   // Derived from Spirit (primary), Willpower (minor); +% your debuffs
+    aoe_radius_multiplier: SimFixed,    // Derived from Perception (minor); +% area ability radius
+    projectile_speed_multiplier: SimFixed, // Derived from Agility (minor); +% projectile velocity
+    proc_chance_multiplier: SimFixed,   // Derived from Fortune; +% item/ability proc triggers
+
+    // --- Cunning (Exploitation) ---
+    debuff_bonus_damage: SimFixed,      // Derived from Cunning; +% damage to debuffed/CC'd targets
+    ambush_damage_multiplier: SimFixed, // Derived from Cunning; +% damage on first strike from stealth
+    counter_attack_chance: SimFixed,    // Derived from Cunning (minor); chance to auto-retaliate on hit
+
+    // --- Elemental Damage Conversions (Path of Exile style) ---
     // A 16-element array indexed by damage_type (matching the Damage Type Registry).
     // e.g., conversion_table[3] = 0.2 means "20% of base damage is converted to Fire"
     conversion_table: [SimFixed; 16],
 
-    // Attacker-Owned Logic resolved during Phase 2 (e.g., Executioner's Axe)
+    // --- Attacker-Owned Logic resolved during Phase 2 (e.g., Executioner's Axe) ---
     conditionals: Vec<OffensiveCondition>,
 }
 
 // --- Defensive Stats (Inside SoftState) ---
 // Lives inside SoftState because it is read on every incoming hit during Phase 2 Resolution.
-// See RPG Mechanics § 1.2 for gameplay context.
+// See RPG Mechanics § 2.2 for gameplay context.
 struct DefensiveStats {
     // A 16-element array mapping to the Damage Type Registry (e.g., 0=Slashing, 3=Fire).
     resistances: [SimFixed; 16],
 
-    evasion_rating: SimFixed, // Chance to completely dodge non-True damage
-    block_chance: SimFixed,   // Chance to reduce incoming damage by 50%
-    thorns_damage: i32,       // Flat True damage reflected to melee attackers
+    evasion_rating: SimFixed,              // Derived from Agility; dodge chance
+    block_chance: SimFixed,                // Direct affixes only (shield/off-hand); % chance to block
+    block_effectiveness: SimFixed,         // Derived from Vigor (minor); how much block reduces (default 0.5)
+    thorns_damage: i32,                    // Derived from Attunement (minor); reflected to melee attackers
+    damage_reduction_pct: SimFixed,        // Direct affixes only; flat % DR after all mitigation
+    healing_received_multiplier: SimFixed, // Derived from Spirit (minor); +% incoming heal effectiveness
+    status_effect_resistance: SimFixed,    // Derived from Willpower (primary), Resolve (minor); -% debuff duration
+    curse_resistance: SimFixed,            // Derived from Resolve; separate from general status resistance
+    poise: SimFixed,                       // From SecondaryAttributes; hidden stagger resistance
 }
 
 // Internal Engine Representation of a running Buff/Debuff
@@ -353,11 +467,18 @@ struct ActiveStatusEffect {
     modifiers: Vec<StatModifier>, // Stat modifications active while this effect is alive
 }
 
-// Base attributes for physics and gameplay scaling
+// Base attributes for physics, vitals, and gameplay scaling
 struct CoreStats {
-    move_speed: SimFixed,
-    weight: SimFixed,
-    time_scale: SimFixed, // Gameplay Kinematic Dilation multiplier (e.g., 1.0 is normal, 0.5 is slow motion)
+    // --- Physics ---
+    move_speed: SimFixed,       // Derived from Agility (minor); movement multiplier
+    weight: SimFixed,           // Derived from Vigor (minor), Endurance (minor); knockback resistance
+    time_scale: SimFixed,       // Gameplay Kinematic Dilation multiplier (1.0 = normal, 0.5 = slow motion)
+
+    // --- Vitals ---
+    max_hp_bonus: i32,          // Derived from Endurance (primary), Vigor (minor); added to base max HP
+    max_resource_bonus: i32,    // Derived from Intellect (primary), Spirit (minor); added to base max resource
+    hp_regen_per_tick: SimFixed, // Derived from Endurance (minor), Spirit (minor); HP restored per tick
+    resource_regen_per_tick: SimFixed, // Derived from Spirit (primary), Intellect (minor); resource per tick
 }
 
 // Core Entity State (Authoritative)
@@ -380,11 +501,13 @@ struct SoftState {
 }
 
 // Per-entity storage in the Arbiter's entity table.
-// SoftState is the primary authoritative state. OffensiveStats is a companion struct
-// compiled by Meta and read at cast time. Both are included in handoff serialization.
+// SoftState is the primary authoritative state. OffensiveStats and SecondaryAttributes
+// are companion structs compiled by Meta and read at cast time or on hidden triggers.
+// All three are included in handoff serialization.
 struct EntityRecord {
     soft_state: SoftState,
-    offense: OffensiveStats,   // Immutable base from Meta; modified at evaluation time by buff modifiers
+    offense: OffensiveStats,       // Immutable base from Meta; modified at evaluation time by buff modifiers
+    secondary: SecondaryAttributes, // Hidden stats from equipment; governs Poise, Momentum, etc.
 }
 
 struct SoftStateSnapshot {
@@ -422,15 +545,17 @@ enum MetaCommand {
         compiled_state: SoftState,       // Base stats, JRPG Save Zone coordinates pre-calculated by Meta
         compiled_offense: OffensiveStats, // Gear-compiled offensive attributes for Pre-Roll
     },
-    // Pushes updated base stats when equipment changes (e.g., player equips a new weapon).
-    // The Arbiter atomically overwrites the stored OffensiveStats and/or DefensiveStats.
+    // Pushes updated base stats when equipment or attributes change.
+    // The Arbiter atomically overwrites the stored OffensiveStats, DefensiveStats,
+    // CoreStats, and/or SecondaryAttributes.
     // Active buff modifiers on ActiveStatusEffect are unaffected — they layer on top
-    // of the new base at the next evaluation (see RPG Mechanics § 1.3).
+    // of the new base at the next evaluation (see RPG Mechanics § 2.3).
     UpdateEntityStats {
         entity_id: EntityID,
-        offense: Option<OffensiveStats>,    // Updated if equipment changes affect offense
-        defense: Option<DefensiveStats>,    // Updated if equipment changes affect defense
-        core_stats: Option<CoreStats>,      // Updated if equipment changes affect move speed, weight, etc.
+        offense: Option<OffensiveStats>,        // Updated if changes affect offense
+        defense: Option<DefensiveStats>,        // Updated if changes affect defense
+        core_stats: Option<CoreStats>,          // Updated if changes affect vitals, movement, etc.
+        secondary: Option<SecondaryAttributes>, // Updated if equipment changes affect hidden stats
     },
     InitiateLogout {
         entity_id: EntityID,
@@ -446,6 +571,14 @@ enum MetaCommand {
     EdgeNodeDead {
         edge_node_id: u32,
         affected_entities: Vec<EntityID>,
+    },
+    // Establishes a Commander Pattern binding between a Named NPC and Arbiter-Local creeps.
+    // Issued at spawn time by Meta Services. Arbiter-local only — not preserved across handoffs.
+    BindCommander {
+        commander_entity_id: EntityID,
+        subordinate_entities: Vec<EntityID>,
+        command_range: SimFixed,
+        override_ttl_ticks: u32,
     },
 }
 
@@ -514,6 +647,7 @@ enum ProjectileHandoffMessage {
         topology_epoch: u32,
         source_tick: u64,
         commit_tick: u64,      // Future tick when authority flips
+        prepare_expiry_tick: u64, // Shadow must be discarded if Commit not received by this tick
         snapshot: ProjectileSnapshot,
     },
     Ack {
@@ -533,6 +667,13 @@ enum ProjectileHandoffMessage {
         projectile_id: UUID,
         handoff_seq: u64,
         reason: String, // e.g. "EpochMismatch", "StaleSequence"
+    },
+    Abort {
+        projectile_id: UUID,
+        handoff_seq: u64,
+        from_arbiter_id: u32,
+        to_arbiter_id: u32,
+        reason: String, // e.g. "SourceCrashed", "PrepareExpired", "RouteChanged"
     }
 }
 
@@ -719,6 +860,31 @@ enum EntityHandoffMessage {
 - **Arbiter Behind:** Proposal `data_epoch` newer than Arbiter -> attempt epoch activation; if unavailable, buffer with timeout bounded by `MAX_EVENT_AGE_TICKS`, then fail deterministically.
 - **Downstream Sync Contract:** `StateUpdate` and `TopologyUpdate` include authoritative `data_epoch` so Edge Nodes can refresh dictionaries before submitting new proposals.
 
+### 1.1.6 Cross-Boundary Dilation Transition Contract
+- **Blend Band Source:** `cross_boundary_blend_width_meters` defines the interpolation width and MUST satisfy `0 < width <= overlap_buffer_width_meters`.
+- **Deterministic Blend Equation:** For projectile/entity kinematic step near a shared boundary:
+  - `alpha = clamp((signed_distance_to_boundary + width/2) / width, 0, 1)`
+  - `effective_dilation = lerp(source_dilation, destination_dilation, alpha)`
+  - `position_next = position + (velocity * effective_dilation)`
+- **Epoch Coupling:** Boundary geometry and neighbor dilation inputs MUST come from the active `topology_epoch`.
+- **No Commit Snap Rule:** `ProjectileHandoffMessage::{Prepare,Ack,Commit}` may transfer ownership only; they MUST NOT mutate position/velocity to force an abrupt dilation jump.
+- **Math Domain:** All cross-boundary blend calculations MUST run in fixed-point (`SimFixed`) on server and edge-prediction paths.
+
+### 1.1.7 Projectile Handoff Failure Contract
+- **Authoritative Until Commit:** Sender remains sole simulator until `Commit` takes effect. `Prepare`/`Ack` never grant simulation rights.
+- **Prepare Expiry:** `Prepare` includes `prepare_expiry_tick`; receiver must keep the projectile shadow-only and garbage-collect if no `Commit` by expiry.
+- **No-Ack Fallback:** If sender lacks `Ack` by `prepare_expiry_tick`, it must not transfer ownership and must either retry with a newer sequence or deterministically cancel.
+- **Crash Cleanup:** `ControllerCommand::AbortPendingHandoffs { crashed_arbiter_id }` instructs neighbors to purge uncommitted shadows sourced from the crashed Arbiter.
+- **Abort Signal:** `ProjectileHandoffMessage::Abort` is best-effort cleanup; absence of `Abort` cannot grant ownership.
+- **Fail-Closed Rule:** In any ambiguous ownership state, projectile must be canceled/dropped rather than dual-simulated.
+
+### 1.1.8 Idempotency Ledger Capacity Contract
+- **Horizon vs Capacity:** `MAX_EVENT_AGE_TICKS` defines replay horizon; memory ceiling is independently bounded by `idempotency_bucket_capacity`.
+- **Bounded Ring:** Each tick-bucket in the ledger ring must enforce a hard max key count; unbounded hash sets are non-compliant.
+- **Effective Max Keys:** `max_idempotency_keys ~= MAX_EVENT_AGE_TICKS * idempotency_bucket_capacity`.
+- **Overflow Handling:** On bucket-cap overflow, impact dedupe insertion returns explicit overflow and runtime follows fail-closed behavior (drop impact application/relay + metric).
+- **Observability:** Arbiters must emit overflow counters/gauges so sustained saturation is visible before gameplay quality degrades.
+
 ### 1.2 ActionPayload (Polymorphic Logic)
 ```rust
 // Strictly typed logic blocks that the engine knows how to resolve in Phase 2
@@ -872,6 +1038,55 @@ enum ActionPayload {
         entity_id: EntityID,
         requester_arbiter_id: u32,
     },
+
+    // Commander Pattern: Named NPC (AI Node) issues behavioral override to Arbiter-Local creeps.
+    // Validated by the Arbiter against active CommanderBinding, range, and locality constraints.
+    IssueCreepCommand {
+        target_creeps: Vec<EntityID>,
+        directive: CreepDirective,
+    },
+}
+```
+
+### 1.3 AI Node and Commander Types
+
+Types supporting the two-tier NPC intelligence model (see [NPC Architecture §2](../../1-architecture/02-npc-architecture.md)).
+
+```rust
+// AI Node registration — wraps EdgeNodeRegistration with specialization.
+// AI Nodes share the edge_node_id namespace (u32); no separate ID space.
+struct AiNodeRegistration {
+    edge_node_id: u32,
+    address: String,
+    region: String,
+    capacity: u32,
+    current_sessions: u32,
+    specialization: AiNodeSpecialization,
+}
+
+enum AiNodeSpecialization {
+    BossEncounter,
+    SocialDialogue,
+    General,
+}
+
+// Behavioral directives issued by a commander (Named NPC on AI Node)
+// to Arbiter-Local subordinate creeps.
+enum CreepDirective {
+    MoveTo { destination: Vec2F },
+    AttackTarget { target_id: EntityID },
+    HoldPosition,
+    Retreat { destination: Vec2F },
+    ClearOverride,
+}
+
+// Established at spawn time via MetaCommand::BindCommander.
+// Arbiter-local only — lost on cross-boundary handoff.
+struct CommanderBinding {
+    commander_entity_id: EntityID,
+    subordinate_entities: Vec<EntityID>,
+    command_range: SimFixed,
+    override_ttl_ticks: u32,
 }
 ```
 

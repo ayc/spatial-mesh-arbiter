@@ -19,7 +19,7 @@ For new developers, the expected flow is:
 3. **Run Containerized Local Stack**
    - Use the local Docker Compose stack described in [Implementation Blueprint](../0-getting-started/02-implementation-phases.md) to run core services consistently.
 4. **Execute Conformance Scenarios**
-   - Run the scenario suite in this document (A-O) using the Headless Swarm Tester.
+   - Run the scenario suite in this document (A-T) using the Headless Swarm Tester.
    - Start with split/handoff/ghost scenarios, then run failure-path scenarios (`docker kill`) and NPC-scale scenarios.
 5. **Validate Failure Recovery Before Merging**
    - Confirm deterministic behavior for crash/reconnect, contention resolution, and replication budget degradation.
@@ -142,6 +142,31 @@ The Swarm Tester acts as an army of automated bots. It constructs client WebSock
 1. **Action:** Have two bots issue `world.interact_entity` against the same loot/objective target within the same contention window.
 2. **Observation:** Exactly one interaction resolves as winner; loser receives deterministic rejection/outcome path (`RejectedContended` class) as defined in [NPC and In-World Interaction Design](../3-gameplay-systems/04-npc-and-world-interaction.md).
 3. **Debugging:** Confirm winner/loser ordering remains stable across retries and that no duplicate claim side effects occur.
+
+#### Scenario P: Metronome Drift and Heartbeat Loss (Testing Tick Slew Contract)
+1. **Action:** In a 2-Arbiter local mesh, inject a synthetic `SyncHeartbeat` delta of `+10` ticks to one Arbiter, then restore normal heartbeats. In a second pass, drop `SyncHeartbeat` packets for 12 seconds.
+2. **Observation:** Arbiter local `current_tick` remains strictly monotonic (no snap/backward jump). During correction, pacing offset follows bounded slew (`<= 50us/frame`) and absolute clamp (`<= 1000us`), converging to `abs(diff) <= 1` tick within 5 seconds. During heartbeat loss, offset decays toward zero after 3 seconds and emits one degraded warning after 10 seconds.
+3. **Debugging:** Validate logs/metrics for outlier suppression (`abs(diff) > 300` ignored), stale/degraded transitions, and post-recovery re-lock without jitter spikes.
+
+#### Scenario Q: Cross-Boundary Dilation Blend (Testing No Projectile Snap at Handoff)
+1. **Action:** Run two neighboring Arbiters with strongly different dilation (`source=1.0`, `destination=0.2`), fire projectiles through the shared overlap band, and force at least one `ProjectileHandoff` (`Prepare->Ack->Commit`) per projectile.
+2. **Observation:** Projectile motion decelerates continuously across the blend band (no position jump, no abrupt velocity rewrite) while authority flips only at `commit_tick`. Impact outcomes remain single-commit and deterministic.
+3. **Debugging:** Validate per-tick traces for `signed_distance`, `alpha`, and `effective_dilation`; ensure both Arbiters compute matching fixed-point values under the same `topology_epoch` and that no handoff branch mutates velocity/position at commit.
+
+#### Scenario R: Sender Crash After Prepare, Before Ack (Testing Fail-Closed Ownership)
+1. **Action:** Force a projectile boundary transfer; after sender emits `ProjectileHandoffMessage::Prepare`, crash the sender Arbiter before any `Ack` arrives.
+2. **Observation:** Receiver never promotes prepared shadow to owner without `Commit`; prepared shadow is purged via `prepare_expiry_tick` or `AbortPendingHandoffs`. No duplicate projectile simulation occurs.
+3. **Debugging:** Confirm controller emits crash cleanup command, receiver purges `ShadowPendingCommit` records from crashed sender, and no `ImpactEvent` is emitted by the receiver for the orphaned transfer.
+
+#### Scenario S: Receiver Crash During Prepare Window (Testing No Replay Double-Sim)
+1. **Action:** Force transfer, deliver `Prepare` to receiver, then crash receiver before it emits `Ack`. Allow sender to continue until expiry/retry/cancel path.
+2. **Observation:** Sender remains sole simulator until a valid `Commit`; if handoff window expires, sender applies deterministic retry/cancel policy. Recovered receiver does not resurrect stale prepared shadows under old epoch.
+3. **Debugging:** Validate `handoff_seq` monotonicity, absence of dual `ImpactEvent` for same `impact_id`, and fail-closed behavior under receiver restart with stale RUDP packets.
+
+#### Scenario T: Idempotency Ledger Saturation (Testing Bounded Memory + Fail-Closed Overflow)
+1. **Action:** In a stress profile, flood one Arbiter with high-cardinality cross-boundary `ImpactEvent` traffic targeting a single `impact_tick` window to intentionally exceed `idempotency_bucket_capacity`.
+2. **Observation:** Arbiter memory remains bounded (no unbounded ledger growth). Overflowed inserts are rejected deterministically; impacted events are dropped fail-closed instead of risking double-damage.
+3. **Debugging:** Verify overflow counters increase, duplicate-damage assertions remain clean, and post-saturation recovery returns to normal once the ring advances beyond the hot bucket.
 
 ---
 

@@ -27,6 +27,17 @@ Instead of reactive scaling, the infrastructure maintains a **Warm Pool** of idl
 3.  **Instant Allocation:** When the Mesh Controller needs to execute a `BeginSplit` (or `BeginMerge`), it instantly claims an Idle Arbiter from the Warm Pool, injecting the split geometry, and explicitly providing the necessary neighbor IP addresses so the Arbiters don't have to perform DNS lookups.
 4.  **Return to Pool:** When a Spatial Cell is dissolved via a `CommitMerge`, the Loser Arbiter drains its packets. Upon receiving `FinalizeMerge`, the Loser Arbiter clears its memory and returns itself to the Warm Pool, or exits gracefully if the overall cluster is scaling down.
 
+### Capacity Replenishment
+
+The Warm Pool is finite. The Mesh Controller monitors pool size against configurable watermarks and proactively requests new Arbiter instances from the infrastructure via a `CapacityProvider` trait. In the Agones deployment, this maps to patching the `Fleet` replica count, which triggers the Kubernetes Cluster Autoscaler to add nodes if needed.
+
+The full watermark model, `CapacityProvider` interface, conservation mode behavior, and exhaustion fallback are specified in [Mesh Controller §4.5–4.6](../1-architecture/03-mesh-controller.md).
+
+**Infrastructure requirement:** The Kubernetes Cluster Autoscaler (or equivalent) MUST be configured for the Arbiter node pool with:
+- **Scale-up response time** target of < 60 seconds (cloud-provider dependent).
+- **Scale-down cooldown** of at least 10 minutes to prevent flapping during intermittent load spikes.
+- **Node taints** (`game-server=arbiter:NoSchedule`) to prevent non-Arbiter workloads from consuming Arbiter-reserved compute.
+
 ---
 
 ## 3. Kubernetes Anti-Patterns & Critical Mitigations

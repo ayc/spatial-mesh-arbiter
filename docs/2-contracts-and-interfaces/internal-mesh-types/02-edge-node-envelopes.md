@@ -1,8 +1,10 @@
+# Internal Mesh Types: Edge Node Envelopes
+
 ## 2. Layer 1: The Edge Node (Proxy Actor)
 
 The Proxy Actor maintains the client connection, manages local prediction (Soft State), and translates client intents into `ActionProposals`.
 
-> **Canonical wire source:** The exact client->edge WebSocket envelope, auth bootstrap/resume payloads, `RawInput` contract, and immediate edge response semantics are defined in [Client-Edge Wire Protocol](../../2-contracts-and-interfaces/01-client-edge-wire-protocol.md). The types below are runtime-focused interface excerpts.
+> **Canonical wire source:** The exact client->edge WebSocket envelope, auth bootstrap/resume payloads, `RawInput` contract, and immediate edge response semantics are defined in [Client-Edge Wire Protocol](../01-client-edge-wire-protocol.md). The types below are runtime-focused interface excerpts.
 >
 > **Canonical NPC runtime source:** NPC cadence tiers, replication budget/ring behavior, and client smoothing contracts are defined in [NPC Runtime and Replication Contract](../../1-architecture/02-npc-architecture.md).
 
@@ -49,31 +51,269 @@ struct DeviceTelemetrySample {
 
 // Low-frequency, strongly consistent interactions forwarded to Tier 2
 enum MetaRequest {
+    // --- Chat ---
     SendChatMessage { channel: String, text: String },
+    JoinChannel { channel: String },        // Subscribe to a custom or zone channel
+    LeaveChannel { channel: String },       // Unsubscribe from a channel
+
+    // --- Inventory ---
     MoveInventoryItem { from_slot: u8, to_slot: u8 },
+    EquipItem { bag_slot: u8, equipment_slot: String },   // Move item from bag to equipment
+    UnequipItem { equipment_slot: String, bag_slot: u8 },  // Move item from equipment to bag
+    InspectItem { slot: u8 },                              // Request full affix/durability detail
+    RepairItem { slot: u8 },                               // Repair a specific equipped item
+    RepairAllItems,                                        // Repair all equipped items
+
+    // --- Loot ---
+    LootVote { drop_id: UUID, vote: LootVoteChoice },      // Need/Greed/Pass for NeedGreed mode
+    AssignLoot { drop_id: UUID, target_character_id: UUID }, // MasterLoot: leader assigns drop
+
+    // --- Party ---
     InviteToParty { target_character_name: String },
+    RespondToPartyInvite { from_character_id: UUID, accepted: bool },
+    LeaveParty,
+    KickFromParty { target_character_id: UUID },           // Leader only
+    PromotePartyLeader { target_character_id: UUID },      // Transfer leadership
+    SetPartyLootMode { mode: PartyLootMode },              // Leader only
+    SetPartyRole { target_character_id: UUID, role: PartyRole }, // Leader assigns role tags
+
+    // --- Guild ---
+    CreateGuild { guild_name: String },
+    InviteToGuild { target_character_name: String },
+    RespondToGuildInvite { guild_id: UUID, accepted: bool },
+    LeaveGuild,
+    KickFromGuild { target_character_id: UUID },
+    SetGuildRank { target_character_id: UUID, rank: String },
+    SetGuildRankPermissions { rank: String, permissions: Vec<GuildPermission> },
+    GuildBankDeposit { bag_slot: u8 },                     // Deposit item from bag to guild bank
+    GuildBankWithdraw { bank_tab: u8, bank_slot: u8 },     // Withdraw item from guild bank to bag
+    SetGuildMotd { text: String },
+    DisbandGuild,
+
+    // --- Friends ---
+    SendFriendRequest { target_character_name: String },
+    RespondToFriendRequest { from_character_id: UUID, accepted: bool },
+    RemoveFriend { target_character_id: UUID },
+
+    // --- Moderation ---
+    BlockPlayer { target_character_name: String },         // Client-side + server-side filter
+    UnblockPlayer { target_character_id: UUID },
+    ReportPlayer { target_character_name: String, reason: ReportReason, details: String },
+
+    // --- LFG / Matchmaking ---
+    LfgEnqueue { activity: LfgActivity, role: PartyRole },
+    LfgDequeue,
+
+    // --- Session ---
     RequestLogout, // Triggers the Section 9.5 logout handshake
 }
 
-// Snapshot of a player's inventory state, sent from Meta Services to the client
-// via the Edge Node. Represents the full authoritative slot layout at a point in time.
+enum LootVoteChoice {
+    Need,
+    Greed,
+    Pass,
+}
+
+enum PartyLootMode {
+    FreeForAll,
+    RoundRobin,
+    NeedGreed,
+    MasterLoot,
+}
+
+enum PartyRole {
+    Tank,
+    Healer,
+    Damage,
+    Flex,  // No role preference (default)
+}
+
+enum GuildPermission {
+    Invite,             // Can invite new members
+    Kick,               // Can kick members of lower rank
+    Promote,            // Can promote members up to one rank below own
+    Demote,             // Can demote members of lower rank
+    BankDeposit,        // Can deposit items to guild bank
+    BankWithdraw,       // Can withdraw items from guild bank
+    BankManageTabs,     // Can purchase/rename guild bank tabs
+    EditMotd,           // Can change the guild message of the day
+    EditRanks,          // Can rename ranks and modify permissions (below own rank)
+    StartGuildEvent,    // Can create guild-wide calendar events
+    UseGuildRepair,     // Can use guild funds for repair costs
+}
+
+enum ReportReason {
+    Harassment,
+    Cheating,
+    BotOrAutomation,
+    InappropriateName,
+    RealMoneyTrading,
+    Spam,
+    Other,
+}
+
+enum LfgActivity {
+    Dungeon { dungeon_id: u16 },
+    WorldBoss { boss_id: u16 },
+    PvpArena,
+    PvpBattleground,
+    OpenWorld,          // General "looking for group" for overworld content
+}
+
+// --- Inventory Wire Types ---
+
+// Lightweight slot entry for bag/equipment list rendering.
+// For full affix and durability details, the client sends MetaRequest::InspectItem.
 struct InventorySlot {
-    slot: u8,              // Inventory slot index
-    item_id: u16,          // Reference to the item definition in the asset dictionary
-    quantity: u32,         // Stack count (1 for non-stackable items)
+    slot: u8,                   // Inventory slot index (bag) or equipment slot ordinal
+    base_item_id: u16,          // Reference to items.json definition (for icon/name lookup)
+    quantity: u32,              // Stack count (always 1 for equipment)
+    instance_id: Option<u64>,   // Non-null for equipment with affixes/durability; null for stackables
+    quality_tier: u8,           // 0=Common, 1=Uncommon, 2=Rare, 3=Epic, 4=Legendary (for UI color)
 }
 
 struct InventorySnapshot {
     character_id: UUID,
-    slots: Vec<InventorySlot>, // Only occupied slots; empty slots are omitted
-    capacity: u8,              // Max slot count for this character
+    bag_slots: Vec<InventorySlot>,       // Occupied bag slots; empty slots omitted
+    equipment_slots: Vec<InventorySlot>, // Currently equipped items
+    bag_capacity: u8,                    // Max bag slot count for this character
+    primary_attributes: PrimaryAttributes, // Compiled totals for character sheet UI
+}
+
+// Full item detail returned on MetaRequest::InspectItem
+struct ItemDetail {
+    base_item_id: u16,
+    instance_id: u64,
+    quality_tier: u8,
+    affixes: Vec<ResolvedAffix>,
+    durability: Option<DurabilityInfo>,
+}
+
+struct ResolvedAffix {
+    affix_id: u16,
+    tier: u8,
+    slot_type: String,            // "prefix", "suffix", "implicit", "fixed"
+    display_text: String,         // Pre-resolved: "of the Bear (+12 Physical Resistance)"
+}
+
+struct DurabilityInfo {
+    current: u16,
+    max: u16,
+}
+
+struct RepairResult {
+    items_repaired: u8,
+    total_cost_gold: u64,
 }
 
 enum MetaResponse {
-    ChatReceived { sender: String, text: String },
+    // --- Chat ---
+    ChatReceived { channel: String, sender: String, text: String },
+    ChatError { reason: String },          // Rate limited, muted, channel not joined, etc.
+    ChannelJoined { channel: String },
+    ChannelLeft { channel: String },
+
+    // --- Inventory ---
     InventorySync(InventorySnapshot),
-    PartyInviteReceived { from_name: String },
+    ItemDetailResponse(ItemDetail),
+    RepairComplete(RepairResult),
+
+    // --- Loot ---
+    LootVotePrompt { drop_id: UUID, base_item_id: u16, quality_tier: u8, timeout_seconds: u8 },
+    LootVoteResult { drop_id: UUID, winner_name: String, winning_vote: String },
+    LootAssigned { drop_id: UUID, assigned_to_name: String },
+
+    // --- Party ---
+    PartyInviteReceived { from_name: String, from_character_id: UUID },
+    PartySync(PartySnapshot),              // Full party state on any membership/setting change
+    PartyDisbanded,
+
+    // --- Guild ---
+    GuildInviteReceived { guild_name: String, from_name: String, guild_id: UUID },
+    GuildSync(GuildSnapshot),              // Membership roster + settings on any change
+    GuildMotdUpdated { text: String },
+    GuildDisbanded,
+
+    // --- Friends ---
+    FriendRequestReceived { from_name: String, from_character_id: UUID },
+    FriendsSync(FriendsSnapshot),          // Full friends list with online status
+
+    // --- LFG ---
+    LfgMatchFound { activity: LfgActivity, party_id: UUID },
+    LfgQueueUpdate { position: u32, estimated_wait_seconds: u32 },
+
+    // --- Moderation ---
+    PlayerMuted { until: u64, reason: String },   // Server-imposed mute notification
+    ReportAcknowledged { report_id: UUID },
+
+    // --- General ---
     SystemAlert { message: String },
+}
+
+// --- Social Wire Types ---
+
+struct PartyMember {
+    character_id: UUID,
+    character_name: String,
+    level: u16,
+    role: PartyRole,
+    is_online: bool,
+    // Spatial data pushed from Arbiter → Meta for party frames
+    current_hp_pct: u8,       // 0-100 for party frame health bar
+    current_resource_pct: u8, // 0-100 for party frame resource bar
+}
+
+struct PartySnapshot {
+    party_id: UUID,
+    leader_id: UUID,
+    loot_mode: PartyLootMode,
+    members: Vec<PartyMember>,
+}
+
+struct GuildMemberEntry {
+    character_id: UUID,
+    character_name: String,
+    rank: String,
+    level: u16,
+    is_online: bool,
+    last_seen: u64,           // Unix timestamp; 0 if currently online
+}
+
+struct GuildSnapshot {
+    guild_id: UUID,
+    guild_name: String,
+    leader_id: UUID,
+    motd: String,
+    member_count: u16,
+    ranks: Vec<GuildRankInfo>,
+    members: Vec<GuildMemberEntry>,       // Paginated for large guilds; first page on join
+    bank_tabs: Vec<GuildBankTabInfo>,
+}
+
+struct GuildRankInfo {
+    rank_name: String,
+    ordinal: u8,              // 0 = Guild Master (immutable), 1+ = custom ranks
+    permissions: Vec<GuildPermission>,
+}
+
+struct GuildBankTabInfo {
+    tab_index: u8,
+    tab_name: String,
+    slots: Vec<InventorySlot>,            // Reuses the inventory slot wire type
+}
+
+struct FriendEntry {
+    character_id: UUID,
+    character_name: String,
+    is_online: bool,
+    current_zone: Option<String>,         // Zone display name if online; None if offline
+}
+
+struct FriendsSnapshot {
+    friends: Vec<FriendEntry>,
+    blocked: Vec<FriendEntry>,            // Blocked players (for UI list management)
+    pending_sent: Vec<FriendEntry>,       // Outgoing requests not yet accepted
+    pending_received: Vec<FriendEntry>,   // Incoming requests awaiting response
 }
 
 struct ProxyActor {

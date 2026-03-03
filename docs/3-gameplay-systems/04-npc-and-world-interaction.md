@@ -33,15 +33,15 @@ This document is normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **M
 
 ## 2. NPC Taxonomy (Normative)
 
-| npc_archetype | purpose | allowed_states | default_threat_model | despawn/cleanup semantics | interaction eligibility |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `LaneCreep` | deterministic lane pressure and objective pacing | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned` | nearest valid hostile in lane corridor; objective-first fallback | despawn on death timer expiry or wave cleanup | interactable only in combat semantics (attack/cast), not service interaction |
-| `NeutralMonster` | PvE combat and area denial/reward loop | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned` | aggro radius + threat refresh from recent damage/heal aggro rules | corpse persists for loot visibility window, then cleanup | direct entity interaction allowed only where content explicitly marks interactable |
-| `BossEncounter` | scripted high-importance encounter behavior | `Idle`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned`, `ScriptedControl` | scripted phase targets + threat table tie-breakers | corpse and reward handoff MUST follow boss loot policy | entity interaction may be phase-gated (for example objective phase triggers) |
-| `SummonedCombat` | temporary combat utility entity from player/NPC action | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Despawned` | owner-assist first, hostile proximity second | hard despawn on owner loss/timeout/phase end | no service interaction; combat and script flags only |
-| `SocialServiceNPC` | vendor/quest/dialogue service anchor | `Idle`, `ConversationLocked`, `ServiceOpen`, `Unavailable` | non-combat by default | persistent unless world script disables | always entity-interactable when `ServiceOpen` or allowed `Idle` |
-| `AmbientFauna` | world ambience and soft activity cues | `Idle`, `Patrol/March`, `Evade/Leash`, `Despawned` | avoid-threat bias; no proactive aggro by default | despawn by streaming budget or biome policy | typically non-interactable unless explicitly tagged |
-| `ScriptedActor` | cinematic or event-driven world actor | `ScriptedControl`, `Interactive`, `CinematicLocked`, `Despawned` | script-defined | lifecycle controlled by event script | interaction only in `Interactive` state |
+| npc_archetype | intelligence_tier | purpose | allowed_states | default_threat_model | despawn/cleanup semantics | interaction eligibility |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `LaneCreep` | Arbiter-Local | deterministic lane pressure and objective pacing | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned` | nearest valid hostile in lane corridor; objective-first fallback | despawn on death timer expiry or wave cleanup | interactable only in combat semantics (attack/cast), not service interaction |
+| `NeutralMonster` | Arbiter-Local | PvE combat and area denial/reward loop | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned` | aggro radius + threat refresh from recent damage/heal aggro rules | corpse persists for loot visibility window, then cleanup | direct entity interaction allowed only where content explicitly marks interactable |
+| `BossEncounter` | AI Node | scripted high-importance encounter behavior | `Idle`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Dead/Corpse`, `Despawned`, `ScriptedControl` | scripted phase targets + threat table tie-breakers | corpse and reward handoff MUST follow boss loot policy | entity interaction may be phase-gated (for example objective phase triggers) |
+| `SummonedCombat` | Arbiter-Local | temporary combat utility entity from player/NPC action | `Idle`, `Patrol/March`, `AcquireTarget`, `Engaged`, `Evade/Leash`, `Despawned` | owner-assist first, hostile proximity second | hard despawn on owner loss/timeout/phase end | no service interaction; combat and script flags only |
+| `SocialServiceNPC` | AI Node | vendor/quest/dialogue service anchor | `Idle`, `ConversationLocked`, `ServiceOpen`, `Unavailable` | non-combat by default | persistent unless world script disables | always entity-interactable when `ServiceOpen` or allowed `Idle` |
+| `AmbientFauna` | Arbiter-Local | world ambience and soft activity cues | `Idle`, `Patrol/March`, `Evade/Leash`, `Despawned` | avoid-threat bias; no proactive aggro by default | despawn by streaming budget or biome policy | typically non-interactable unless explicitly tagged |
+| `ScriptedActor` | AI Node / Arbiter-Local | cinematic or event-driven world actor | `ScriptedControl`, `Interactive`, `CinematicLocked`, `Despawned` | script-defined | lifecycle controlled by event script | interaction only in `Interactive` state |
 
 ---
 
