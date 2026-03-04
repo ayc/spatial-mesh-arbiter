@@ -16,7 +16,7 @@ To ensure cross-CPU determinism and high-performance networking, engineers must 
 ### 1.2 Networking & Serialization
 *   **Async Runtime:** `tokio` (Multi-threaded for the Controller/Edge, Single-threaded runtime for the Arbiter to preserve lock-free invariants).
 *   **Serialization:** `bincode`. High-speed binary serialization for all network payloads.
-*   **Meta Services Event Bus:** **Redis Streams** (using the `fred` or `redis-rs` crate). Provides durable, at-least-once delivery for asynchronous Hard-State events.
+*   **Meta Services Event Bus:** **Redpanda (Kafka API)** (using `rdkafka`). Provides durable, at-least-once delivery for asynchronous Hard-State events.
 *   **Transport Layer (Strictly Segmented):** 
     *   **External Edge (Client <-> Edge Node):** `tokio-tungstenite` (WebSockets). `TCP_NODELAY=true` must be set.
     *   **Edge Node <-> Arbiter:** `renet`. (Unreliable for movement, Reliable for proposals).
@@ -54,7 +54,7 @@ To ensure cross-CPU determinism and high-performance networking, engineers must 
 ## 3. Agent Constraints (The "Never" List)
 1.  **NEVER** use `f32` or `f64` for any coordinate or combat math.
 2.  **NEVER** use `std::sync::Mutex` or `RwLock` inside the Arbiter's 60Hz loop. 
-3.  **NEVER** assume a global database is available. Use Redis Streams.
+3.  **NEVER** assume a global database is available. Use the Event Bus abstraction (Redpanda in production).
 4.  **NEVER** perform blocking I/O inside the Arbiter's 60Hz physics loop. 
 5.  **NEVER** consume a durable resource in Meta without writing a `PendingTransaction` record in the same database transaction.
 6.  **NEVER** attempt WAL-based recovery for a crashed Arbiter. Arbiter crashes are total-loss events recovered via the Spawn Handshake.

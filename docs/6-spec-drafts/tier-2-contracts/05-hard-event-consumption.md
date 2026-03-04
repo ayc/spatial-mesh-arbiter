@@ -10,23 +10,26 @@
 
 | Aspect | Status | Source |
 |--------|--------|--------|
-| XACK requirement | **Specified** — Consumers must explicitly ack via XACK | `01-core-concepts-and-mesh.md` line 548 |
-| At-least-once delivery | **Specified** — Guaranteed by Redis Streams consumer groups | `01-core-concepts-and-mesh.md` line 547 |
-| Idempotency mandate | **Specified** — Events carry unique `event_id` (UUID) for dedup | `01-core-concepts-and-mesh.md` line 549 |
-| Consumer groups | **Specified** — Per-service groups (e.g., `group:progression`, `group:loot`) | `01-core-concepts-and-mesh.md` lines 604-610 |
-| Ordering | **Specified** — Per-stream, not global | `01-core-concepts-and-mesh.md` line 550 |
-| Scaling thresholds | **Specified** — Lag >1000 → scale up, >5000 → critical alert, p99 >500ms → investigate | `01-core-concepts-and-mesh.md` lines 612-617 |
-| Stream retention | **Specified** — Trimmed by age/MAXLEN | `01-core-concepts-and-mesh.md` line 551 |
+| Offset commit requirement | **Specified** — Consumers must commit offsets after durable processing | `01-core-concepts-and-mesh.md` §9.3 Durability Contract |
+| At-least-once delivery | **Specified** — Guaranteed by consumer group replay of uncommitted offsets | `01-core-concepts-and-mesh.md` §9.3 Durability Contract |
+| Idempotency mandate | **Specified** — Events carry unique `event_id` (UUID) for dedup | `01-core-concepts-and-mesh.md` §9.3 Durability Contract |
+| Consumer groups | **Specified** — Per-service groups (e.g., `group.progression`, `group.loot`) | `01-core-concepts-and-mesh.md` §9.3 |
+| Ordering | **Specified** — Per topic partition, not global | `01-core-concepts-and-mesh.md` §9.3 Durability Contract |
+| Scaling thresholds | **Specified** — Lag >1000 → scale up, >5000 → critical alert, p99 >500ms → investigate | `01-core-concepts-and-mesh.md` §9.3 |
+| Topic retention | **Specified** — Broker-managed by time/size | `01-core-concepts-and-mesh.md` §9.3 Durability Contract |
 | EventBus trait | **Specified** — publish/subscribe/ack abstraction | `01-core-concepts-and-mesh.md` lines 554-571 |
 | Loot source of truth | **Specified** — `loot.drops` Postgres row, atomic UPDATE | `04-meta-services.md` line 1071 |
 
 ## Remaining Gap (Narrowed)
 
-### 1. Ack Timing
-When should XACK occur relative to Postgres commit? If consumer crashes between persist and ack, the event is redelivered — consumer must handle this idempotently. But is "ack after persist" the mandated pattern?
+### 1. Commit Timing
+Offset commit order vs Postgres commit needs explicit per-service rules (recommended: commit only after DB commit and side effects are durable).
 
 ### 2. Retry / Dead Letter Policy
-"Unacknowledged events are redelivered after a configurable visibility timeout" — but what is the timeout value? Max retries before dead letter? Backoff strategy?
+Redelivery and retries are implicit in offset replay, but policy is still missing:
+- max processing retry attempts before quarantine,
+- dead-letter topic naming and retention,
+- backoff and poison-pill handling.
 
 ### 3. Per-Service Idempotency Mechanism
 The requirement (dedup by event_id) is stated but implementation pattern is not. Postgres upsert? In-memory LRU cache? Both?
@@ -36,9 +39,9 @@ If an event causes a consumer to crash repeatedly, no mechanism to quarantine it
 
 ## Questions to Resolve
 
-- [ ] Mandated ack pattern: ack-after-persist or ack-after-process?
-- [ ] Visibility timeout value
+- [ ] Mandated commit pattern: commit-after-persist only?
 - [ ] Max retry count before dead letter
+- [ ] Dead-letter topic contract (`deadletter.<service>.<source_topic>`)?
 - [ ] Per-service idempotency pattern (Postgres upsert recommended?)
 - [ ] Poison pill / dead letter queue strategy
 

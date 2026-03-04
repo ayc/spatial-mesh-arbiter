@@ -339,7 +339,7 @@ When heartbeats from an Arbiter cease:
 2. **Topology Repair:** The Controller issues `UpdateTopology` to neighboring Arbiters, expanding their boundaries to cover the dead cell's region.
 3. **Ghost Cleanup:** Neighbors receive the update and garbage-collect all Ghost entities that belonged to the dead Arbiter.
 4. **Handoff Cleanup:** The Controller issues `AbortPendingHandoffs { crashed_arbiter_id }` to neighboring Arbiters so they purge uncommitted `ProjectileHandoff` shadows from the crashed source.
-5. **Event Bus Notification:** The Controller publishes `ArbiterCrashedEvent { arbiter_id, topology_epoch, declared_dead_at }` to Meta Services via Redis Streams. Meta's reconciliation service uses this to refund in-flight transactions.
+5. **Event Bus Notification:** The Controller publishes `ArbiterCrashedEvent { arbiter_id, topology_epoch, declared_dead_at }` to Meta Services via Redpanda. Meta's reconciliation service uses this to refund in-flight transactions.
 
 ---
 

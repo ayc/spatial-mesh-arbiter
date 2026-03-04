@@ -17,7 +17,7 @@ This document is normative for locked contracts and service boundaries. Sections
 ## 1. Principles
 
 1. **Durable Authority:** Meta is the sole owner of all persistent player state. The Spatial Mesh never writes to a database and never queries one during its 60Hz loop.
-2. **Event-Driven Consumption:** Each Meta service subscribes to the relevant subset of `HardEvent` variants on the Event Bus. Streams are partitioned per-Arbiter (`stream:hard_state:{arbiter_id}`) to isolate surge traffic — see [Core Concepts §9.3](01-core-concepts-and-mesh.md). Services MUST be idempotent consumers — Redis Streams consumer groups guarantee at-least-once delivery.
+2. **Event-Driven Consumption:** Each Meta service subscribes to the relevant subset of `HardEvent` variants on the Event Bus. Topics are partitioned per-Arbiter (`hard_state.arbiter.{arbiter_id}`) to isolate surge traffic — see [Core Concepts §9.3](01-core-concepts-and-mesh.md). Services MUST be idempotent consumers — Redpanda/Kafka consumer groups guarantee at-least-once delivery when offsets are committed after durable processing.
 3. **Per-Service Config Schemas:** Every service defines a designer-authored JSON configuration that is independently versioned and deployable. Config schemas are analogous to how `SpellData` works for abilities — designers author data, the runtime loads it.
 4. **Shared Database, Schema Isolation:** All services share a single Postgres cluster but MUST use per-service schemas (e.g., `inventory.*`, `currency.*`). Cross-schema reads are permitted via explicit views; cross-schema writes are forbidden.
 5. **Stateless Workers:** Every service is a horizontally-scaled, stateless worker behind the Event Bus. All mutable state lives in Postgres or Redis. No in-process caches are authoritative.
@@ -2870,7 +2870,7 @@ CREATE TABLE social.guild_invites (
 
 Meta services communicate internally via:
 - **Direct Postgres queries** — for synchronous reads of cross-service data (e.g., Loot Service reads Party membership)
-- **Event Bus (Redis Streams)** — for asynchronous event propagation from the Spatial Mesh
+- **Event Bus (Redpanda)** — for asynchronous event propagation from the Spatial Mesh
 - **Internal RPC** — for synchronous cross-service calls where needed (e.g., Spawn Service calls Inventory Service to compile stats)
 
 The Edge Node connects to Meta via `meta_rpc_client: RpcClient` (gRPC or equivalent), as defined on `ProxyActor`.

@@ -44,7 +44,7 @@ Rust does not provide built-in in-process hot swap for this stack. The preferred
 
 ### Stage C: Containerized Integration (Mesh in a Box)
 Use the Docker Compose stack for integration-level behavior, especially networking and R-Tree behavior.
-1. Include `redis:alpine` in the Docker Compose stack for the Event Bus and Session Manager registry.
+1. Include `redpandadata/redpanda` in the Docker Compose stack for the Event Bus, and `redis:alpine` for the Session Manager registry.
 2. Include `nginx:alpine` to act as a local CDN for game assets.
 3. Use Docker Compose replicas for the `spatial-arbiter`.
 4. Nodes register with the Controller using their **hostname** (e.g., `arbiter-1`), not their internal IP via DNS discovery.

@@ -59,10 +59,10 @@ struct ArbiterCrashedEvent {
 struct HardStatePublisher {
     arbiter_id: u32,
     event_bus: Arc<dyn EventBus>,
-    // Per-Arbiter partitioned stream. Isolates surge traffic from one Arbiter's
-    // mass-casualty events from consumers reading other Arbiters' streams.
-    // See Core Architecture § 9.3 "Stream Partitioning and Surge Resilience".
-    stream: String, // e.g., "stream:hard_state:42"
+    // Per-Arbiter topic. Isolates surge traffic from one Arbiter's mass-casualty
+    // events from consumers reading other Arbiters' topics.
+    // See Core Architecture § 9.3 "Topic Partitioning and Surge Resilience".
+    topic: String, // e.g., "hard_state.arbiter.42"
     // Internal channel from Spatial Actors (non-blocking push) → async publisher (drain loop).
     // Bounded capacity; overflow handled by a local ring buffer (see § 9.3).
     rx: Receiver<HardEvent>,
@@ -73,13 +73,13 @@ impl HardStatePublisher {
         Self {
             arbiter_id,
             event_bus,
-            stream: format!("stream:hard_state:{}", arbiter_id),
+            topic: format!("hard_state.arbiter.{}", arbiter_id),
             rx,
         }
     }
 
     // Main loop: runs on a dedicated async task, entirely decoupled from the 60Hz simulation.
-    // Drains all available events per wakeup and issues a batched Redis pipeline write.
+    // Drains all available events per wakeup and issues batched broker produce calls.
     async fn run(&mut self) -> Result<()> {
         loop {
             // Block until at least one event is available.
@@ -98,10 +98,40 @@ impl HardStatePublisher {
                 .collect();
 
             for (event_id, payload) in &pipeline {
-                self.event_bus.publish(&self.stream, *event_id, payload).await?;
+                self.event_bus.publish(&self.topic, *event_id, payload).await?;
             }
         }
     }
+}
+```
+
+### 4.2 Topic Naming and DLQ Envelope
+
+Authoritative topic templates are defined in [Core Concepts §9.3](../../1-architecture/01-core-concepts-and-mesh.md).
+
+For implementation consistency:
+
+```rust
+const HARD_STATE_TOPIC_TMPL: &str = "hard_state.arbiter.{arbiter_id}";
+const ARBITER_COMMAND_TOPIC_TMPL: &str = "arbiter.{arbiter_id}.commands";
+const CONTROLLER_EVENTS_TOPIC: &str = "controller.mesh.events";
+const META_HARD_STATE_DLQ_TMPL: &str = "deadletter.meta.{service}.hard_state";
+const MESH_COMMAND_DLQ_TOPIC: &str = "deadletter.mesh.commands";
+```
+
+When a consumer exhausts its retry budget, it MUST write a DLQ record with enough metadata for deterministic replay tooling:
+
+```rust
+struct DeadLetterRecord {
+    source_topic: String,
+    source_partition: i32,
+    source_offset: i64,
+    event_id: UUID,
+    consumer_group: String,
+    error_code: String,
+    error_message: String,
+    payload: Vec<u8>,
+    failed_at_unix_ms: u64,
 }
 ```
 

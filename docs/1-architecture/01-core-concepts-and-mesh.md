@@ -164,7 +164,7 @@ transitions:
 
 Hard state is:
 - Finalized by Mesh Arbiter
-- Emitted to the Meta Services Event Bus (Redis Streams)
+- Emitted to the Meta Services Event Bus (Redpanda topics)
 - Persisted by Meta into durable databases
 - Recoverable after crash
 
@@ -532,89 +532,89 @@ The **Proxy Actor (Edge Node)** acts as the primary API Gateway and router for t
 **Security Invariant:** The Edge Node is a trusted server. When it dispatches Meta Traffic, it explicitly injects the user's verified `character_id` into the envelope. This prevents spoofing exploits where a compromised client attempts to delete another player's inventory by forging an ID. The Meta Services blindly trust the identity headers provided by the Edge Node.
 
 ## 9.3 Cross-Layer Handshake (The Event Bus)
-The Spatial Mesh and Meta Services are decoupled but interact through an asynchronous **Hard State Event Bus** backed by **Redis Streams**.
+The Spatial Mesh and Meta Services are decoupled but interact through an asynchronous **Hard State Event Bus** backed by **Redpanda (Kafka API)**.
 
-### Why Redis Streams (Not Kafka / NATS)
-The Event Bus carries only Hard State transitions — low-volume, high-importance events (e.g., `PlayerDied`, `MonsterDied`, `LootSpawned`). All high-frequency 60Hz simulation traffic flows over UDP and never touches the bus. Given the low event volume (hundreds of events/sec at peak, not thousands), single-region scope (the bus is intra-datacenter by design), and the fact that Redis is already in the infrastructure stack for the Session Manager, Redis Streams provides the right balance of durability and operational simplicity without the overhead of a dedicated distributed log (Kafka's JVM brokers, Zookeeper/KRaft coordination, partition rebalancing).
+### Why Redpanda
+The Event Bus carries Hard State transitions and control commands that need durable replay, consumer fan-out, and clear lag observability while keeping the 60Hz loop isolated from storage and broker latency. Redpanda gives Kafka-compatible semantics (topics, partitions, consumer groups, offsets) without changing game logic contracts.
+
+Redis remains in the stack for Session Manager registry and caching; it is no longer the primary event transport.
 
 ### The Durability Contract
 All producers and consumers of the Event Bus must satisfy the following guarantees:
 
 | Property | Guarantee |
 |:---|:---|
-| **Delivery** | **At-least-once.** Every published event will be delivered to every subscribed consumer group at least once. |
-| **Consumer Acknowledgment** | Consumers must explicitly acknowledge processing via `XACK`. Unacknowledged events are redelivered after a configurable visibility timeout. |
-| **Idempotency** | All consumers must be idempotent. Events carry a unique `event_id` (UUID) that consumers use to deduplicate in case of redelivery. |
-| **Ordering** | Events are ordered per-stream (not globally). Consumers must not depend on cross-stream ordering. |
-| **Retention** | Streams are trimmed by age (e.g., `MAXLEN ~10000` or `MINID` based on time). Events older than the retention window are discarded. |
-| **Persistence** | Redis is configured with AOF persistence (`appendonly yes`) to survive process restarts. This is not a substitute for database durability — the bus is a transport, not a store of record. |
+| **Delivery** | **At-least-once.** Every published event will be delivered to each subscribed consumer group at least once. |
+| **Consumer Acknowledgment** | Consumers must commit offsets only after durable processing (e.g., Postgres transaction commit). Uncommitted offsets are replayed after restart/rebalance. |
+| **Idempotency** | All consumers must be idempotent. Events carry a unique `event_id` (UUID) that consumers use to deduplicate. |
+| **Ordering** | Ordered per topic partition (not global). Consumers must not depend on cross-partition ordering. |
+| **Retention** | Topic retention is configured by time and/or size. Events older than retention are discarded by broker policy. |
+| **Persistence** | Production topics MUST use replicated log durability (`replication.factor >= 3`, `min.insync.replicas >= 2`, producer `acks=all`). |
 
 ### Trait Abstraction
-To decouple application logic from the transport implementation, Arbiters and Meta Services interact with the bus through an `EventBus` trait defined in `shared-types`:
+To decouple application logic from transport implementation, Arbiters and Meta Services interact with the bus through an `EventBus` trait defined in `shared-types`:
 
 ```rust
+type MessageRef = (i32, i64); // (partition, offset)
+
 #[async_trait]
 trait EventBus: Send + Sync {
-    /// Publish a serialized event to a named stream. Returns the stream entry ID.
-    async fn publish(&self, stream: &str, event_id: UUID, payload: &[u8]) -> Result<EntryId>;
+    /// Publish a serialized event to a named topic.
+    async fn publish(&self, topic: &str, event_id: UUID, payload: &[u8]) -> Result<()>;
 
-    /// Subscribe to a stream as part of a named consumer group.
-    async fn subscribe(&self, stream: &str, group: &str, consumer: &str) -> Result<Box<dyn EventStream>>;
+    /// Subscribe to a topic as part of a named consumer group.
+    async fn subscribe(&self, topic: &str, group: &str, consumer: &str) -> Result<Box<dyn EventStream>>;
 
-    /// Acknowledge successful processing of a delivered event.
-    async fn ack(&self, stream: &str, group: &str, entry_id: &EntryId) -> Result<()>;
+    /// Commit progress for a delivered message after durable processing.
+    async fn ack(&self, topic: &str, group: &str, message_ref: &MessageRef) -> Result<()>;
 }
 ```
 
-The production implementation uses Redis Streams (`XADD`, `XREADGROUP`, `XACK`). If the Meta Services layer grows to require partitioned ordering, multi-day retention, or complex fan-out topologies in the future, a Kafka or NATS JetStream implementation can be swapped in without touching game logic.
+The production implementation targets Redpanda via Kafka protocol clients. Transport can still be swapped through this abstraction if requirements change.
 
 ### Event Flow
 
--   **Outbound (Mesh → Meta):** When a Spatial Actor resolves a hard state transition (e.g., `PlayerDied`), it pushes the event to a non-blocking internal channel. A dedicated async worker thread publishes it to the appropriate Redis Stream (e.g., `stream:hard_state`). Meta Services consume from this stream via consumer groups to update quest progress, XP, and durable database records.
--   **Inbound (Meta → Mesh):** When a Meta Service needs to mutate the simulation (e.g., applying a "Party Heal" buff or a "Banned" status), it publishes a command to a per-Arbiter Redis Stream (e.g., `stream:arbiter:{arbiter_id}:commands`). The Arbiter's async worker thread reads from this stream and pushes commands into the 60Hz loop via a lock-free channel. Failed commands can be retried by Meta; the Arbiter deduplicates by `event_id`.
+-   **Outbound (Mesh → Meta):** When a Spatial Actor resolves a hard state transition (e.g., `PlayerDied`), it pushes the event to a non-blocking internal channel. A dedicated async worker publishes it to the Arbiter topic (e.g., `hard_state.arbiter.42`). Meta Services consume via consumer groups to update quest progress, XP, and durable records.
+-   **Inbound (Meta → Mesh):** When a Meta Service needs to mutate simulation state (e.g., `SpawnEntity`, `UpdateEntityStats`, ban status), it publishes to a per-Arbiter command topic (e.g., `arbiter.42.commands`). The Arbiter async worker reads and forwards commands into the 60Hz loop through a lock-free channel. Failed commands are retried by Meta; Arbiter deduplicates by `event_id`.
 
 Invariant: > The Spatial Mesh never waits for a response from Meta Services. The simulation loop is entirely non-blocking.
 
-### Stream Partitioning and Surge Resilience
+### Topic Partitioning and Surge Resilience
 
-The baseline design uses a single `stream:hard_state` stream. While this simplifies consumer group management, a single stream creates a head-of-line blocking risk during mass-casualty events (e.g., a 4,000-player AoE wipe generating thousands of `PlayerDied`, `MonsterDied`, and `LootSpawned` events within a few ticks).
-
-#### Producer Side (Arbiter → Redis)
-
-The Arbiter's HardStatePublisher is an async worker on a dedicated thread — it is architecturally impossible for Redis write latency to block the 60Hz simulation loop. However, if Redis itself becomes a bottleneck (connection saturation, pipeline stalls), events will queue in the Arbiter's internal channel. This is acceptable because:
-
-1. **Bounded channel with backpressure:** The internal channel from the Spatial Actor to the async publisher has a configurable capacity (default: 4096 events). If the channel fills, the oldest unprocessed events are **not dropped** — the Spatial Actor's `push` is non-blocking (`try_send`), and if the channel is full, the event is placed into a local overflow ring buffer. The async worker drains the ring buffer before accepting new channel events.
-2. **Batched writes:** The publisher drains all available events from the channel per wakeup and issues a single Redis pipeline (`XADD` × N) rather than N sequential writes. This amortizes round-trip latency and is critical during surges.
-3. **No simulation impact:** Even if the publisher falls behind by seconds, the Arbiter continues simulating at 60Hz. Hard events are durable facts about the past — delayed delivery to Meta means slightly delayed XP, loot, and quest updates, which is imperceptible to players and self-corrects once the surge subsides.
-
-#### Stream Topology
-
-To prevent head-of-line blocking on the consumer side, the Event Bus uses **per-Arbiter partitioned streams** rather than a single global stream:
+The baseline design uses **per-Arbiter topics** instead of a single shared topic to isolate surges:
 
 ```
-stream:hard_state:{arbiter_id}    // e.g., stream:hard_state:42
+hard_state.arbiter.{arbiter_id}    // e.g., hard_state.arbiter.42
 ```
 
-Each Arbiter publishes exclusively to its own stream. Meta service consumer groups subscribe to **all** active streams using a fan-in pattern:
+Each Arbiter publishes exclusively to its own topic. Meta service consumer groups subscribe to all active Arbiter topics using a fan-in pattern:
 
-1. **Stream discovery:** Meta services query the Controller's Service Registry (or a Redis key set `active_arbiters`) to discover active `arbiter_id` values.
-2. **Dynamic subscription:** A coordinator goroutine/task maintains one consumer per active stream. When Arbiters are added (splits) or removed (merges/crashes), the coordinator adds/removes stream subscriptions.
-3. **Per-stream consumer groups:** Each Meta service (e.g., `group:progression`, `group:loot`) creates a consumer group on every `stream:hard_state:{arbiter_id}`. Consumer group members are horizontally scaled workers.
+1. **Topic discovery:** Meta services query the Controller's Service Registry to discover active `arbiter_id` values.
+2. **Dynamic subscription:** A coordinator task maintains one consumer assignment per active topic. When Arbiters are added (splits) or removed (merges/crashes), assignments are updated.
+3. **Per-service consumer groups:** Each Meta service (`group.progression`, `group.loot`, etc.) joins all active Arbiter topics with horizontally scaled workers.
 
-**Why per-Arbiter streams eliminate head-of-line blocking:** A catastrophic AoE wipe in one Arbiter's cell produces a spike on `stream:hard_state:42`. Consumers reading from other Arbiters' streams are unaffected. The surge is isolated to the consumers of that single stream, and because consumer groups support multiple workers, the spike is absorbed by parallelism.
+**Why per-Arbiter topics eliminate head-of-line blocking:** A catastrophic AoE wipe in one Arbiter's cell spikes only `hard_state.arbiter.42`. Consumers working other Arbiter topics remain unaffected.
 
-#### Consumer Side (Redis → Meta Services)
+#### Producer Side (Arbiter → Broker)
 
-Each Meta service consumer group scales horizontally. Within a consumer group, Redis Streams' `XREADGROUP` with `COUNT` parameter distributes pending entries across workers automatically. The scaling strategy:
+The HardStatePublisher runs on a dedicated async task and cannot block the 60Hz loop. If broker I/O slows, events queue in the publisher channel plus overflow ring buffer. This is acceptable because:
+
+1. **Bounded channel with overflow ring buffer:** preserves hard-event delivery while keeping push non-blocking from simulation code.
+2. **Batched produce calls:** publisher drains channel in batches and emits batched broker writes per wakeup.
+3. **No simulation impact:** delayed hard-event propagation only delays durable bookkeeping; it does not stall combat simulation.
+
+#### Consumer Side (Broker → Meta Services)
+
+Each Meta service consumer group scales horizontally. Scaling policy:
 
 | Metric | Threshold | Action |
 |:---|:---|:---|
-| Consumer lag (pending entries) | > 1000 events | Scale up consumer workers for that group |
+| Consumer lag | > 1000 events | Scale up consumer workers for that group |
 | Consumer lag | > 5000 events | Emit `EventBusLagCritical` alert |
 | Processing latency p99 | > 500ms | Scale up or investigate slow consumer |
 | Consumer lag | < 100 events sustained | Scale down consumer workers |
 
-Consumer lag is measured per-group via `XINFO GROUPS` and `XPENDING`. The Meta Services observability stack (§7.2) MUST emit these as structured metrics.
+Lag is measured via broker end offsets minus committed group offsets per topic/partition. The Meta observability stack (§7.2) MUST emit these metrics.
 
 #### Surge Budget Analysis
 
@@ -627,11 +627,29 @@ Worst-case surge scenario: 4,000 players in a single dilated Arbiter cell. A cat
 | `MonsterDied` (if AoE also kills mobs) | ~200 | ~128 bytes | 25 KB |
 | `LootSpawned` (from monster deaths) | ~200 | ~256 bytes | 50 KB |
 
-Total burst: ~4,400 events, ~331 KB. Redis Streams can absorb this in a single pipeline write (Redis handles >100K `XADD` ops/sec on commodity hardware). The bottleneck is not Redis throughput but consumer processing time — specifically, the Progression Service must award XP to 4,000 characters and the Inventory Service must process 4,000 durability loss events. Per-Arbiter partitioning ensures this surge is isolated to the consumers of that one stream, and horizontal consumer scaling absorbs the processing load.
+Total burst: ~4,400 events, ~331 KB. This burst is small relative to broker throughput; the real bottleneck remains consumer-side game logic (XP awards, loot processing). Per-Arbiter topic isolation keeps one hotspot from starving global progression processing.
 
-#### Inbound Stream (Meta → Arbiter)
+#### Inbound Command Topic (Meta → Arbiter)
 
-The inbound path (`stream:arbiter:{arbiter_id}:commands`) is already per-Arbiter by design and does not suffer from the same surge risk. Meta commands are low-volume (stat updates, buff applications, ban enforcement) and are consumed by a single Arbiter's async worker. No additional partitioning is needed.
+The inbound path (`arbiter.{arbiter_id}.commands`) is already per-Arbiter and low-volume. No additional partitioning is required.
+
+### Topic Contract Table (Normative)
+
+The following topic templates are mandatory for production deployments:
+
+| Topic Template | Direction | Key | Partitions | Durability | Retention | Producer | Primary Consumers | Dead Letter Topic |
+|:---|:---|:---|:---:|:---|:---|:---|:---|:---|
+| `hard_state.arbiter.{arbiter_id}` | Arbiter -> Meta | `event_id` | `1` per topic | `replication.factor=3`, `min.insync.replicas=2` | `72h` | `acks=all`, idempotent producer | `group.progression`, `group.loot`, `group.quest`, other Meta groups | `deadletter.meta.{service}.hard_state` |
+| `arbiter.{arbiter_id}.commands` | Meta/Session -> Arbiter | `entity_id` when present, else `event_id` | `1` per topic | `replication.factor=3`, `min.insync.replicas=2` | `6h` | `acks=all`, idempotent producer | Arbiter command worker for that `arbiter_id` | `deadletter.mesh.commands` |
+| `controller.mesh.events` | Controller -> Meta | `arbiter_id` | `3` | `replication.factor=3`, `min.insync.replicas=2` | `24h` | `acks=all`, idempotent producer | `group.transaction_reconcile`, `group.spawn_lifecycle` | `deadletter.meta.{service}.controller` |
+| `deadletter.meta.{service}.hard_state` | Meta consumer quarantine | source-topic key passthrough | `3` | `replication.factor=3`, `min.insync.replicas=2` | `14d` | produced by failing consumer after retry budget exhausted | Ops/replay tooling only | N/A |
+| `deadletter.mesh.commands` | Arbiter command quarantine | source-topic key passthrough | `3` | `replication.factor=3`, `min.insync.replicas=2` | `7d` | produced by Arbiter command worker after retry budget exhausted | Ops/replay tooling only | N/A |
+
+Operational rules:
+1. Production MUST disable broker auto-topic-creation. Topics are provisioned by deployment automation.
+2. Consumers MUST commit offsets only after durable side effects (database commit or equivalent durable state transition).
+3. DLQ payloads MUST include `source_topic`, `source_partition`, `source_offset`, `event_id`, `consumer_group`, `error_code`, and `failed_at_unix_ms`.
+4. Topic naming is lower-case, dot-separated, and stable. Renames require dual-write migration.
 
 ## 9.4 Reconnection and Entity Recovery
 If a player disconnects during combat (client-side network loss or individual session drop), their `Session` on the Edge Node is destroyed, but their `Entity` persists in the Spatial Arbiter under AI control until the combat timer expires. To allow the player to seamlessly rejoin the fight:
@@ -689,7 +707,7 @@ The Mesh Controller monitors Arbiters via periodic `ArbiterHeartbeat` messages o
 1. **Declaration:** After 3 consecutive missed heartbeats (~3 seconds), the Controller declares the Arbiter dead and removes it from the active topology.
 2. **Topology Repair:** The Controller issues `UpdateTopology` to neighboring Arbiters, expanding their boundaries to cover the dead cell's region. If the dead cell was too large for a single neighbor to absorb, the Controller may split the region across multiple neighbors.
 3. **Ghost Cleanup:** Neighboring Arbiters receive the topology update and garbage-collect all Ghost entities that were sourced from the dead Arbiter (identified by `source_arbiter_id`).
-4. **Event Bus Notification:** The Controller publishes an `ArbiterCrashed { arbiter_id, topology_epoch }` event to the Meta Services Event Bus (Redis Streams).
+4. **Event Bus Notification:** The Controller publishes an `ArbiterCrashed { arbiter_id, topology_epoch }` event to the Meta Services Event Bus.
 
 ### 9.7.2 Entity Fate
 
@@ -721,8 +739,8 @@ Because the Meta Services layer is the durable authority, the following survive 
 |:---|:---|
 | Inventory & equipment | Stored in Meta's database. The Arbiter never modifies inventory directly. |
 | Currency & gold | Stored in Meta's database. |
-| Level, XP, quest progress | Updated by Meta when it consumes `HardEvent` from the Event Bus. Any event published before the crash is durable in Redis Streams. |
-| Kill credit & boss participation | `MonsterDied` / `PlayerDied` events are published at the moment of death, before loot spawning. If the event reached Redis Streams, it's durable. |
+| Level, XP, quest progress | Updated by Meta when it consumes `HardEvent` from the Event Bus. Any event published before the crash is durable in Redpanda. |
+| Kill credit & boss participation | `MonsterDied` / `PlayerDied` events are published at the moment of death, before loot spawning. If the event reached the broker, it's durable. |
 | Loot table rolls | Meta rolls the drop table upon consuming `MonsterDied` and records the results in its database before sending `SpawnLootInteractable` to the Arbiter. |
 | Last save zone | Updated by Meta whenever the player visits a save point. |
 
@@ -850,7 +868,7 @@ The data required for deferred recovery is fully durable:
 
 | Data | Source | Durable? |
 |:---|:---|:---|
-| Boss identity and kill event | `MonsterDied` published to Event Bus at moment of death | Yes — in Redis Streams before crash |
+| Boss identity and kill event | `MonsterDied` published to Event Bus at moment of death | Yes — in Redpanda before crash |
 | Kill credit / eligible party | `participating_entities` field in `MonsterDied` | Yes |
 | Loot table roll results | Computed and recorded by Meta upon consuming `MonsterDied` | Yes — in Meta's database |
 | Whether loot was claimed | Absence of a `LootClaimed` event for this drop | Yes — provable by absence |
@@ -896,7 +914,7 @@ When an Edge Node's heartbeat TTL expires:
 
 1. **Declaration:** The Session Manager marks the Edge Node as `DEAD` in its registry.
 2. **Bulk Session Orphaning:** The Session Manager queries all session mappings associated with the dead Edge Node and marks them as `ORPHANED`. This is a fast batch operation on a Redis set/index keyed by `edge_node_id`.
-3. **Arbiter Notification:** For each unique Arbiter hosting entities from orphaned sessions, the Session Manager publishes an `EdgeNodeDead { edge_node_id, affected_entities: Vec<EntityID> }` notification to the Arbiter's command stream on the Event Bus.
+3. **Arbiter Notification:** For each unique Arbiter hosting entities from orphaned sessions, the Session Manager publishes an `EdgeNodeDead { edge_node_id, affected_entities: Vec<EntityID> }` notification to the Arbiter's command topic on the Event Bus.
 4. **Arbiter Response:** Upon receiving the notification, the Arbiter:
    - Stops sending `StateUpdate` packets to the dead Edge Node's UDP address for the affected entities (eliminates wasted bandwidth).
    - Starts the `logout_fuse_ticks` timer for each affected entity (same as a wilderness disconnect — the entity persists under AI control for 60 seconds).

@@ -537,7 +537,7 @@ enum DownstreamPayload {
     }
 }
 
-// 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Redis Streams Event Bus)
+// 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Event Bus topics)
 enum MetaCommand {
     SpawnEntity {
         entity_id: EntityID,

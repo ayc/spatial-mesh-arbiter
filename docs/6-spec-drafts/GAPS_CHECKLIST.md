@@ -51,7 +51,9 @@
 | T2-02 | ~~OffensiveStats Mutability~~ | `RESOLVED` | **Not a gap.** Spec is explicit: base immutable during gameplay, Meta replaces via UpdateEntityStats on equip/level/durability, buffs layer at eval time. | [draft](tier-2-contracts/02-offensive-stats-mutability.md) | `2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md` |
 | T2-03 | **Data Epoch Distribution** — Pipeline mechanics specified (download, verify, swap). Missing: who triggers epoch increment, Meta↔Arbiter epoch sync, mid-resolution semantics | `OPEN` | Narrowed (pipeline exists, triggers/sync missing) | [draft](tier-2-contracts/03-data-epoch-distribution.md) | `1-architecture/03-mesh-controller.md` + `03-mesh-arbiter-state.md` |
 | T2-04 | **Session Lifecycle & Auth** — Token TTL, max sessions, wilderness fuse, session orphaning ARE specified. Missing: token format (JWT vs opaque), refresh rotation, explicit logout handshake flow | `OPEN` | Narrowed (substantial auth exists, format/rotation missing) | [draft](tier-2-contracts/04-session-lifecycle-and-auth.md) | `1-architecture/04-meta-services.md` + `01-client-edge-wire-protocol.md` |
-| T2-05 | **HardEvent Consumption Contract** — XACK requirement, at-least-once delivery, idempotency mandate, consumer groups, scaling thresholds ARE specified. Missing: ack timing (vs Postgres persist), retry policy, visibility timeout, dead letter handling | `OPEN` | Narrowed (framework exists, failure-mode details missing) | [draft](tier-2-contracts/05-hard-event-consumption.md) | `2-contracts-and-interfaces/internal-mesh-types/04-hard-state-events.md` |
+| T2-05 | **HardEvent Consumption Contract** — Offset commit requirement, at-least-once delivery, idempotency mandate, consumer groups, scaling thresholds ARE specified. Missing: commit timing (vs Postgres persist), retry policy, dead letter handling | `OPEN` | Narrowed (framework exists, failure-mode details missing) | [draft](tier-2-contracts/05-hard-event-consumption.md) | `2-contracts-and-interfaces/internal-mesh-types/04-hard-state-events.md` |
+| T2-06 | **Surrogate Recovery + Event Spine Contract** — Define quarantine/surrogate takeover, edge roll-call continuity snapshots, rolling checkpoint+delta replay, and phase boundary between crash continuity and spectator/replay services | `DRAFTING` | New architecture proposal from 2026-03-04 brainstorming | [draft](tier-2-contracts/06-surrogate-recovery-and-event-spine.md) | `1-architecture/03-mesh-controller.md` + `01-core-primitives.md` + `03-mesh-arbiter-state.md` + `5-testing-and-conformance/01-mini-mesh-conformance.md` |
+| T2-07 | **Redpanda Event Bus Adoption ADR** — Define day-1 Redpanda implementation plan, conformance gates, and release contingency (no Redis Streams cutover required pre-launch) | `DRAFTING` | Added after transport decision update on 2026-03-04 | [draft](tier-2-contracts/07-redpanda-adoption-adr.md) | `1-architecture/01-core-concepts-and-mesh.md` + `04-meta-services.md` + `0-getting-started/02-implementation-phases.md` |
 
 ## Tier 3 — Subsystem Gaps
 
@@ -89,8 +91,8 @@
 | Tier | Total | Open | Drafting | Review | Resolved |
 |------|-------|------|----------|--------|----------|
 | 0 — Foundations | 3 | 0 | 0 | 0 | 3 |
-| 1 — Combat | 6 | 6 | 0 | 0 | 0 |
-| 2 — Contracts | 5 | 4 | 0 | 0 | 1 |
+| 1 — Combat | 6 | 5 | 1 | 0 | 0 |
+| 2 — Contracts | 7 | 4 | 2 | 0 | 1 |
 | 3 — Subsystems | 10 | 9 | 0 | 0 | 1 |
 | 4 — Testing | 3 | 3 | 0 | 0 | 0 |
-| **Total** | **27** | **22** | **0** | **0** | **5** |
+| **Total** | **29** | **21** | **3** | **0** | **5** |
