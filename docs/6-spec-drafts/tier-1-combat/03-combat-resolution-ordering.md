@@ -42,61 +42,95 @@ Expand the existing 7-step `apply_combat_math` into a complete pipeline that acc
 ```
 PHASE 2: apply_combat_math(victim, attacker_id, context)
 │
-├─ 1. EVASION CHECK
+├─ 0. MODIFIER CLASSIFICATION GATE
+│     Before the pipeline runs, active modifiers on the victim are sorted into
+│     their classified pipeline positions. Each modifier carries a classification
+│     that determines WHERE in the pipeline it evaluates — not IF, but WHEN.
+│     See "Modifier Classifications" below.
+│
+├─ 1. IMMUNITY CHECK (Classification: Immunity)
+│     If victim has any active Immunity modifier matching this damage type:
+│       → short-circuit entire pipeline, emit "IMMUNE", exit
+│     Examples: Invulnerability, Divine Shield, phase-shift
+│     Immunity modifiers always evaluate first regardless of when they were applied.
+│
+├─ 2. EVASION CHECK
 │     Compute effective evasion: base + flat defense mods + mult defense mods
 │     Roll against effective evasion rating
 │     If dodged → emit "DODGED", exit (no further processing)
 │
-├─ 2. DISTANCE FALLOFF
-│     Apply calculate_falloff(distance) to base_damage
+├─ 3. ABSORPTION (Classification: Absorption)
+│     If victim has active Absorption modifiers (shields, barriers):
+│       → subtract damage from shield HP first
+│       → if shield absorbs all damage, emit "ABSORBED", skip to step 10 (procs may still fire)
+│       → if shield breaks, remainder continues through pipeline
+│     Examples: Mana Shield (absorb up to X using resource), Damage Barrier (flat HP shield)
+│
+├─ 4. DISTANCE FALLOFF
+│     Apply calculate_falloff(distance) to remaining base_damage
 │     (See T1-02 for falloff formula)
 │
-├─ 3. ATTACKER CONDITIONALS (carried in CombatContext)
+├─ 5. ATTACKER CONDITIONALS (carried in CombatContext)
 │     Evaluate against victim's CURRENT state (not snapshot)
 │     e.g., "50% bonus if target HP < 30%" checks victim.hp NOW
 │     This means prior hits in the same tick CAN trigger conditionals
 │
-├─ 4. BLOCK CHECK
+├─ 6. BLOCK CHECK
 │     Compute effective block chance: base + flat defense mods + mult defense mods
 │     Roll against effective block chance
 │     If blocked → apply block effectiveness multiplier (default 50% reduction)
 │     On-block procs trigger here (pushed to internal_inbox, proc_depth + 1)
 │
-├─ 5. VICTIM INCOMING DAMAGE MODIFIERS
+├─ 7. INCOMING DAMAGE MODIFIERS (Classifications: Amplification, Reduction)
 │     Evaluate all active modifiers on the victim that affect incoming damage:
-│       a. Flat incoming damage adjustment (e.g., "take 10 less damage per hit")
-│       b. Percentage vulnerability/reduction (e.g., "take 20% more fire damage")
+│       a. Flat incoming damage adjustment — Reduction class (e.g., "take 10 less per hit")
+│       b. Percentage amplification — Amplification class (e.g., "take 20% more fire damage")
+│       c. Percentage reduction — Reduction class (e.g., "reduce incoming damage by 15%")
 │     Order: flat adjustments first, then percentage multipliers
 │     Same flat-then-multiplicative convention as buff evaluation
+│     Amplification and Reduction modifiers both evaluate here, in declaration order
+│     within their flat/mult grouping.
 │
-├─ 6. RESISTANCE & PENETRATION
+├─ 8. RESISTANCE & PENETRATION
 │     (Unchanged from current spec)
 │     effective_resistance = base - flat_pen, then * (1 - pct_pen)
 │     Clamp to [-100, 85]
 │     Apply mitigation: damage * (1 - resistance/100) or amplification if negative
 │
-├─ 7. FINAL HP APPLICATION
+├─ 9. FINAL HP APPLICATION
 │     victim.hp -= incoming_damage (truncated to i32 per T0-01 rounding rules)
-│     If victim.hp <= 0 → mark is_dead, emit PlayerDied/MonsterDied HardEvent
+│     Check Threshold modifiers BEFORE marking death (see below)
+│     If victim.hp <= 0 AND no Threshold modifier prevents death:
+│       → mark is_dead, emit PlayerDied/MonsterDied HardEvent
 │
-├─ 8. ON-HIT PROCS
-│     Evaluate attacker's on-hit effects (carried in CombatContext or on ActiveStatusEffects)
-│     Only fires if damage was actually applied (not dodged, not fully absorbed)
-│     e.g., "on hit: apply Burning for 5 seconds"
-│     Status effect application is immediate on the victim
-│     proc_depth carries forward from context
+│     THRESHOLD CHECK (Classification: Threshold)
+│     If victim has active Threshold modifier (e.g., "cannot die for 3 seconds",
+│     "survive lethal hit with 1 HP once per 60 seconds"):
+│       → clamp victim.hp to threshold minimum (e.g., 1)
+│       → consume the modifier if it's single-use
+│       → do NOT mark is_dead
+│     Examples: Last Stand, Undying passive, Cheat Death
 │
-├─ 9. ON-CRIT PROCS (if context.is_critical_strike)
-│     Evaluate attacker's on-crit effects
-│     e.g., "on crit: 30% chance to apply Stun for 1 second"
-│     Same rules as on-hit: status effect applied immediately, proc_depth carries
+├─ 10. ON-HIT PROCS
+│      Evaluate attacker's on-hit effects (carried in CombatContext or on ActiveStatusEffects)
+│      Only fires if damage was actually applied (not immune, not dodged)
+│      Fires even if fully absorbed (shield broke or not — the hit "landed")
+│      e.g., "on hit: apply Burning for 5 seconds"
+│      Status effect application is immediate on the victim
+│      proc_depth carries forward from context
 │
-├─ 10. ON-KILL PROCS (if victim.is_dead)
+├─ 11. ON-CRIT PROCS (if context.is_critical_strike)
+│      Evaluate attacker's on-crit effects
+│      e.g., "on crit: 30% chance to apply Stun for 1 second"
+│      Same rules as on-hit: status effect applied immediately, proc_depth carries
+│
+├─ 12. ON-KILL PROCS (if victim.is_dead)
 │      Evaluate attacker's on-kill effects
 │      e.g., "on kill: heal for 5% of max HP"
 │      Heal is applied to attacker immediately (or via InternalPreparedHit if cross-boundary)
+│      NOTE: does NOT fire if Threshold modifier prevented death
 │
-├─ 11. REACTIVE PROCS (victim-side)
+├─ 13. REACTIVE PROCS (victim-side)
 │      Thorns: if victim has thorns_damage > 0
 │              AND damage_origin == DirectCast
 │              AND proc_depth == 0
@@ -106,6 +140,26 @@ PHASE 2: apply_combat_math(victim, attacker_id, context)
 │
 └─ END
 ```
+
+### Modifier Classifications
+
+Each modifier on an entity carries a **classification** that determines its guaranteed evaluation position in the pipeline. The classification is defined on the modifier's data definition (in SpellData/affix data), not at runtime. Designers tag each modifier; the pipeline routes it.
+
+| Classification | Pipeline Step | Behavior | Examples |
+|---------------|--------------|----------|----------|
+| **Immunity** | Step 1 | Short-circuits entire pipeline. Checked first, always. | Invulnerability, Divine Shield, Ice Block |
+| **Absorption** | Step 3 | Subtracts damage from shield HP before other mitigation. Can fully absorb. | Mana Shield, Barrier, Energy Shield |
+| **Amplification** | Step 7 | Increases incoming damage (percentage). Evaluated with other incoming modifiers. | Vulnerability curse, "take 20% more fire damage" |
+| **Reduction** | Step 7 | Decreases incoming damage (flat or percentage). Evaluated with other incoming modifiers. | Damage reduction buff, armor active ability |
+| **Threshold** | Step 9 | Overrides death. Clamps HP to minimum after damage application. | Last Stand, Cheat Death, "cannot die while channeling" |
+
+**Why classify?** Without classification, a designer adding a "Mana Shield" modifier would need to know the exact pipeline step number and manually position it. With classification, they tag it as `Absorption` and the pipeline handles placement. This is the extension mechanism — new modifier types are added by defining new classifications with specified pipeline positions, not by rewriting the pipeline.
+
+**Interaction rules:**
+- **Immunity beats everything.** If active, nothing else in the pipeline runs.
+- **Absorption runs before mitigation.** A 100-damage hit against a 60-HP shield + 50% resistance: shield absorbs 60, remaining 40 goes through resistance → 20 actual HP loss. (Not: 100 → 50 after resistance → shield absorbs 50.)
+- **Threshold runs after HP application.** Damage is fully calculated and applied, THEN the threshold check prevents death. This means on-hit procs fire (the hit landed), but on-kill procs don't (the target didn't actually die).
+- **Amplification and Reduction coexist at step 7.** Both evaluate in the same flat-then-mult pass. A target with both "+20% vulnerability" and "-15% reduction" gets: `damage * 1.20 * 0.85 = damage * 1.02`.
 
 ### Key Design Decisions
 
@@ -128,11 +182,11 @@ The pipeline has explicit extension points:
 
 | Trigger | Step | Condition | Examples |
 |---------|------|-----------|----------|
-| **On-hit** | 8 | Damage applied (not dodged) | Apply DoT, apply slow, lifesteal |
-| **On-crit** | 9 | `is_critical_strike == true` | Bonus damage proc, stun, resource gain |
-| **On-kill** | 10 | `victim.is_dead == true` | Heal on kill, soul harvest, XP bonus |
-| **On-block** | 4/11 | Block check succeeded | Shield bash counter, thorns variant |
-| **Reactive (thorns)** | 11 | `damage_origin == DirectCast && proc_depth == 0` | Reflect damage |
+| **On-hit** | 10 | Damage applied (not immune, not dodged) | Apply DoT, apply slow, lifesteal |
+| **On-crit** | 11 | `is_critical_strike == true` | Bonus damage proc, stun, resource gain |
+| **On-kill** | 12 | `victim.is_dead == true` (not prevented by Threshold) | Heal on kill, soul harvest, XP bonus |
+| **On-block** | 6/13 | Block check succeeded | Shield bash counter, thorns variant |
+| **Reactive (thorns)** | 13 | `damage_origin == DirectCast && proc_depth == 0` | Reflect damage |
 
 Adding a new proc type means: define the trigger condition, the effect, and which step it plugs into. The pipeline itself doesn't change.
 
@@ -150,11 +204,13 @@ No additional ordering specification is needed beyond what T0-01 and this pipeli
 
 | Question | Decision |
 |----------|----------|
-| Modifier pipeline | 11-step expansion of `apply_combat_math` with explicit proc trigger points |
+| Modifier pipeline | 13-step expansion of `apply_combat_math` with classified modifier positions and explicit proc trigger points |
+| Modifier classification | 5 classes (Immunity, Absorption, Amplification, Reduction, Threshold) each with a guaranteed pipeline position |
 | Hit evaluation | Sequential (each hit sees results of prior hits, not snapshot) |
 | Dead targets | Still receive hits (damage applied, procs fire, kill attribution tracks all contributors) |
+| Threshold modifiers | Override death after HP application. On-hit procs fire, on-kill procs don't. |
 | Reactive procs | Deferred to internal_inbox (same tick, next drain pass), proc_depth prevents recursion |
-| Incoming damage modifiers | Step 5: flat adjustment first, then percentage (flat-then-mult convention) |
+| Incoming damage modifiers | Step 7: flat adjustment first, then percentage (flat-then-mult convention) |
 | Proc depth | Per-chain, not per-tick |
 | Tick-level ordering | Resolved by T0-01 (BTreeMap iteration, phase ordering in tick loop) |
 
