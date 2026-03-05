@@ -76,3 +76,119 @@ To satisfy the above constraints without writing custom Kubernetes controllers f
     *   Provides a native SDK allowing the Arbiter to signal `Ready`, `Allocated`, and `Shutdown` to prevent random K8s evictions.
 3.  **Networking:** Cilium (eBPF) or AWS VPC CNI for low-latency, overlay-free routing.
 4.  **Compute:** Compute-optimized node pools (e.g., AWS C6i or AMD EPYC equivalents) with Static CPU pinning enabled. Memory requirements per pod are low, but CPU cache frequency is paramount.
+
+---
+
+## 5. Binary Deployment Strategy (Blue/Green Stack Replacement)
+
+Game data updates (balance patches, new abilities, new items) are handled live via the **Data Epoch** hot-patching pipeline — no downtime, no restart (see [Mesh Controller §7](../1-architecture/03-mesh-controller.md)).
+
+**Binary updates** (engine code changes, game logic changes, Rust recompilation) require replacing running processes. Because the engine uses monomorphized generics (see [Framework Boundary §9](../1-architecture/07-framework-boundary.md)), a code change to either the engine or the game layer produces a new binary. There is no binary compatibility between versions — old and new arbiters cannot participate in the same topology, perform handoffs, or relay events to each other.
+
+The deployment model is **blue/green stack replacement with forced relog**.
+
+### 5.1 Infrastructure Topology
+
+The deployment is split into **shared long-lived infrastructure** and **per-version game stacks**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Shared Infrastructure                   │
+│                  (persists across deploys)               │
+│                                                         │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐            │
+│  │ Postgres │   │ Redpanda │   │  Redis   │            │
+│  │ (Meta DB)│   │(Event Bus)│   │(Sessions)│            │
+│  └──────────┘   └──────────┘   └──────────┘            │
+└─────────────────────────────────────────────────────────┘
+
+┌──────────────────────┐    ┌──────────────────────┐
+│   Stack v1 (Blue)    │    │   Stack v2 (Green)   │
+│                      │    │                      │
+│  Mesh Controller     │    │  Mesh Controller     │
+│  Arbiter Warm Pool   │    │  Arbiter Warm Pool   │
+│  Edge Nodes          │    │  Edge Nodes          │
+│  AI Nodes            │    │  AI Nodes            │
+│  Meta Service Workers│    │  Meta Service Workers│
+└──────────────────────┘    └──────────────────────┘
+```
+
+**Shared (long-lived):**
+- **Postgres** — Character data, inventory, progression, account state. Schema migrations run before the new stack boots.
+- **Redpanda** — Hard state event bus. Both stacks publish and consume from the same topics. Consumer group IDs are version-namespaced (e.g., `loot-service-v2`) so old and new consumers don't compete for the same offsets.
+- **Redis** — Session manager. Session keys are ephemeral (6s heartbeat TTL). Old stack's sessions expire naturally after disconnect.
+
+**Per-version (ephemeral):**
+- Mesh Controller, Arbiter warm pool, Edge Nodes, AI Nodes, Meta Service worker pods. Each version is a fully independent game stack. They share the backing data stores but never communicate with each other.
+
+### 5.2 Deployment Sequence
+
+```
+Time ──────────────────────────────────────────────────────────►
+
+1. Pre-deploy          2. Boot green        3. Flip routing
+   Schema migrations      New stack idle       New logins → green
+   Asset upload to CDN    Health checks pass   Old logins blocked
+
+4. Graceful drain      5. Old stack empty   6. Teardown
+   Staggered disconnect   Last player relogs   Blue pods terminated
+   Players relog → green  Hard events flushed  Consumer groups removed
+```
+
+**Step 1 — Pre-deploy.** Run any Postgres schema migrations (must be backward-compatible with the old binary until the old stack is fully drained). Upload new Data Epoch assets to CDN.
+
+**Step 2 — Boot green stack.** Deploy the new binary as a parallel set of Kubernetes resources (namespaced or label-differentiated). The new Mesh Controller boots, provisions its own warm pool, and waits. New Meta Service workers start consuming from Redpanda with version-namespaced consumer group IDs.
+
+**Step 3 — Flip login routing.** Update the load balancer (or DNS) so that new client connections are directed to the green stack's Edge Nodes. The old stack stops accepting new WebSocket connections (Edge Nodes enter `DrainingMode`).
+
+**Step 4 — Graceful drain.** The old stack's Edge Nodes send a `ServerShutdown` downstream message to connected clients:
+
+```rust
+DownstreamPayload::ServerShutdown {
+    reason: ShutdownReason::UpdateAvailable,
+    message: "A game update is available. You will be reconnected shortly.",
+    grace_period_seconds: u16,  // Time before forced disconnect
+}
+```
+
+The client displays a notice and reconnects to the new stack. To avoid a thundering herd on the green stack, disconnects are **staggered in waves**:
+
+- **Wave 1 (t+0s):** Players in safe zones (towns, lobbies) — these are cheap to respawn.
+- **Wave 2 (t+15s):** Players in the open world not currently in combat.
+- **Wave 3 (t+30s):** Players in active combat — given a grace period to finish their current encounter.
+- **Wave 4 (t+60s):** Hard disconnect for any remaining sessions.
+
+The wave assignment is determined by the Edge Node, which knows the player's current state from the last `StateUpdate` it received.
+
+**Step 5 — Old stack empty.** Once all players have relogged, the old stack's entity count reaches zero. Old Meta Service workers finish processing any remaining Redpanda events in their consumer groups.
+
+**Step 6 — Teardown.** Old stack's Kubernetes resources are deleted. Old Redpanda consumer groups are cleaned up (or left to expire).
+
+### 5.3 Player Experience
+
+From the player's perspective:
+
+1. A banner appears: *"Game update available. Reconnecting in 15 seconds..."*
+2. The client disconnects and immediately reconnects (automated, no manual action).
+3. The spawn pipeline reads the player's last save from Postgres and places them in the world.
+4. Total interruption: **5–15 seconds** per player. No data loss — all hard state (loot, kills, progression) was durably committed to Redpanda/Postgres before the disconnect.
+
+Players who were mid-combat lose their combat encounter state (active buffs, projectiles in flight, cooldown timers). This is acceptable — `SoftState` is ephemeral by design. The architecture already handles this identically to an arbiter crash (see [Core Architecture §9.7](../1-architecture/01-core-concepts-and-mesh.md)).
+
+### 5.4 Rollback
+
+If the green stack is unhealthy after routing flip:
+
+1. Flip routing back to the old stack (which is still running and accepting connections during the drain period).
+2. Send `ServerShutdown` to any players who connected to the green stack.
+3. Tear down the green stack.
+
+This is safe as long as the old stack hasn't been fully drained. The rollback window is the duration of step 4 (the staggered drain). Once the old stack is torn down, rollback requires redeploying the old binary as a new stack.
+
+### 5.5 Meta Service Deployment
+
+Meta Services (stateless workers consuming from Redpanda) can be deployed **independently** of the game stack, since they only interact through the shared event bus and Postgres. This means:
+
+- Bug fixes or optimizations to Meta logic (loot formulas, inventory rules) can be rolled out as a standard Kubernetes rolling deployment without any player-visible interruption.
+- Meta schema changes that don't affect the game binary can ship at any time.
+- Only changes that affect the arbiter/edge/controller binaries (new action types, protocol changes, physics changes) require the full blue/green stack replacement.

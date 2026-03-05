@@ -151,39 +151,59 @@ To solve cross-boundary combat without creating a massive centralized bottleneck
 
 # 3. State Model
 
-## 3.1 Hard State (Durably Committed)
+## 3.1 The Classification Rule
 
-Hard state represents irreversible or economically meaningful
-transitions:
+> **If losing the data creates an exploit or an inconsistency between two players, it is hard state.** Everything else is soft state.
 
--   PlayerDeath
+Apply this test: the arbiter crashes and all in-memory state is lost. For each piece of data, ask:
+
+- **"Can a player profit from the loss?"** If a gold transfer vanishes mid-transaction and one player keeps both the gold and the item, that's an exploit. The transfer must be hard state.
+- **"Do two players now disagree about reality?"** If player A believes they own a sword but player B's client shows it in their own inventory, the game is inconsistent. Ownership must be hard state.
+- **"Does the player just walk back from town?"** If the only consequence is the player relogs at a save zone with full HP and has to run back to where they were, no harm is done. Position, HP, buffs, and cooldowns are soft state.
+
+When in doubt, ask: *"Would I file a bug report if this data was lost?"* A player losing their position in the world is a minor inconvenience. A player losing a Legendary drop is a support ticket.
+
+## 3.2 Hard State (Durably Committed)
+
+Hard state represents irreversible or economically meaningful transitions:
+
+-   Player death (the *fact* of death — penalties, durability loss, respawn timer)
 -   Inventory / Equipment changes
--   Respawn
+-   Loot ownership (ROLLED → SPAWNED → CLAIMED)
+-   Currency transfers (gold, trade, auction)
 -   Objective completion
--   Currency updates
+-   Quest / Progression milestones
+-   Last save zone (for respawn location on relog)
 
 Hard state is:
-- Finalized by Mesh Arbiter
-- Emitted to the Meta Services Event Bus (Redpanda topics)
-- Persisted by Meta into durable databases
-- Recoverable after crash
+- Finalized by the Mesh Arbiter at the moment of transition
+- Published as a `HardEvent` to the Event Bus (Redpanda)
+- Consumed and persisted by Meta Services into Postgres
+- Recoverable after any crash — if the arbiter dies, Meta's `PendingTransaction` ledger reconciles
+
+**Not hard state:** Player x/y coordinates, current HP/mana, active buffs, cooldown timers. These are high-frequency, low-consequence values. Publishing them durably would saturate the event bus for data nobody needs after a crash.
 
 ------------------------------------------------------------------------
 
-## 3.2 Soft State (Ephemeral but Authoritative)
+## 3.3 Soft State (Ephemeral but Authoritative)
 
 Soft state includes:
 
--   HP / MP
+-   HP / MP / Resource bars
+-   Position / Velocity
 -   Shields
 -   Buffs / Debuffs
 -   Stuns / CC
 -   Knockback
 -   Cooldowns
+-   Active status effects
 
-Soft state: - Is not durably committed - Is authoritative within the
-Mesh Arbiter - May be predicted by edges - Must converge
-deterministically at conflict boundaries
+Soft state:
+- Is **not** durably committed — lives only in Arbiter memory
+- Is authoritative within the owning Mesh Arbiter
+- May be predicted by Edge Nodes for client responsiveness
+- Must converge deterministically at conflict boundaries
+- Is **lost on arbiter crash** — the player relogs with a fresh `SoftState` at their last save zone
 
 ### Rule
 
