@@ -49,7 +49,11 @@ struct DeviceTelemetrySample {
     raw_key_mask: Option<u64>,
 }
 
-// Low-frequency, strongly consistent interactions forwarded to Tier 2
+// Low-frequency, strongly consistent interactions forwarded to Tier 2.
+// This is the canonical MetaRequest definition. The Client-Edge Wire Protocol
+// (01-client-edge-wire-protocol.md §9.1) references this enum directly —
+// the client sends the same MetaRequest variants over the wire with no
+// translation or fan-out step.
 enum MetaRequest {
     // --- Chat ---
     SendChatMessage { channel: String, text: String },
@@ -401,9 +405,10 @@ impl ProxyActor {
                 origin_tick: self.predicted_tick, // Now safely synchronized to the 60Hz baseline
                 topology_epoch: self.current_topology_epoch,
                 data_epoch: self.current_data_epoch,
-                payload: ActionPayload::TargetedAbility { 
+                payload: ActionPayload::Game(ArpgAction::TargetedAbility { 
                     target_id: aggregated_input.target_id, 
                     ability_id: aggregated_input.selected_ability,
+                })
                 }
             };
             self.pending_proposals.insert(

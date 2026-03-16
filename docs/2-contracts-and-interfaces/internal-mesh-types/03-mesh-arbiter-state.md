@@ -198,7 +198,7 @@ struct MergeState {
     forwarding_until_tick: u64,
 }
 
-struct SpatialActor {
+struct SpatialActor<G: GameResolver> {
     arbiter_id: u32,
     topology_epoch: u32,
     current_data_epoch: u32, // The version of the SpellData dictionary currently loaded in memory
@@ -220,8 +220,8 @@ struct SpatialActor {
     
     // Bounded Queues (Network layer pushes here. Must have explicit capacity limits 
     // to prevent OOM failure modes during blackhole density events).
-    external_inbox: BoundedQueue<ActionProposal>,
-    internal_inbox: BoundedQueue<MeshInternalEvent>,
+    external_inbox: BoundedQueue<ActionProposal<G>>,
+    internal_inbox: BoundedQueue<MeshInternalEvent<G>>,
     controller_inbox: BoundedQueue<ControllerCommand>,
     
     // Future Event Scheduler
@@ -230,13 +230,13 @@ struct SpatialActor {
     // Stale Buffer: Holds (Proposal, local_arrival_tick) to measure timeout safely.
     // Must be a BoundedQueue to prevent OOM vulnerabilities during prolonged Mesh Controller 
     // outages. Sized to handle spikes based on a ~400 entity capacity limit.
-    stale_proposals_buffer: BoundedQueue<(ActionProposal, u64)>,
+    stale_proposals_buffer: BoundedQueue<(ActionProposal<G>, u64)>,
 
     // Runtime storage splits SoftState and OffensiveStats into separate maps for cache locality.
     // During split/merge serialization, these are joined into Vec<(EntityID, EntityRecord)>
     // as defined in 01-core-primitives.md (SplitSnapshot / MergeSnapshot).
-    entities: HashMap<EntityID, SoftState>,
-    offense_by_entity: HashMap<EntityID, OffensiveStats>,
+    entities: HashMap<EntityID, (EntityCore, <G::Entity as GameEntity>::SoftExt)>,
+    offense_by_entity: HashMap<EntityID, <G::Entity as GameEntity>::OffenseExt>,
     ghost_entities: HashMap<EntityID, GhostState2D>, 
     ghost_grid: SpatialIndex<EntityID>, // Mirrors ghost positions for cheap downstream visibility queries
     proposal_buckets: HashMap<EntityID, TokenBucket>, // Per-entity fairness guard on ingress
@@ -250,10 +250,11 @@ struct SpatialActor {
     // Memory-bounded ring: max keys ~= idempotency_bucket_capacity * MAX_EVENT_AGE_TICKS.
     event_idempotency_ledger: [BoundedLedgerBucket; MAX_EVENT_AGE_TICKS as usize], // each bucket initialized with boot_config.idempotency_bucket_capacity
     idempotency_overflow_drop_count: u64, // Impacts dropped fail-closed due to dedupe cap
-    idempotency_merge_overflow_drop_count: u64, // Imported merge dedupe keys dropped due to cap
+    idempotency_merge_overflow_drop_count: u64,
+    game_resolver: G, // Imported merge dedupe keys dropped due to cap
 }
 
-impl SpatialActor {
+impl<G: GameResolver> SpatialActor<G> {
     const FRAME_BUDGET_US: i64 = 16_666;
     const METRONOME_GAIN_US_PER_TICK: i64 = 50;
     const METRONOME_OFFSET_CLAMP_US: i64 = 1000;
@@ -278,18 +279,20 @@ impl SpatialActor {
     }
 
     // Called by the network ingress layer for each proposal packet before queueing.
-    fn on_external_proposal_received(&mut self, proposal: ActionProposal) {
+    fn on_external_proposal_received(&mut self, proposal: ActionProposal<G>) {
         // Zero-trust ingress: only intent-level payloads are valid from Edge Nodes.
-        if !matches!(
-            &proposal.payload,
-            ActionPayload::Movement { .. }
-                | ActionPayload::TargetedAbility { .. }
-                | ActionPayload::GroundTargetedAbility { .. }
-                | ActionPayload::SpawnProjectile { .. }
-                | ActionPayload::UseConsumable { .. }
-                | ActionPayload::Interact { .. }
-                | ActionPayload::IssueCreepCommand { .. }
-        ) {
+        // The engine delegates game-specific validation to the GameResolver
+        if let ActionPayload::Game(game_action) = &proposal.payload {
+            if let Err(reason) = self.game_resolver.validate_proposal(game_action, proposal.actor_id) {
+                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                    proposal_id: proposal.proposal_id,
+                    reason: reason.to_string(),
+                });
+                return;
+            }
+        }
+        
+        if false {
             self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
                 proposal_id: proposal.proposal_id,
                 reason: "Invalid Payload Type".to_string(),
@@ -297,7 +300,7 @@ impl SpatialActor {
             return;
         }
 
-        let cost = if matches!(&proposal.payload, ActionPayload::Movement { .. }) {
+        let cost = if matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
             PROPOSAL_COST_MOVEMENT
         } else {
             PROPOSAL_COST_DISCRETE
@@ -308,7 +311,7 @@ impl SpatialActor {
             .or_insert(TokenBucket::new(self.current_tick));
 
         if !bucket.try_consume(self.current_tick, cost) {
-            if !matches!(&proposal.payload, ActionPayload::Movement { .. }) {
+            if !matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
                 self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
                     proposal_id: proposal.proposal_id,
                     reason: "Rate Limited".to_string(),
@@ -318,7 +321,7 @@ impl SpatialActor {
         }
 
         if self.external_inbox.is_full() {
-            if !matches!(&proposal.payload, ActionPayload::Movement { .. }) {
+            if !matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
                 self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
                     proposal_id: proposal.proposal_id,
                     reason: "Arbiter Queue Saturated".to_string(),
@@ -428,7 +431,7 @@ impl SpatialActor {
                 .chain(self.stale_proposals_buffer.drain(..));
 
             for (proposal, local_arrival_tick) in all_proposals {
-                if matches!(&proposal.payload, ActionPayload::Movement { .. }) {
+                if matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
                     latest_movement_by_actor.insert(proposal.actor_id, (proposal, local_arrival_tick));
                     continue;
                 }
@@ -631,10 +634,10 @@ impl SpatialActor {
             actor_id: None,
             origin_tick: self.current_tick,
             data_epoch: self.current_data_epoch,
-            payload: ActionPayload::RequestGhostCorrection {
+            payload: ActionPayload::Engine(EngineAction::RequestGhostCorrection {
                 entity_id,
                 requester_arbiter_id: self.arbiter_id,
-            },
+            })
         });
     }
 
@@ -661,422 +664,58 @@ impl SpatialActor {
         }
     }
 
-    fn resolve_action(&mut self, payload: ActionPayload, source_actor_id: Option<EntityID>, origin_tick: u64, original_proposal_id: Option<UUID>, data_epoch: u32) {
+    fn resolve_action(&mut self, payload: ActionPayload<G>, source_actor_id: Option<EntityID>, origin_tick: u64, original_proposal_id: Option<UUID>, data_epoch: u32) {
         match payload {
-            ActionPayload::TargetedAbility { target_id, ability_id } => {
-                let actor_id = source_actor_id.expect("TargetedAbility requires a source actor");
-                
-                let local_target_pos = self.entities.get(&target_id).and_then(|target| {
-                    if self.has_jurisdiction_over(target.position) { Some(target.position) } else { None }
-                });
-                let ghost_target_owner = self.ghost_entities.get(&target_id).map(|ghost| ghost.authoritative_arbiter_id);
-                let ghost_target_pos = self.ghost_entities.get(&target_id).map(|ghost| ghost.position);
-
-                let target_pos = if let Some(pos) = local_target_pos {
-                    pos
-                } else if let Some(pos) = ghost_target_pos {
-                    pos
-                } else {
-                    if let Some(prop_id) = original_proposal_id {
-                        self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                            proposal_id: prop_id,
-                            reason: "Invalid Target".to_string()
-                        });
-                    }
-                    return;
-                };
-
-                // Safe Actor Lookup: The attacker might be a Real entity or a Ghost (if relayed)
-                let actor_pos = match self.get_entity_or_ghost_position(actor_id) {
-                    Some(pos) => pos,
-                    None => {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                                proposal_id: prop_id,
-                                reason: "Unknown Attacker".to_string()
-                            });
-                        }
-                        return; // Attacker is completely unknown due to dropped packets; safely abort.
-                    },
-                };
-
-                let ability = get_ability_data(ability_id, data_epoch);
-                
-                // --- Phase 1: The Pre-Roll (Originating Server Authority) ---
-                // The Arbiter securely calculates the offensive math using its authoritative state,
-                // completely ignoring any math the client/Edge Node might have attempted to claim.
-                let context = self.generate_combat_context(actor_id, &ability);
-
-                // --- Global Event Escalation ---
-                if ability.geometry.get_max_extent() > MAX_SPELL_RANGE {
-                    if self.mesh_controller_client.is_offline() {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed { 
-                                proposal_id: prop_id,
-                                reason: "Mesh Controller Unreachable".to_string() 
-                            });
-                        }
-                        return;
-                    }
-                    // Pass the full combat identity up to the Controller so it can construct the downstream command
-                    self.mesh_controller_client.escalate_event(
-                        actor_id,
-                        ability_id, 
-                        data_epoch,
-                        context.clone(),
-                        target_pos,
-                        ability.geometry.clone(),
-                        ability.target_filters.clone(),
-                        ability.pulse_interval_ticks,
-                        ability.duration_ticks,
-                    );
-                    if let Some(prop_id) = original_proposal_id {
-                        self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                    }
-                    return;
-                }
-
-                let distance = actor_pos.distance_to(target_pos);
-                let prediction_tolerance = calculate_prediction_drift(origin_tick, self.current_tick);
-                let effective_range = ability.max_range + prediction_tolerance;
-
-                if distance <= effective_range {
-                    if local_target_pos.is_some() {
-                        self.apply_combat_math(target_id, Some(actor_id), context.clone(), distance);
-                    } else if let Some(owner_arbiter_id) = ghost_target_owner {
-                        // Border-targeted cast: actor-owner pre-rolls context, target-owner applies mutation.
-                        self.send_to_arbiter(owner_arbiter_id, MeshInternalEvent {
-                            event_id: generate_uuid(),
-                            source_arbiter_id: self.arbiter_id,
-                            actor_id: Some(actor_id),
-                            origin_tick,
-                            data_epoch,
-                            payload: ActionPayload::InternalPreparedHit {
-                                target_id,
-                                context: context.clone(),
-                            },
-                        });
-                    }
-                    if let Some(prop_id) = original_proposal_id {
-                        self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                    }
-                } else if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                        proposal_id: prop_id,
-                        reason: "Out of Range".to_string()
-                    });
-                }
-            },
-            ActionPayload::InternalPreparedHit { target_id, context } => {
-                // Internal-only path: context is already authoritative and must not be recomputed.
-                let target_pos = match self.entities.get(&target_id) {
-                    Some(target) if self.has_jurisdiction_over(target.position) => target.position,
-                    _ => return, // Internal relay may race ownership during boundary transitions; intentional safe drop.
-                };
-
-                let distance = match source_actor_id.and_then(|id| self.get_entity_or_ghost_position(id)) {
-                    Some(attacker_pos) => attacker_pos.distance_to(target_pos),
-                    None => SimFixed::from_num(0),
-                };
-
-                self.apply_combat_math(target_id, source_actor_id, context, distance);
-            },
-            ActionPayload::GroundTargetedAbility { destination, ability_id } => {
-                let actor_id = source_actor_id.expect("GroundTargetedAbility requires a source actor");
-                
-                let actor_pos = match self.get_entity_or_ghost_position(actor_id) {
-                    Some(pos) => pos,
-                    None => {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                                proposal_id: prop_id,
-                                reason: "Unknown Attacker".to_string()
-                            });
-                        }
-                        return;
-                    },
-                };
-
-                let ability = get_ability_data(ability_id, data_epoch);
-                let context = self.generate_combat_context(actor_id, &ability);
-
-                // --- Global Event Escalation (Ground-Targeted) ---
-                if ability.geometry.get_max_extent() > MAX_SPELL_RANGE {
-                    if self.mesh_controller_client.is_offline() {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed { 
-                                proposal_id: prop_id,
-                                reason: "Mesh Controller Unreachable".to_string() 
-                            });
-                        }
-                        return;
-                    }
-                    
-                    // Escalate using the raw ground coordinate (destination) as the epicenter
-                    self.mesh_controller_client.escalate_event(
-                        actor_id,
-                        ability_id, 
-                        data_epoch,
-                        context.clone(),
-                        destination, // Ground Coordinate
-                        ability.geometry.clone(),
-                        ability.target_filters.clone(),
-                        ability.pulse_interval_ticks,
-                        ability.duration_ticks,
-                    );
-                    if let Some(prop_id) = original_proposal_id {
-                        self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                    }
-                    return;
-                }
-
-                // Standard Local Resolution
-                let distance_to_cast = actor_pos.distance_to(destination);
-                let prediction_tolerance = calculate_prediction_drift(origin_tick, self.current_tick);
-                let effective_cast_range = ability.max_range + prediction_tolerance;
-
-                if distance_to_cast <= effective_cast_range {
-                    // Because it is ground-targeted, the Arbiter spawns an ephemeral ZoneActor or 
-                    // instantly applies an AoE blast at that specific [x, y] coordinate.
-                    // CRITICAL FIX: We MUST use the original_proposal_id to guarantee that if this 
-                    // proposal was relayed to neighboring Arbiters, they all generate the exact same 
-                    // UUID for the resulting ImpactEvent, allowing the Ledger to prevent double-damage.
-                    let event_uuid = original_proposal_id.unwrap_or_else(|| generate_uuid());
-                    self.resolve_aoe_effect(destination, ability.radius, event_uuid, actor_id, ability_id, data_epoch, context);
-                    if let Some(prop_id) = original_proposal_id {
-                        self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                    }
-                } else if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                        proposal_id: prop_id,
-                        reason: "Out of Range".to_string()
-                    });
-                }
-            },
-            ActionPayload::RequestGhostCorrection { entity_id, requester_arbiter_id } => {
-                // Owner-side reliable repair response for degraded ghost correction requests.
-                if let Some(entity) = self.entities.get(&entity_id) {
-                    if !self.has_jurisdiction_over(entity.position) { return; }
-                    let mut keyframe = entity.get_ghost_update(self.current_tick);
-                    keyframe.is_keyframe = true; // Force full state correction semantics.
-                    self.send_ghost_update_rudp(requester_arbiter_id, keyframe); // Reliable RUDP path.
-                }
-            },
-            ActionPayload::ImpactEvent { impact_id, target_ids, epicenter, geometry, impact_tick, context } => {
-                // Network Discard Window: Drop packets older than the replay horizon.
-                // Using `>=` ensures we don't accidentally write to the bucket currently being cleared.
-                if self.current_tick.saturating_sub(impact_tick) >= MAX_EVENT_AGE_TICKS { return; }
-
-                for target_id in target_ids {
-                    let ledger_key = (impact_id, target_id);
-                    let bucket_index = (impact_tick % MAX_EVENT_AGE_TICKS) as usize;
-
-                    // SCENARIO A: Target is a REAL entity owned by this Arbiter
-                    if let Some(target) = self.entities.get(&target_id) {
-                        if self.has_jurisdiction_over(target.position) {
-                            // --- Final Mathematical Validation (Ghost Drift Check) ---
-                            // Because the reporting Arbiter may have been aiming at a dead-reckoned Ghost,
-                            // their coordinates for the explosion might slightly miss the true entity.
-                            // We allow a small 'ghost_drift_tolerance' to favor the shooter and prevent phantom dodges,
-                            // while strictly preserving the geometric integrity of Cones and Boxes.
-                            let distance_to_impact = target.position.distance_to(epicenter);
-                            let ghost_drift_tolerance = calculate_ghost_drift(impact_tick, self.current_tick);
-                            
-                            if geometry.is_inside_with_tolerance(target.position, epicenter, ghost_drift_tolerance) {
-                                match self.try_insert_idempotency_key(bucket_index, ledger_key) {
-                                    LedgerInsertResult::Inserted => {
-                                        self.apply_combat_math(target_id, source_actor_id, context.clone(), distance_to_impact);
-                                    }
-                                    LedgerInsertResult::Duplicate => {}
-                                    LedgerInsertResult::Overflow => {
-                                        // Fail-closed: never apply when dedupe cannot be guaranteed.
-                                        self.idempotency_overflow_drop_count = self.idempotency_overflow_drop_count.saturating_add(1);
-                                    }
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
-                    // SCENARIO B: Target is a GHOST entity owned by a neighboring Arbiter
-                    if let Some(ghost) = self.ghost_entities.get(&target_id) {
-                        if ghost.position.is_inside_geometry(epicenter, &geometry) {
-                            match self.try_insert_idempotency_key(bucket_index, ledger_key) {
-                                LedgerInsertResult::Inserted => {}
-                                LedgerInsertResult::Duplicate => { continue; }
-                                LedgerInsertResult::Overflow => {
-                                    // Fail-closed: do not relay if dedupe key cannot be reserved.
-                                    self.idempotency_overflow_drop_count = self.idempotency_overflow_drop_count.saturating_add(1);
-                                    continue;
-                                }
-                            }
-                            
-                            // Package the ImpactEvent and relay it to the Ghost's true owner
-                            let relay_payload = MeshInternalEvent {
-                                event_id: generate_uuid(), // Unique envelope ID for this relay hop
-                                source_arbiter_id: self.arbiter_id,
-                                actor_id: source_actor_id,
-                                origin_tick: impact_tick,
-                                data_epoch, // CRITICAL FIX: Pass the data_epoch forward so the receiving Arbiter uses the correct dictionary
-                                // Preserve original impact_id for destination ledger deduplication
-                                payload: ActionPayload::ImpactEvent {
-                                    impact_id, 
-                                    target_ids: vec![target_id], 
-                                    epicenter,
-                                    geometry: geometry.clone(),
-                                    impact_tick,
-                                    context: context.clone(),
-                                }
-                            };
-                            
-                            // Dispatched via Reliable-UDP (RUDP). If dropped, the network layer will retry.
-                            // The receiving Arbiter's Idempotency Ledger will deduplicate any retries.
-                            self.send_to_arbiter(ghost.authoritative_arbiter_id, relay_payload);
-                        }
-                    }
-                }
-            },
-            ActionPayload::SpawnProjectile { direction, target_id, spell_id } => {
-                let actor_id = source_actor_id.expect("SpawnProjectile requires a source actor");
-                let actor_pos = match self.get_entity_or_ghost_position(actor_id) {
-                    Some(pos) => pos,
-                    None => {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(actor_id, DownstreamPayload::ActionFailed {
-                                proposal_id: prop_id,
-                                reason: "Unknown Attacker".to_string()
-                            });
-                        }
-                        return;
-                    }
-                };
-
-                let ability = get_ability_data(spell_id, data_epoch);
-                // Validate cooldowns, resources, and CC states here (omitted for brevity)
-                let context = self.generate_combat_context(actor_id, &ability);
-
-                let projectile = ProjectileActor {
-                    projectile_id: original_proposal_id.unwrap_or_else(|| generate_uuid()),
-                    owner_id: actor_id,
-                    target_id,
-                    position: actor_pos,
-                    // Fixed-point vector math
-                    velocity: direction.normalize() * ability.projectile_speed, 
-                    remaining_lifetime_ticks: ability.duration_ticks.unwrap_or(120),
-                    fuse_remaining_ticks: ability.fuse_timer_ticks.unwrap_or(0),
-                    pierce_remaining: ability.pierce_count.unwrap_or(0),
-                    data_epoch,
-                    damage_origin: DamageOrigin::DirectCast,
-                    proc_depth: 0,
-                    authoritative_arbiter_id: self.arbiter_id,
-                    handoff_topology_epoch: self.topology_epoch,
-                    handoff_cutover_tick: self.current_tick,
-                    handoff_seq: 0,
-                    handoff_state: ProjectileHandoffState::Owned,
-                    impact_sequence: 0,
-                    spell_data: ability,
-                };
-                
-                self.projectiles.insert(projectile.projectile_id, projectile);
-
-                if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                }
-            },
-            ActionPayload::Movement { position, velocity, rotation } => {
+            ActionPayload::Engine(EngineAction::Movement { position, velocity, rotation }) => {
                 let actor_id = source_actor_id.expect("Movement requires a source actor");
-                if let Some(entity) = self.entities.get_mut(&actor_id) {
-                    if !self.has_jurisdiction_over(entity.position) { return; }
+                if let Some((core, _)) = self.entities.get_mut(&actor_id) {
+                    if !self.has_jurisdiction_over(core.position) { return; }
                     
-                    // Anti-Cheat: Validate displacement against max theoretical speed
-                    let dt = self.current_tick.saturating_sub(entity.last_movement_tick);
-                    let max_displacement = (entity.stats.move_speed * SimFixed::from_num(dt)) + GHOST_ANOMALY_MARGIN;
+                    let dt = self.current_tick.saturating_sub(core.last_movement_tick);
+                    let max_displacement = (core.move_speed * SimFixed::from_num(dt)) + GHOST_ANOMALY_MARGIN;
                     
-                    if entity.position.distance_to(position) <= max_displacement {
-                        // Validate against static geometry (Navmesh)
+                    if core.position.distance_to(position) <= max_displacement {
                         if !self.static_grid.is_colliding(position) {
-                            entity.position = position;
-                            entity.velocity = velocity;
-                            entity.rotation = rotation;
-                            entity.last_movement_tick = self.current_tick;
+                            core.position = position;
+                            core.velocity = velocity;
+                            core.rotation = rotation;
+                            core.last_movement_tick = self.current_tick;
                             self.local_grid.upsert(actor_id, position);
                         } else {
-                            // Hit a wall, rubber-band back to last valid
                             self.trigger_client_rollback(actor_id);
                         }
                     } else {
-                        // Speed hack detected, rubber-band back
                         self.trigger_client_rollback(actor_id);
                     }
                 }
             },
-            ActionPayload::IssueCreepCommand { target_creeps, directive } => {
-                let commander_id = source_actor_id.expect("IssueCreepCommand requires a commander source actor");
-
-                let commander_pos = match self.entities.get(&commander_id) {
-                    Some(entity) if !entity.is_dead => entity.position,
-                    _ => {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(commander_id, DownstreamPayload::ActionFailed {
-                                proposal_id: prop_id,
-                                reason: "CommanderDead".to_string()
-                            });
-                        }
-                        return;
-                    }
-                };
-
-                let binding = match self.commander_bindings.get(&commander_id) {
-                    Some(binding) => binding,
-                    None => {
-                        if let Some(prop_id) = original_proposal_id {
-                            self.send_downstream(commander_id, DownstreamPayload::ActionFailed {
-                                proposal_id: prop_id,
-                                reason: "NoBinding".to_string()
-                            });
-                        }
-                        return;
-                    }
-                };
-
-                for creep_id in target_creeps {
-                    // Binding membership and locality are both required.
-                    if !binding.subordinate_entities.contains(&creep_id) {
-                        continue;
-                    }
-
-                    let creep_pos = match self.entities.get(&creep_id) {
-                        Some(creep) if self.has_jurisdiction_over(creep.position) => creep.position,
-                        _ => {
-                            continue; // Non-local creeps are ignored under Arbiter-local Commander rules.
-                        }
-                    };
-
-                    if commander_pos.distance_to(creep_pos) > binding.command_range {
-                        continue;
-                    }
-
-                    self.creep_overrides.insert(
-                        creep_id,
-                        (directive.clone(), self.current_tick + binding.override_ttl_ticks as u64),
-                    );
-                }
-
-                if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(commander_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
+            ActionPayload::Engine(EngineAction::RequestGhostCorrection { entity_id, requester_arbiter_id }) => {
+                if let Some((core, _)) = self.entities.get(&entity_id) {
+                    if !self.has_jurisdiction_over(core.position) { return; }
+                    let mut keyframe = core.get_ghost_update(self.current_tick);
+                    keyframe.is_keyframe = true;
+                    self.send_ghost_update_rudp(requester_arbiter_id, keyframe);
                 }
             },
-            ActionPayload::UseConsumable { item_id } => {
-                let actor_id = source_actor_id.unwrap();
-                // 1. Verify inventory via asynchronous Meta Service check (or pre-synced local SoftState)
-                // 2. Apply soft state changes (e.g., add HP, start potion cooldown)
-                if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                }
-            },
-            ActionPayload::Interact { target_entity } => {
-                let actor_id = source_actor_id.unwrap();
-                // Logic: distance check, type check (NPC, Loot, Resource), trigger UI/Quest event via Meta Services
+            ActionPayload::Game(game_action) => {
+                let actor_id = source_actor_id.expect("Game actions require a source actor");
+                
+                // Construct views for the GameResolver
+                let actor_view = self.build_entity_view(actor_id);
+                let world_view = self.build_world_view();
+
+                let outcome = self.game_resolver.resolve_action(
+                    &game_action,
+                    &actor_view,
+                    &world_view,
+                    &mut self.rng,
+                    self.current_tick,
+                    self.dilation_factor,
+                );
+
+                // Apply returned outcome mutations to engine state
+                self.apply_action_outcome(outcome);
+
                 if let Some(prop_id) = original_proposal_id {
                     self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
                 }
@@ -1084,7 +723,22 @@ impl SpatialActor {
         }
     }
 
-    // --- Deep RPG Combat Engine ---
+    fn resolve_internal_event(&mut self, payload: &[u8], target_id: EntityID) {
+        let mut target_view = self.build_entity_mut_view(target_id);
+        let world_view = self.build_world_view();
+        
+        let outcome = self.game_resolver.resolve_internal_event(
+            payload,
+            &mut target_view,
+            &world_view,
+            &mut self.rng,
+            self.current_tick,
+        );
+        
+        self.apply_action_outcome(outcome);
+    }
+
+    // --- ARPG Template Reference Implementation ---
     // This centralizes all complex ARPG/MOBA math (Armor, Resistance, Weight, Falloff)
     // ensuring it only runs on the true authoritative owner of the target.
     // (See ../../3-gameplay-systems/01-rpg-mechanics.md for the full mitigation formula including Evasion and Block).
@@ -1156,7 +810,7 @@ impl SpatialActor {
                     actor_id: Some(target_id),
                     origin_tick: self.current_tick,
                     data_epoch: self.current_data_epoch, // CRITICAL FIX: Use the data epoch, not the topology map version!
-                    payload: ActionPayload::InternalPreparedHit {
+                    payload: ActionPayload::Game(ArpgAction::InternalPreparedHit {
                         target_id: atk_id,
                         context: CombatContext { 
                             base_damage: 15, 
@@ -1169,7 +823,7 @@ impl SpatialActor {
                             damage_origin: DamageOrigin::ReactiveProc,
                             proc_depth: context.proc_depth.saturating_add(1),
                         }
-                    }
+                    })
                 });
             }
         }
@@ -1306,10 +960,10 @@ impl SpatialActor {
                             actor_id: Some(effect.caster_id),
                             origin_tick: self.current_tick,
                             data_epoch: effect.data_epoch,
-                            payload: ActionPayload::InternalPreparedHit {
+                            payload: ActionPayload::Game(ArpgAction::InternalPreparedHit {
                                 target_id: *entity_id,
                                 context: context.clone(),
-                            }
+                            })
                         });
                     }
                     
@@ -1523,7 +1177,7 @@ impl ProjectileActor {
                 actor_id: Some(self.owner_id),
                 origin_tick: current_shard_tick(), // Projectile actions are anchored to their current simulation frame
                 data_epoch: self.data_epoch, // CRITICAL: Ensures receiving Arbiters use the correct dictionary version
-                payload: ActionPayload::ImpactEvent { 
+                payload: ActionPayload::Game(ArpgAction::ImpactEvent { 
                     impact_id: impact_uuid, 
                     target_ids: victims,
                     epicenter: self.position, // Provides absolute center for Ghost drift checks and distance falloff
@@ -1540,7 +1194,7 @@ impl ProjectileActor {
                         damage_origin: self.damage_origin,
                         proc_depth: self.proc_depth,
                     }
-                }
+                })
             });
         }
         None

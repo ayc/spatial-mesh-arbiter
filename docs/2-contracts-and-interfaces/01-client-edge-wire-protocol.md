@@ -335,12 +335,12 @@ When edge is saturated:
 
 | Client Intent | Edge Translation | Upstream Payload |
 | :--- | :--- | :--- |
-| `MovementIntent + AimIntent` | Integrate and validate | `ActionPayload::Movement` |
-| `DiscreteIntent::TargetedAbility` | Validate range/cooldown rules, stamp epochs | `ActionPayload::TargetedAbility` |
-| `DiscreteIntent::GroundTargetedAbility` | Validate cast destination rules | `ActionPayload::GroundTargetedAbility` |
-| `DiscreteIntent::SpawnProjectile` | Validate spell profile | `ActionPayload::SpawnProjectile` |
-| `DiscreteIntent::UseConsumable` | Validate local/use constraints then meta/mesh path | `ActionPayload::UseConsumable` |
-| `DiscreteIntent::Interact` | Validate interactable target | `ActionPayload::Interact` |
+| `MovementIntent + AimIntent` | Integrate and validate | `ActionPayload::Engine(EngineAction::Movement)` |
+| `DiscreteIntent::TargetedAbility` | Validate range/cooldown rules, stamp epochs | `ActionPayload::Game(ArpgAction::TargetedAbility)` |
+| `DiscreteIntent::GroundTargetedAbility` | Validate cast destination rules | `ActionPayload::Game(ArpgAction::GroundTargetedAbility)` |
+| `DiscreteIntent::SpawnProjectile` | Validate spell profile | `ActionPayload::Game(ArpgAction::SpawnProjectile)` |
+| `DiscreteIntent::UseConsumable` | Validate local/use constraints then meta/mesh path | `ActionPayload::Game(ArpgAction::UseConsumable)` |
+| `DiscreteIntent::Interact` | Validate interactable target | `ActionPayload::Game(ArpgAction::Interact)` |
 
 Internal-only payloads (e.g., prepared-hit/proc/impact relay) MUST NEVER be accepted from client ingress.
 
@@ -355,14 +355,9 @@ struct MetaRequestEnvelope {
     request_id: UUID, // REQUIRED client-generated correlation/idempotency id
     request: MetaRequest,
 }
-
-enum MetaRequest {
-    SendChatMessage { channel: String, text: String },
-    MoveInventoryItem { from_slot: u8, to_slot: u8 },
-    InviteToParty { target_character_name: String },
-    RequestLogout,
-}
 ```
+
+The canonical `MetaRequest` enum (all variants, associated types, and supporting enums) is defined in [Edge Node Envelopes — §2.1](internal-mesh-types/02-edge-node-envelopes.md#21-interface). The client sends the same `MetaRequest` enum that the Edge Node receives — there is no translation or fan-out step. The Edge Node wraps the request in a `MetaRequestEnvelope` with the client-generated `request_id` and injects the trusted `character_id` before forwarding to Meta services.
 
 ### 9.2 Meta Lane Behavior
 

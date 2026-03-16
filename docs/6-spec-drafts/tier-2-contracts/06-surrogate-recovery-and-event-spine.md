@@ -1,8 +1,26 @@
 # T2-06: Surrogate Recovery and Event Spine
 
-> **Status:** DRAFTING
+> **Status:** DEFERRED (phase 2)
 > **Checklist Ref:** [GAPS_CHECKLIST.md](../GAPS_CHECKLIST.md)
 > **Canonical Target:** `1-architecture/03-mesh-controller.md` + `2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md` + `2-contracts-and-interfaces/internal-mesh-types/03-mesh-arbiter-state.md` + `5-testing-and-conformance/01-mini-mesh-conformance.md`
+
+## Deferral Notice
+
+**This draft is deferred to phase 2.** The current total-loss crash recovery model (respawn at last save zone, PendingTransaction refund via Recovery Inbox) is simple, safe, and sufficient for phase 1.
+
+Resolving surrogate recovery now would force premature changes to `docs-core/` — introducing RecoveryEpoch as a new kernel-level epoch type, extending the durability bridge state machine, and adding edge degraded-mode contracts to the messaging plane — before the engine runtime has been implemented and validated. These are engine-level changes that should be informed by production experience with the actual failure modes.
+
+The design work below is preserved as the phase 2 starting point.
+
+### Phase 1 Carries
+
+Two narrow pieces have been extracted into [T2-08: Crash Fencing Token Formalization](08-crash-fencing-token.md) for phase 1:
+
+1. **Fencing token formalization.** The existing crash protocol says the Controller "revokes the lease" for a dead Arbiter, but the fencing token mechanism is not formally specified. T2-08 defines the concrete fencing contract so stale writers are rejected without requiring surrogate recovery.
+
+2. **WAL format extensibility.** The split/merge WAL format (used for topology operations) should be designed so it can serve as the foundation for checkpoint+delta crash recovery in phase 2. T2-08 captures this as a design constraint on the existing WAL contract.
+
+---
 
 ## Problem Statement
 

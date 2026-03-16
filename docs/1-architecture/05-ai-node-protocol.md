@@ -250,37 +250,37 @@ message ActionSubmission {
     }
 }
 
-// Maps to ActionPayload::TargetedAbility
+// Maps to ActionPayload::Game(ArpgAction::TargetedAbility)
 message TargetedAbility {
     uint64 target_id = 1;                  // EntityID of the target
     uint32 ability_id = 2;                 // Ability definition ID from SpellData
 }
 
-// Maps to ActionPayload::GroundTargetedAbility
+// Maps to ActionPayload::Game(ArpgAction::GroundTargetedAbility)
 message GroundTargetedAbility {
     Vec2F destination = 1;                 // World-space target location
     uint32 ability_id = 2;
 }
 
-// Maps to ActionPayload::SpawnProjectile
+// Maps to ActionPayload::Game(ArpgAction::SpawnProjectile)
 message SpawnProjectile {
     Vec2F direction = 1;                   // Projectile direction vector
     uint64 target_id = 2;                  // Optional homing target (0 = none)
     uint32 spell_id = 3;
 }
 
-// Maps to ActionPayload::Interact
+// Maps to ActionPayload::Game(ArpgAction::Interact)
 message Interact {
     uint64 target_entity = 1;
 }
 
-// Maps to ActionPayload::UseConsumable
+// Maps to ActionPayload::Game(ArpgAction::UseConsumable)
 message UseConsumable {
     uint32 item_id = 1;
 }
 
 // Continuous position/velocity stream for NPC movement.
-// Maps to ActionPayload::Movement.
+// Maps to ActionPayload::Engine(EngineAction::Movement).
 // Coalesced by the Runtime under load (latest-per-entity semantics).
 message MovementUpdate {
     uint64 npc_entity_id = 1;
@@ -319,7 +319,7 @@ message ActionRejected {
 
 ```protobuf
 // Commander NPC issues behavioral overrides to Arbiter-Local creeps.
-// Maps to ActionPayload::IssueCreepCommand.
+// Maps to ActionPayload::Game(ArpgAction::IssueCreepCommand).
 // See NPC Architecture §2.6 for Commander Pattern semantics.
 message CreepCommandSubmission {
     uint64 commander_entity_id = 1;        // Must be a claimed NPC with active CommanderBinding
@@ -548,7 +548,7 @@ An engine MAY claim multiple NPCs by issuing sequential `ClaimNpc` calls. All cl
 
 - Engine sends `MovementUpdate` as a continuous stream on the `GameStream`.
 - No individual terminal acknowledgments — movement is reconciled by periodic `WorldStateUpdate` snapshots.
-- Under load, the Runtime MAY coalesce movement updates (latest-per-entity semantics), matching the `ActionPayload::Movement` coalescing behavior defined in [Core Primitives §1.1.2](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md).
+- Under load, the Runtime MAY coalesce movement updates (latest-per-entity semantics), matching the `ActionPayload::Engine(EngineAction::Movement)` coalescing behavior defined in [Core Primitives §1.1.2](../2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md).
 
 ### 8.3 Rate Limiting
 

@@ -12,6 +12,7 @@
 | `DRAFTING` | Active work on resolution |
 | `REVIEW` | Draft complete, awaiting sign-off |
 | `RESOLVED` | Promoted into canonical docs |
+| `DEFERRED` | Validated design, intentionally postponed to a later phase |
 
 ---
 
@@ -47,13 +48,14 @@
 
 | # | Gap | Status | Audit | Draft | Canonical Target |
 |---|-----|--------|-------|-------|-----------------|
-| T2-01 | **MetaRequest Scope** — Wire protocol defines 4 variants; Edge Node Envelopes define 41. Relationship unclear (internal dispatch? aspirational? subset?) | `OPEN` | Confirmed (genuine ambiguity) | [draft](tier-2-contracts/01-meta-request-scope.md) | `2-contracts-and-interfaces/01-client-edge-wire-protocol.md` + `02-edge-node-envelopes.md` |
+| T2-01 | ~~MetaRequest Scope~~ | `RESOLVED` | **Not a gap.** Wire protocol §9.1 had a placeholder 4-variant `MetaRequest` that was never expanded. The canonical 41-variant enum in Edge Node Envelopes §2.1 is the single source of truth. Wire protocol now references it directly; no translation or fan-out exists. | [draft](tier-2-contracts/01-meta-request-scope.md) | `2-contracts-and-interfaces/01-client-edge-wire-protocol.md` + `02-edge-node-envelopes.md` |
 | T2-02 | ~~OffensiveStats Mutability~~ | `RESOLVED` | **Not a gap.** Spec is explicit: base immutable during gameplay, Meta replaces via UpdateEntityStats on equip/level/durability, buffs layer at eval time. | [draft](tier-2-contracts/02-offensive-stats-mutability.md) | `2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md` |
 | T2-03 | **Data Epoch Distribution** — Pipeline mechanics specified (download, verify, swap). Missing: who triggers epoch increment, Meta↔Arbiter epoch sync, mid-resolution semantics | `OPEN` | Narrowed (pipeline exists, triggers/sync missing) | [draft](tier-2-contracts/03-data-epoch-distribution.md) | `1-architecture/03-mesh-controller.md` + `03-mesh-arbiter-state.md` |
 | T2-04 | **Session Lifecycle & Auth** — Token TTL, max sessions, wilderness fuse, session orphaning ARE specified. Missing: token format (JWT vs opaque), refresh rotation, explicit logout handshake flow | `OPEN` | Narrowed (substantial auth exists, format/rotation missing) | [draft](tier-2-contracts/04-session-lifecycle-and-auth.md) | `1-architecture/04-meta-services.md` + `01-client-edge-wire-protocol.md` |
 | T2-05 | **HardEvent Consumption Contract** — Offset commit requirement, at-least-once delivery, idempotency mandate, consumer groups, scaling thresholds ARE specified. Missing: commit timing (vs Postgres persist), retry policy, dead letter handling | `OPEN` | Narrowed (framework exists, failure-mode details missing) | [draft](tier-2-contracts/05-hard-event-consumption.md) | `2-contracts-and-interfaces/internal-mesh-types/04-hard-state-events.md` |
-| T2-06 | **Surrogate Recovery + Event Spine Contract** — Define quarantine/surrogate takeover, edge roll-call continuity snapshots, rolling checkpoint+delta replay, and phase boundary between crash continuity and spectator/replay services | `DRAFTING` | New architecture proposal from 2026-03-04 brainstorming | [draft](tier-2-contracts/06-surrogate-recovery-and-event-spine.md) | `1-architecture/03-mesh-controller.md` + `01-core-primitives.md` + `03-mesh-arbiter-state.md` + `5-testing-and-conformance/01-mini-mesh-conformance.md` |
+| T2-06 | **Surrogate Recovery + Event Spine Contract** — Define quarantine/surrogate takeover, edge roll-call continuity snapshots, rolling checkpoint+delta replay, and phase boundary between crash continuity and spectator/replay services. **Deferred to phase 2:** total-loss model is sufficient for phase 1; resolving now would force premature `docs-core/` changes before the engine is validated. Phase 1 carries extracted to T2-08. | `DEFERRED` | New architecture proposal from 2026-03-04 brainstorming | [draft](tier-2-contracts/06-surrogate-recovery-and-event-spine.md) | `1-architecture/03-mesh-controller.md` + `01-core-primitives.md` + `03-mesh-arbiter-state.md` + `5-testing-and-conformance/01-mini-mesh-conformance.md` |
 | T2-07 | **Redpanda Event Bus Adoption ADR** — Define day-1 Redpanda implementation plan, conformance gates, and release contingency (no Redis Streams cutover required pre-launch) | `DRAFTING` | Added after transport decision update on 2026-03-04 | [draft](tier-2-contracts/07-redpanda-adoption-adr.md) | `1-architecture/01-core-concepts-and-mesh.md` + `04-meta-services.md` + `0-getting-started/02-implementation-phases.md` |
+| T2-08 | **Crash Fencing Token Formalization** — Formalize the fencing mechanism for stale writer rejection after Arbiter crash. Extracted from T2-06 as a phase 1 carry: the existing crash protocol needs an explicit fencing token contract independent of surrogate recovery. Also: ensure split/merge WAL format is extensible for future crash recovery use. | `OPEN` | Extracted from T2-06 deferral review on 2026-03-15 | [draft](tier-2-contracts/08-crash-fencing-token.md) | `1-architecture/03-mesh-controller.md` + `01-core-concepts-and-mesh.md` |
 
 ## Tier 3 — Subsystem Gaps
 
@@ -88,11 +90,11 @@
 
 ## Progress Summary
 
-| Tier | Total | Open | Drafting | Review | Resolved |
-|------|-------|------|----------|--------|----------|
-| 0 — Foundations | 3 | 0 | 0 | 0 | 3 |
-| 1 — Combat | 6 | 5 | 1 | 0 | 0 |
-| 2 — Contracts | 7 | 4 | 2 | 0 | 1 |
-| 3 — Subsystems | 10 | 9 | 0 | 0 | 1 |
-| 4 — Testing | 3 | 3 | 0 | 0 | 0 |
-| **Total** | **29** | **21** | **3** | **0** | **5** |
+| Tier | Total | Open | Drafting | Review | Resolved | Deferred |
+|------|-------|------|----------|--------|----------|----------|
+| 0 — Foundations | 3 | 0 | 0 | 0 | 3 | 0 |
+| 1 — Combat | 6 | 5 | 1 | 0 | 0 | 0 |
+| 2 — Contracts | 8 | 4 | 1 | 0 | 2 | 1 |
+| 3 — Subsystems | 10 | 9 | 0 | 0 | 1 | 0 |
+| 4 — Testing | 3 | 3 | 0 | 0 | 0 | 0 |
+| **Total** | **30** | **21** | **2** | **0** | **6** | **1** |

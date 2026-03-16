@@ -56,4 +56,16 @@ If you write code for this engine, you must adhere to these absolute rules:
 *   **Kinematic Dilation (KiDi):** The engine's defense against "Blackhole" density events (e.g., 4,000 players in one room). Instead of dropping server ticks, the Arbiter calculates a `dilation_factor` (e.g., 0.2x). The server still runs at 60Hz, but entities move, cast, and recover slower—like wading through a "Temporal Swamp."
 
 ---
+
+## 5. Documentation Structure & Precedence
+
+The project's documentation reflects a major architectural decoupling. Originally built as a monolithic ARPG backend, the engine has been extracted into a reusable, game-agnostic framework. Understanding this separation is critical for context:
+
+*   **`docs-core/` (Highest Authority):** The bare-metal engine framework. Contains the pure, game-agnostic distributed systems rules (R-Trees, 60Hz loop, fixed-point math, Durability Bridge, generic `GameAdapter` traits).
+*   **`docs-game-compiler/` (Middle Authority):** The tooling and SDK layer. Defines a strict, safe "Designer Language" (Lua/YAML subset) and compiler pipeline that allows gameplay designers to script abilities and quests deterministically without risking the 60Hz loop or violating `docs-core/` rules.
+*   **`docs/` (Lowest Authority):** The ARPG Reference Implementation. Formerly the monolithic spec, it now serves as a concrete game template/starter kit (with specific stats, loot, and classes) built on top of the core framework.
+
+**Precedence Rule:** If there is a contradiction, `docs-core/` rules > `docs-game-compiler/` rules > `docs/` implementations.
+
+---
 *End of Orientation*

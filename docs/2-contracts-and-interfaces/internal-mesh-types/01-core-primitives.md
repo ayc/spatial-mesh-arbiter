@@ -97,23 +97,23 @@ impl Vec2F {
 }
 
 // 1. External Envelope: From Edge Node to Host Arbiter
-struct ActionProposal {
+struct ActionProposal<G: GameActions> {
     proposal_id: UUID,       // CRITICAL: Used for deduplication during handoffs
     actor_id: EntityID,      // The player making the request
     origin_tick: u64,        // The Edge Node's tick when the action occurred (t0)
     topology_epoch: u32,     // The R-Tree map version this proposal was validated against
     data_epoch: u32,         // The SpellData/Balance version the Edge Node is currently using
-    payload: ActionPayload,  
+    payload: ActionPayload<G>,  
 }
 
 // 2. Internal Envelope: From Arbiter to Arbiter (or Projectile to Arbiter)
-struct MeshInternalEvent {
+struct MeshInternalEvent<G: GameActions> {
     event_id: UUID,          // Used for internal relay deduplication
     source_arbiter_id: u32,  // Who generated this event?
     actor_id: Option<EntityID>, // Passed through for TargetedAbilities
     origin_tick: u64,        // Preserved from the Edge Node for ping tolerance math
     data_epoch: u32,         // Ensures cross-boundary projectiles use the correct version of SpellData
-    payload: ActionPayload,  
+    payload: ActionPayload<G>,  
 }
 
 // 3. Control Envelope: From Mesh Controller to Spatial Arbiter
@@ -482,6 +482,24 @@ struct CoreStats {
 }
 
 // Core Entity State (Authoritative)
+struct EntityCore {
+    hp: i32,
+    max_hp: i32,
+    is_dead: bool,
+    is_invulnerable: bool,
+    position: Vec2F,
+    velocity: Vec2F,
+    rotation: SimFixed,
+    last_movement_tick: u64,
+    stats: CoreStats,
+}
+
+pub trait GameEntity: Clone + Send + Sync + 'static {
+    type SoftExt: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned;
+    type OffenseExt: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned;
+}
+
+// --- ARPG Template Implementation ---
 struct SoftState {
     hp: i32,
     max_hp: i32,
@@ -504,7 +522,15 @@ struct SoftState {
 // SoftState is the primary authoritative state. OffensiveStats and SecondaryAttributes
 // are companion structs compiled by Meta and read at cast time or on hidden triggers.
 // All three are included in handoff serialization.
-struct EntityRecord {
+struct EntityRecord<E: GameEntity> {
+    entity_id: EntityID,
+    core: EntityCore,
+    soft_ext: E::SoftExt,
+    offense_ext: E::OffenseExt,
+}
+
+// --- ARPG Template Implementation ---
+struct ArpgEntityRecord {
     soft_state: SoftState,
     offense: OffensiveStats,       // Immutable base from Meta; modified at evaluation time by buff modifiers
     secondary: SecondaryAttributes, // Hidden stats from equipment; governs Poise, Momentum, etc.
@@ -684,30 +710,30 @@ struct LedgerBucketSnapshot {
     entries: Vec<(UUID, EntityID)>,
 }
 
-struct MergeSnapshot {
+struct MergeSnapshot<E: GameEntity> {
     merge_id: UUID,
     from_arbiter_id: u32,
     to_arbiter_id: u32,
     topology_epoch: u32,
     source_tick: u64,
-    entities: Vec<(EntityID, EntityRecord)>, // Includes both SoftState and OffensiveStats
+    entities: Vec<(EntityID, EntityRecord<E>)>, // Includes both SoftState and OffensiveStats
     projectiles: Vec<ProjectileSnapshot>,
     ghosts: Vec<GhostState2D>,
     pending_global_events: HashMap<UUID, ControllerCommand>,
     ledger_ring: Vec<LedgerBucketSnapshot>,
 }
 
-struct MergeWalDelta {
+struct MergeWalDelta<G: GameActions> {
     merge_id: UUID,
     from_arbiter_id: u32,
     to_arbiter_id: u32,
     topology_epoch: u32,
     tick: u64,
-    external: Vec<ActionProposal>,
-    internal: Vec<MeshInternalEvent>,
+    external: Vec<ActionProposal<G>>,
+    internal: Vec<MeshInternalEvent<G>>,
 }
 
-enum MergeHandoffMessage {
+enum MergeHandoffMessage<E: GameEntity, G: GameActions> {
     Prepare {
         merge_id: UUID,
         winner_arbiter_id: u32,
@@ -719,9 +745,9 @@ enum MergeHandoffMessage {
         merge_id: UUID,
         chunk_seq: u32,
         is_last: bool,
-        snapshot_chunk: MergeSnapshot,
+        snapshot_chunk: MergeSnapshot<E>,
     },
-    WalDelta(MergeWalDelta),
+    WalDelta(MergeWalDelta<G>),
     CatchupAck {
         merge_id: UUID,
         winner_arbiter_id: u32,
@@ -740,31 +766,31 @@ enum MergeHandoffMessage {
 }
 
 // 8. Sibling Split Handoff (Arbiter <-> Arbiter, RUDP + WAL stream)
-struct SplitSnapshot {
+struct SplitSnapshot<E: GameEntity> {
     split_id: UUID,
     from_arbiter_id: u32,
     to_arbiter_id: u32, // Specific child (B or C)
     topology_epoch: u32,
     source_tick: u64,
     // Only includes entities and projectiles that fall within the child's assigned region
-    entities: Vec<(EntityID, EntityRecord)>,
+    entities: Vec<(EntityID, EntityRecord<E>)>,
     projectiles: Vec<ProjectileSnapshot>,
     ghosts: Vec<GhostState2D>,
     pending_global_events: HashMap<UUID, ControllerCommand>,
     ledger_ring: Vec<LedgerBucketSnapshot>,
 }
 
-struct SplitWalDelta {
+struct SplitWalDelta<G: GameActions> {
     split_id: UUID,
     from_arbiter_id: u32,
     to_arbiter_id: u32,
     topology_epoch: u32,
     tick: u64,
-    external: Vec<ActionProposal>,
-    internal: Vec<MeshInternalEvent>,
+    external: Vec<ActionProposal<G>>,
+    internal: Vec<MeshInternalEvent<G>>,
 }
 
-enum SplitHandoffMessage {
+enum SplitHandoffMessage<E: GameEntity, G: GameActions> {
     Prepare {
         split_id: UUID,
         surrogate_arbiter_id: u32,
@@ -775,9 +801,9 @@ enum SplitHandoffMessage {
         split_id: UUID,
         chunk_seq: u32,
         is_last: bool,
-        snapshot_chunk: SplitSnapshot,
+        snapshot_chunk: SplitSnapshot<E>,
     },
-    WalDelta(SplitWalDelta),
+    WalDelta(SplitWalDelta<G>),
     CatchupAck {
         split_id: UUID,
         shadow_arbiter_id: u32,
@@ -792,12 +818,12 @@ enum SplitHandoffMessage {
 // 9. Runtime Entity Boundary Handoff (Arbiter <-> Arbiter, Reliable-UDP)
 // Used when a player walks across a static boundary, or when a sliding "Battle Node" 
 // swallows or drops a player.
-struct EntitySnapshot {
+struct EntitySnapshot<E: GameEntity> {
     entity_id: EntityID,
-    record: EntityRecord, // Contains both SoftState and OffensiveStats
+    record: EntityRecord<E>, // Contains both SoftState and OffensiveStats
 }
 
-enum EntityHandoffMessage {
+enum EntityHandoffMessage<E: GameEntity> {
     Prepare {
         entity_id: EntityID,
         handoff_seq: u64,
@@ -806,7 +832,7 @@ enum EntityHandoffMessage {
         topology_epoch: u32,
         source_tick: u64,
         commit_tick: u64, // Future tick when authority flips
-        snapshot: EntitySnapshot,
+        snapshot: EntitySnapshot<E>,
     },
     Ack {
         entity_id: EntityID,
@@ -983,64 +1009,69 @@ impl CollisionGeometry {
 // The Specific Game Mechanics (Polymorphic Payload)
 // Note: Most variants may come from Edge Node proposals or internal relays.
 // InternalPreparedHit is internal-only and must never be accepted from Edge Node ingress.
-enum ActionPayload {
+// The Engine-owned traits for opaque game actions
+pub trait GameActions: Clone + Send + Sync + 'static {
+    type Action: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned;
+}
+
+// The generic payload separating engine routing from game logic
+enum ActionPayload<G: GameActions> {
+    Engine(EngineAction),
+    Game(G::Action),
+}
+
+// Engine-owned actions that directly interact with spatial systems
+enum EngineAction {
     // Continuous Inputs
     Movement { 
         position: Vec2F, 
         velocity: Vec2F, 
         rotation: SimFixed 
     },
-    
-    // Combat (Target-Locked / Instant)
-    TargetedAbility { 
-        target_id: EntityID, 
-        ability_id: u16,
-    },
-    
-    // Combat (Ground-Targeted / AoEs like Meteor or Blizzard)
-    GroundTargetedAbility {
-        destination: Vec2F,
-        ability_id: u16,
-    },
-    
-    // Combat (Target-Favoring Resolution / Skillshots)
-    // Content note: "SpawnZone" is an asset/schema alias compiled into SpawnProjectile
-    // with zero velocity + pulse/duration mechanics.
-    SpawnProjectile { 
-        direction: Vec2F, 
-        target_id: Option<EntityID>, // Used for Homing Missiles or Attached Auras
-        spell_id: u16 
-    },
-
-    // Combat (Cross-Boundary Ghost Interactions)
-    ImpactEvent {
-        impact_id: UUID, 
-        target_ids: Vec<EntityID>, 
-        epicenter: Vec2F, 
-        geometry: CollisionGeometry, // Used for final, precise mathematical validation of ghost impacts
-        impact_tick: u64,
-        context: CombatContext, 
-    },
-
-    // Combat (Internal-Only / Already Authoritative)
-    // Used for reactive procs like Thorns where combat context is already finalized.
-    InternalPreparedHit {
-        target_id: EntityID,
-        context: CombatContext,
-    },
-    
-    // Interactions
-    UseConsumable { item_id: u16 },
-    Interact { target_entity: EntityID },
-
     // Internal Reliability Control (Ghost Repair Path)
     RequestGhostCorrection {
         entity_id: EntityID,
         requester_arbiter_id: u32,
     },
+}
 
+// --- ARPG Template Implementation ---
+// Example of the game-specific intent payload matching the GameActions trait
+enum ArpgAction {
+    // Combat (Target-Locked / Instant)
+    TargetedAbility { 
+        target_id: EntityID, 
+        ability_id: u16,
+    },
+    // Combat (Ground-Targeted / AoEs like Meteor or Blizzard)
+    GroundTargetedAbility {
+        destination: Vec2F,
+        ability_id: u16,
+    },
+    // Combat (Target-Favoring Resolution / Skillshots)
+    SpawnProjectile { 
+        direction: Vec2F, 
+        target_id: Option<EntityID>, 
+        spell_id: u16 
+    },
+    // Combat (Cross-Boundary Ghost Interactions)
+    ImpactEvent {
+        impact_id: UUID, 
+        target_ids: Vec<EntityID>, 
+        epicenter: Vec2F, 
+        geometry: CollisionGeometry,
+        impact_tick: u64,
+        context: CombatContext, 
+    },
+    // Combat (Internal-Only / Already Authoritative)
+    InternalPreparedHit {
+        target_id: EntityID,
+        context: CombatContext,
+    },
+    // Interactions
+    UseConsumable { item_id: u16 },
+    Interact { target_entity: EntityID },
     // Commander Pattern: Named NPC (AI Node) issues behavioral override to Arbiter-Local creeps.
-    // Validated by the Arbiter against active CommanderBinding, range, and locality constraints.
     IssueCreepCommand {
         target_creeps: Vec<EntityID>,
         directive: CreepDirective,

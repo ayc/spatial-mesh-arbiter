@@ -63,10 +63,10 @@ A Paladin clicks directly on an enemy to summon a bolt of light from the sky.
 **2. The Edge Node Proposal (The Intent):**
 *The Edge Node only sends the minimal data required to identify the player's intent.*
 ```rust
-ActionPayload::TargetedAbility { 
+ActionPayload::Game(ArpgAction::TargetedAbility { 
     target_id: Enemy_99, 
     ability_id: ABILITY_SMITE
-}
+})
 ```
 
 **3. The Arbiter Execution (The Authority):**
@@ -91,10 +91,10 @@ A Warrior swings a massive hammer at a target, knocking them back.
 
 **2. The Edge Node Proposal (The Intent):**
 ```rust
-ActionPayload::TargetedAbility { 
+ActionPayload::Game(ArpgAction::TargetedAbility { 
     target_id: Enemy_12, 
     ability_id: ABILITY_CLEAVE
-}
+})
 ```
 
 ### Example 2.3: "Flash Heal" (Targeted Friendly Support)
@@ -115,10 +115,10 @@ A Cleric instantly heals a party member.
 
 **2. The Edge Node Proposal (The Intent):**
 ```rust
-ActionPayload::TargetedAbility { 
+ActionPayload::Game(ArpgAction::TargetedAbility { 
     target_id: Ally_42, 
     ability_id: ABILITY_FLASH_HEAL
-}
+})
 ```
 
 ---
@@ -131,14 +131,14 @@ These abilities require spawning a temporary `ProjectileActor` in the mesh. The 
 A player fires a rocket in a straight line. When it hits *any* hitbox, it explodes in a 5-meter radius.
 *   **Edge Node Sends:**
     ```rust
-    ActionPayload::SpawnProjectile { 
+    ActionPayload::Game(ArpgAction::SpawnProjectile { 
         direction: Vec2::new(1.0, 0.0), // Firing East
         spell_id: SPELL_ROCKET 
-    }
+    })
     ```
 *   **Projectile Actor (Later) Generates:**
     ```rust
-    ActionPayload::ImpactEvent {
+    ActionPayload::Game(ArpgAction::ImpactEvent {
         impact_id: "uuid-1234",
         target_ids: vec![Enemy_1, Enemy_2, Destructible_Wall_5],
         epicenter: Vec2::new(150.0, 200.0), // Used for distance falloff calculation
@@ -152,7 +152,7 @@ A player fires a rocket in a straight line. When it hits *any* hitbox, it explod
             damage_origin: DamageOrigin::DirectCast,
             proc_depth: 0
         }
-    }
+    })
     ```
 
 ### Example 3.2: "Homing Missile" (Target-Locked Projectile)
@@ -161,11 +161,11 @@ A Mage casts a magic missile that physically travels toward a specific enemy, fo
     ```rust
     // The target_id drives the Actor's internal steering logic.
     // The direction vector provides the initial spawn trajectory.
-    ActionPayload::SpawnProjectile { 
+    ActionPayload::Game(ArpgAction::SpawnProjectile { 
         direction: Vec2::new(0.0, 1.0), 
         target_id: Some(Enemy_8),
         spell_id: SPELL_MAGIC_MISSILE 
-    }
+    })
     ```
 *   **The "Dumb NPC" Steering:** The `ProjectileActor` functions as a microscopic AI. Every tick, it asks its Host Arbiter for the target's current position. 
     *   *If the target is a Real Entity:* It steers directly toward them.
@@ -203,7 +203,7 @@ Status effects (Damage Over Time, Slows, Stuns) do not require continuous networ
 A player shoots a poison dart.
 *   **Projectile Generates:**
     ```rust
-    ActionPayload::ImpactEvent {
+    ActionPayload::Game(ArpgAction::ImpactEvent {
         ...
         context: CombatContext {
             base_damage: 10, // Small initial hit
@@ -213,7 +213,7 @@ A player shoots a poison dart.
             damage_origin: DamageOrigin::DirectCast,
             proc_depth: 0
         }
-    }
+    })
     ```
 *   **Arbiter Resolution:** The Arbiter applies the 10 damage, then adds `EFFECT_POISON_TICK` to the victim's internal `SoftState.active_status_effects` array.
 *   **The Engine Loop:** During `simulate_physics_step()`, the Arbiter automatically deducts HP every second based on the active poison buff. Zero network traffic is required to sustain the DoT.
@@ -223,7 +223,7 @@ A plague that spreads from player to player.
 *   **Mechanic:** Managed entirely within the Arbiter's `simulate_physics_step()`. 
 *   If Player A has `EFFECT_PLAGUE` active, the Arbiter runs a fast distance check against nearby entities every 60 ticks.
 *   If Player B is within 2 meters, the Arbiter simply adds `EFFECT_PLAGUE` to Player B's `SoftState`.
-*   If Player B is a Ghost (owned by another server), the Arbiter uses the Arbiter Relay Protocol to send an internal authoritative payload (typically `ActionPayload::InternalPreparedHit`) to apply the debuff across the border.
+*   If Player B is a Ghost (owned by another server), the Arbiter uses the Arbiter Relay Protocol to send an internal authoritative payload (typically `ActionPayload::Game(ArpgAction::InternalPreparedHit)`) to apply the debuff across the border.
 
 ---
 
@@ -235,7 +235,7 @@ Complex ARPGs often feature abilities that spawn *other* abilities upon impact (
 A player fires a dart. When it hits an enemy, it explodes into a lingering, stationary poison cloud.
 *   **The Impact:** The dart `ProjectileActor` hits the enemy and generates:
     ```rust
-    ActionPayload::ImpactEvent {
+    ActionPayload::Game(ArpgAction::ImpactEvent {
         impact_id: "uuid-dart-1",
         target_ids: vec![Enemy_A],
         context: CombatContext {
@@ -246,7 +246,7 @@ A player fires a dart. When it hits an enemy, it explodes into a lingering, stat
             damage_origin: DamageOrigin::DirectCast,
             proc_depth: 0
         }
-    }
+    })
     ```
 *   **The Cascade (Inside the Arbiter):** During `apply_combat_math()`, the Arbiter processes the damage and detects `TRIGGER_PLAGUE_BURST`. It immediately constructs a new internal event to spawn the secondary cloud, and pushes it to its own `internal_inbox`:
     ```rust
@@ -256,10 +256,10 @@ A player fires a dart. When it hits an enemy, it explodes into a lingering, stat
         actor_id: Some(original_attacker_id),
         origin_tick: current_shard_tick(), // Inherit current temporal context
         data_epoch: current_data_epoch(), // Pin this cascade to the current dictionary version
-        payload: ActionPayload::SpawnProjectile { 
+        payload: ActionPayload::Game(ArpgAction::SpawnProjectile { 
             direction: Vec2F::ZERO, // Stationary
             spell_id: SPELL_PLAGUE_CLOUD // Inherits its position from Enemy A's current location
-        }
+        })
     });
     ```
 *   **The Result:** On the very next tick, a new `ProjectileActor` (acting as a stationary 5-second cloud) is instantiated perfectly within the lock-free loop, subject to all standard Ghost Relay rules.
@@ -276,7 +276,7 @@ A Paladin activates an aura that slows and damages all nearby enemies. The aura 
 A player activates a buff that reflects 15 True damage back to anyone who hits them with a melee attack. 
 *   **The Application:** The designer assigns `EFFECT_THORNS_AURA` to a buff spell. The Arbiter adds this to the player's `SoftState.active_status_effects`.
 *   **The Engine Trigger:** When an enemy hits the player, the Arbiter executes `apply_combat_math`. It calculates the damage to the victim, then sees the Thorns buff. 
-*   **The Resolution:** The Arbiter does *not* instantly damage the attacker (this avoids memory access violations/Borrow Checker errors). Instead, the Arbiter automatically pushes a new `MeshInternalEvent` with `ActionPayload::InternalPreparedHit` targeting the attacker into its own queue. The attacker takes the 15 True damage on the very next simulation tick.
+*   **The Resolution:** The Arbiter does *not* instantly damage the attacker (this avoids memory access violations/Borrow Checker errors). Instead, the Arbiter automatically pushes a new `MeshInternalEvent` with `ActionPayload::Game(ArpgAction::InternalPreparedHit)` targeting the attacker into its own queue. The attacker takes the 15 True damage on the very next simulation tick.
 *   **The Proc Guard:** The reflected hit is stamped as `damage_origin = ReactiveProc` and `proc_depth = 1`, so it cannot recursively trigger another Thorns reflect. This prevents infinite Thorns-vs-Thorns event loops.
 
 ---
