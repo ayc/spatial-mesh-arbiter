@@ -98,7 +98,7 @@ In Lost Ark, immunity is granted DURING ability animations — the entity gains 
 
 ```
 fn on_ability_cast_start(entity: &mut Entity, ability: &AbilityDef) {
-    if let Some(immunity) = ability.cast_immunity {
+    if let Some(immunity) = ability.self_cc_immunity_during_cast {
         entity.apply_temporary_cc_immunity(immunity, ability.cast_duration_ticks);
     }
 }
@@ -114,7 +114,7 @@ TODO: CC immunity is a local state on the entity's Arbiter. When CC is applied v
 
 TODO: Designer specifies: per-ability cast immunity tier (none, push immune, full super armor), CC category classification for all CC effects, per-category immunity flags. Compiler produces:
 - CcImmunityFlags on entity state
-- Per-ability `cast_immunity: Option<CcImmunityTier>` in ability definitions
+- Per-ability `self_cc_immunity_during_cast: Option<CcImmunityTier>` in ability definitions
 - CC category enum with per-effect classification
 - CC application check expanded to per-category immunity
 - Temporary immunity buff tied to ability cast duration

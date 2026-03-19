@@ -13,7 +13,7 @@ Each emitted image MUST include:
 
 - a fixed-size `FileHeader` containing the image format version, total size, and authenticated digest
 - a `Manifest` section containing compatibility and identity metadata
-- a `SectionDirectory` describing every non-header section except the optional terminal `Signature`
+- a `SectionDirectory` describing every section except the header, the directory itself, and the optional terminal `Signature`
 
 The `Manifest` section MUST include:
 
@@ -96,7 +96,7 @@ FileHeader {
 
 ### 2.2 Section Directory
 
-The `SectionDirectory` immediately follows the fixed-size header. It contains one `SectionEntry` for every non-header section present in the image except the optional terminal `Signature` section. This lets the runtime parse the image deterministically from the header alone.
+The `SectionDirectory` immediately follows the fixed-size header. It contains one `SectionEntry` for every section present in the image except the file header itself, the directory itself, and the optional terminal `Signature` section. The directory does not self-describe — its location (immediately after the header) and size (`FileHeader.section_count` entries) are determined from the header alone.
 
 ```
 SectionEntry {
@@ -176,11 +176,12 @@ AbilityIREntry {
     // Metadata (fixed-size header)
     ability_id:             u32,        // Numeric ability ID (from compiler symbol table)
     cooldown_ticks:         u32,
-    resource_cost:          i64,        // I32F32 encoded
+    resource_pool_id:       u32,        // Pre-hashed pool name (mana, energy, rage, etc.)
+    resource_cost:          i64,        // I32F32 encoded amount to debit
     cast_time_ticks:        u32,
     targeting_type:         u8,         // TargetingType enum
-    cast_immunity:          u8,         // CcImmunityTier enum (0 = none)
-    flags:                  u8,         // Bitfield: is_counter, is_counterable, requires_concentration
+    self_cc_immunity_during_cast: u8,   // CcImmunityTier enum (0 = none)
+    flags:                  u8,         // Bitfield: can_counter_vulnerability_window, can_be_counterspelled, requires_concentration
     combo_finisher:         u8,         // ComboFinisherType enum (0 = none)
     _padding:               [u8; 4],    // Alignment padding
 
@@ -454,7 +455,21 @@ Before activating a game image, the runtime MUST:
 
 Any verification failure MUST prevent activation. The verification chain is non-circular: authenticated image envelope → digest → signature.
 
-### 11.2 Activation Protocol
+### 11.2 Verification Failure Codes
+
+Runtime image verification and activation MUST map failures to stable primary codes. At minimum, implementations MUST use:
+
+- `IMAGE_HEADER_INVALID` — unsupported `format_version`, invalid magic bytes, or malformed fixed header fields
+- `IMAGE_SIZE_MISMATCH` — `total_size` does not match the actual file size
+- `IMAGE_DIGEST_MISMATCH` — recomputed authenticated digest does not equal `FileHeader.digest`
+- `IMAGE_SIGNATURE_INVALID` — signature bytes are present but fail cryptographic verification
+- `IMAGE_SIGNATURE_MISSING` — `signed` flag is set but the terminal `Signature` section is absent or truncated
+- `IMAGE_ADAPTER_INCOMPATIBLE` — manifest `adapter_api_major` is incompatible with the running adapter
+- `IMAGE_WIRE_INCOMPATIBLE` — manifest `wire_schema_versions` has no intersection with runtime-supported wire schema versions
+
+Implementations MAY emit secondary diagnostics, but the primary code for a given root failure MUST be stable across runs.
+
+### 11.3 Activation Protocol
 
 Activation follows `docs-core/04-0-game-adapter-interface.md` §3.5 and `docs-core/04-3-version-line-transition-contract.md`:
 

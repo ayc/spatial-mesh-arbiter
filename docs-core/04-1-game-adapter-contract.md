@@ -19,12 +19,11 @@ If there is a conflict, higher-precedence documents win.
 
 ## 2. Required Adapter Surface
 
-Every game adapter MUST implement these hooks:
-1. Intent validation hook.
-2. External action resolution hook.
-3. Internal event resolution hook.
-4. Spawn/initial-state construction hook.
-5. Serialization compatibility declarations for game-owned payloads.
+Every game adapter MUST implement these API v2 hooks:
+1. Intent validation hook (`validate_intent`).
+2. Stage dispatch hook (`dispatch_stage`).
+3. Spawn-configuration initialization hook (`initialize_spawn_configuration`).
+4. Serialization compatibility declarations (`describe_compatibility`).
 
 The adapter MAY add internal helper hooks, but engine integration MUST only depend on the required surface above.
 
@@ -32,15 +31,23 @@ Canonical request/response envelope fields, required enums, and deterministic ca
 
 ## 3. Tick Boundary and Call Order Contract
 
-The engine MUST invoke adapter hooks in a stable, deterministic order.
+The engine MUST own the global stage scheduler and execute the authoritative tick lifecycle as a strictly ordered, 12-stage pipeline. The engine evaluates each stage globally across all active work on an Arbiter before proceeding to the next stage.
 
-Within each authoritative tick:
-1. Global-event resolution hooks execute before internal relay-event hooks.
-2. Internal relay-event hooks execute before external action-resolution hooks.
-3. For a given class of work, entity iteration order MUST be deterministic.
-4. Adapter outcomes are applied only through the engine mutation pipeline.
+The normative 12-stage tick lifecycle is:
+1.  **ControlAuthorityAndInputRouting:** Adapter evaluates P-29/P-30 directives via `dispatch_stage(stage_id=1)` and returns routing decisions. **Engine Boundary:** Engine commits the routing changes before proceeding to Stage 2.
+2.  **IntentValidation:** Adapter validates intents. Rejects halt processing for that intent.
+3.  **TargetResolution:** Adapter resolves intent-time spatial queries.
+4.  **PreKinematic:** Adapter applies movement modifiers.
+5.  **KinematicResolution:** Adapter resolves movement vectors. **Engine Boundary:** Engine commits final positions to the spatial index.
+6.  **PostKinematic:** Adapter evaluates position-dependent consequences (proximity, collision impact).
+7.  **PreMitigation:** Adapter evaluates combat interception (shields, immunity).
+8.  **DamageResolution:** Adapter evaluates combat math.
+9.  **PostDamage:** Adapter fires reactive hooks. MUST defer new combat events to the next tick.
+10. **DeathCheck:** Adapter evaluates life-phase transitions. **Engine Boundary:** Engine commits entity removal and respawn routing.
+11. **StateUpdate:** Adapter updates timers and accumulators. MUST defer new combat events to the next tick.
+12. **ObserverScopedPayloadEmission:** Adapter filters observability. **Engine Boundary:** Engine serializes downstream payloads.
 
-The adapter MUST NOT assume out-of-band callbacks or direct engine state mutation.
+Within any given stage, the adapter MUST return deterministic, declarative outcomes (mutations, events, defers). The adapter MUST NOT assume out-of-band callbacks or perform direct imperative mutation of engine state.
 
 ## 4. Ownership and Mutation Contract
 
@@ -115,14 +122,13 @@ Required profile keys:
 1. `frame_budget_us`
 2. `adapter_tick_budget_us`
 3. `validate_hook_budget_us`
-4. `resolve_external_hook_budget_us`
-5. `resolve_internal_hook_budget_us`
-6. `spawn_hook_budget_us`
-7. `hot_hook_timeout_us`
-8. `spawn_hook_timeout_us`
-9. `adapter_fault_window_ticks`
-10. `adapter_fault_threshold`
-11. `adapter_degraded_hold_ticks`
+4. `dispatch_stage_budget_us`
+5. `spawn_hook_budget_us`
+6. `hot_hook_timeout_us`
+7. `spawn_hook_timeout_us`
+8. `adapter_fault_window_ticks`
+9. `adapter_fault_threshold`
+10. `adapter_degraded_hold_ticks`
 
 ### 8.2 Timeout and Overrun Semantics
 

@@ -23,12 +23,13 @@ An Ability IR Block consists of:
 AbilityIRBlock {
     ability_id:       AbilityId,
     cooldown_ticks:   u32,
-    resource_cost:    SimFixed,
+    resource_pool:    PoolId,         // Which resource pool to debit (e.g., mana, energy, rage)
+    resource_cost:    SimFixed,       // Amount to debit from the pool
     cast_time_ticks:  u32,
     targeting_type:   TargetingType,    // SingleTarget | AoE | Self | None
-    cast_immunity:    Option<CcImmunityTier>,
-    is_counter:       bool,             // P-65: can trigger counter windows
-    is_counterable:   bool,             // P-40: can be counterspelled
+    self_cc_immunity_during_cast: Option<CcImmunityTier>,
+    can_counter_vulnerability_window: bool,  // P-65: this ability can trigger a vulnerability-window counter
+    can_be_counterspelled: bool,        // P-40: this ability can be counterspelled mid-cast
     combo_finisher:   Option<ComboFinisherType>,  // P-64: finisher classification
     requires_concentration: bool,       // P-55: maintained effect
     instructions:     Vec<IRInstruction>,
@@ -125,7 +126,7 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    TICK BOUNDARY                         │
-├──── 1. InputRouting ────────────────────────────────────┤
+├──── 1. ControlAuthorityAndInputRouting ────────────────┤
 │  Control authority swap, input multiplexing              │
 │  Primitives: P-29, P-30                                  │
 ├──── 2. IntentValidation ────────────────────────────────┤
@@ -159,7 +160,7 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 │  Counters, charges, loadout swaps, stagger, DR, timers   │
 │  Primitives: P-31, P-41, P-42, P-44, P-45, P-46,        │
 │              P-48, P-50                                   │
-├──── 12. Emission ───────────────────────────────────────┤
+├──── 12. ObserverScopedPayloadEmission ─────────────────┤
 │  Downstream payloads, asymmetric rendering, group UI     │
 │  Primitives: P-52, P-53, P-54                            │
 ├─────────────────────────────────────────────────────────┤
@@ -169,7 +170,7 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 
 ### Stage Definitions
 
-#### Stage 1: InputRouting
+#### Stage 1: ControlAuthorityAndInputRouting
 
 **Executes:** Before any intent processing.
 **Purpose:** Resolve which Edge Node's input drives which entity.
@@ -332,7 +333,7 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 
 **Engine contract:** Pulse and delay timers that fire in this stage inject their payloads as combat events for the NEXT tick (deferred execution), not the current tick. This prevents unbounded within-tick cascades. Global events from P-46 MUST be processed in deterministic order by tick, then by event ID.
 
-#### Stage 12: Emission
+#### Stage 12: ObserverScopedPayloadEmission
 
 **Executes:** Last stage of the tick.
 **Purpose:** Build downstream payloads for Edge Nodes.
@@ -352,7 +353,7 @@ Some primitives are not bound to a single pipeline stage. They are emitted as `I
 | Primitive | Emission Form | Checked At |
 |-----------|---------------|-----------|
 | P-26 (Capability Bitmask) | `IRDirective` / metadata | IntentValidation (CAN_CAST), PreKinematic (CAN_MOVE), TargetResolution (filtering) |
-| P-27 (Targetability Overrides) | `IRDirective` / metadata | TargetResolution (excluded from queries), Emission (excluded from payloads) |
+| P-27 (Targetability Overrides) | `IRDirective` / metadata | TargetResolution (excluded from queries), ObserverScopedPayloadEmission (excluded from payloads) |
 | P-28 (Hostility Inversion) | `IRDirective` / metadata | TargetResolution (inverted team filter) |
 | P-32 (Actor Spawning) | `IRDirective` | Any stage may request actor creation; spawned actors begin evaluation on the NEXT tick |
 | P-33 (Entity Dormancy) | `IRDirective` / metadata | All stages — dormant entities are skipped entirely |
@@ -394,8 +395,8 @@ The compiler MUST NOT emit these as stage-specific `IRInstruction` entries. They
 | P-26 Capability Bitmask | *(cross-cutting)* | State |
 | P-27 Targetability Overrides | *(cross-cutting)* | State |
 | P-28 Hostility Inversion | *(cross-cutting)* | State |
-| P-29 Control Authority Swap | InputRouting | State |
-| P-30 Input Multiplexing | InputRouting | State |
+| P-29 Control Authority Swap | ControlAuthorityAndInputRouting | State |
+| P-30 Input Multiplexing | ControlAuthorityAndInputRouting | State |
 | P-31 Identity/Loadout Swap | StateUpdate | State |
 | P-32 Actor Spawning | *(cross-cutting)* | State |
 | P-33 Entity Dormancy | *(cross-cutting)* | State |
@@ -417,9 +418,9 @@ The compiler MUST NOT emit these as stage-specific `IRInstruction` entries. They
 | P-49 Resource Destruction-to-Damage | DamageResolution | Resource |
 | P-50 Typed Multi-Charge Pool | StateUpdate | Resource |
 | P-51 Desperation Cost Modifiers | IntentValidation | Resource |
-| P-52 Asymmetric Team-Rendering | Emission | Visibility |
-| P-53 Entity Suspension | Emission | Visibility |
-| P-54 Group Choice Aggregator | Emission | Visibility |
+| P-52 Asymmetric Team-Rendering | ObserverScopedPayloadEmission | Visibility |
+| P-53 Entity Suspension | ObserverScopedPayloadEmission | Visibility |
+| P-54 Group Choice Aggregator | ObserverScopedPayloadEmission | Visibility |
 | P-55 Concentration Intercept | PostDamage | Hook |
 | P-56 Spatial Instance Forking | *(cross-cutting)* | Spatial |
 | P-57 Polyline Collision Generator | PostKinematic | Spatial |
@@ -481,12 +482,13 @@ The compiler MUST enforce these rules when emitting IR:
 AbilityIRBlock {
     ability_id: TOSS,
     cooldown_ticks: 600,        // 10 seconds
-    resource_cost: 75,          // mana
+    resource_pool: MANA,        // pool to debit
+    resource_cost: 75,          // amount
     cast_time_ticks: 0,         // instant
     targeting_type: SingleTarget,
-    cast_immunity: None,
-    is_counter: false,
-    is_counterable: true,
+    self_cc_immunity_during_cast: None,
+    can_counter_vulnerability_window: false,
+    can_be_counterspelled: true,
     combo_finisher: None,
     requires_concentration: false,
     instructions: [

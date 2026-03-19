@@ -13,13 +13,13 @@ P-65 (Vulnerability Window Broadcast) → P-40 (On-Cast Intercept)
 ## Inputs
 
 - Boss entity (broadcasts the counter window)
-- Player entity (must use a counter-classified ability during the window)
+- Player entity (must use an ability that can counter a vulnerability window during the window)
 
 ## Observable Behavior
 
 1. Boss begins a specific attack animation — blue glow appears (counter window opens)
 2. Counter window lasts 1-2 seconds (tight timing)
-3. If a player hits the boss with a counter-classified ability during the window:
+3. If a player hits the boss with an ability that can counter a vulnerability window during the window:
    - Boss attack is INTERRUPTED (cancelled — doesn't deal damage)
    - Boss takes bonus damage from the counter hit
    - Boss enters a brief stagger (1.5 seconds — stunned + vulnerable)
@@ -34,11 +34,11 @@ P-65 (Vulnerability Window Broadcast) → P-40 (On-Cast Intercept)
 
 ### Entity Vulnerability State
 
-The boss entity broadcasts a "counterable" state during specific attack animations:
+The boss entity broadcasts a vulnerability-window-active state during specific attack animations:
 
 ```
 struct CounterWindowState {
-    is_counterable: bool,
+    is_vulnerability_window_active: bool,
     window_start_tick: u64,
     window_end_tick: u64,
     counter_bonus_damage: SimFixed,
@@ -48,20 +48,20 @@ struct CounterWindowState {
 }
 ```
 
-The boss's Arbiter sets `is_counterable = true` at the start of specific attack animations and `false` at the end. This is driven by the boss's ability definitions and animation timing.
+The boss's Arbiter sets `is_vulnerability_window_active = true` at the start of specific attack animations and `false` at the end. This is driven by the boss's ability definitions and animation timing.
 
 ### Counter-Classified Abilities
 
-Players have some abilities tagged as "counter" abilities:
+Players have some abilities tagged to counter vulnerability windows:
 ```
 struct AbilityDef {
     // ... existing fields
-    is_counter: bool,  // This ability can counter during a counter window
+    can_counter_vulnerability_window: bool,  // This ability can counter during a vulnerability window
 }
 ```
 
-When a counter-classified ability hits an entity with `is_counterable = true`:
-1. Check: is the target in a counter window? (`is_counterable && current_tick <= window_end_tick`)
+When an ability with `can_counter_vulnerability_window = true` hits an entity with `is_vulnerability_window_active = true`:
+1. Check: is the target in a counter window? (`is_vulnerability_window_active && current_tick <= window_end_tick`)
 2. Check: has the window already been countered? (`countered_by.is_none()`)
 3. If both: COUNTER SUCCEEDS
    - Interrupt the boss's current attack (`attack_to_cancel`)
@@ -84,7 +84,7 @@ The engine needs to support **mid-cast ability cancellation** on an entity — s
 The counter window is short (1-2 seconds). The tight timing creates a SKILL CHECK — players must:
 1. Recognize the blue glow (visual cue)
 2. React within the window (timing)
-3. Use a counter-classified ability (correct ability choice)
+3. Use an ability that can counter a vulnerability window (correct ability choice)
 4. Hit the boss (accuracy — counter abilities might be skillshots)
 
 This is fundamentally a PvE mechanic designed to reward player skill and reaction time.
@@ -119,11 +119,11 @@ This creates a LATENCY FAIRNESS issue: players closer (same Arbiter) have a slig
 
 ## Compiler Requirements
 
-TODO: Designer specifies: per-boss-ability counter window definition (timing, bonus, stagger), player abilities tagged as `is_counter: true`, counter check during damage resolution, one-shot per window (first counter wins), attack interruption on success. Compiler produces:
+TODO: Designer specifies: per-boss-ability counter window definition (timing, bonus, stagger), player abilities tagged as `can_counter_vulnerability_window: true`, counter check during damage resolution, one-shot per window (first counter wins), attack interruption on success. Compiler produces:
 - CounterWindowState as boss entity component
 - Per-boss-ability counter window timing in SpellData
-- `is_counter: bool` flag on player ability definitions
-- Damage resolution hook: if attacker's ability `is_counter` AND target `is_counterable` → counter resolution
+- `can_counter_vulnerability_window: bool` flag on player ability definitions
+- Damage resolution hook: if attacker's ability `can_counter_vulnerability_window` AND target `is_vulnerability_window_active` → counter resolution
 - Attack interruption (cancel current boss ability)
 - One-shot flag (first counter consumes the window)
 

@@ -39,7 +39,7 @@ struct CastingState {
     ability_being_cast: AbilityId,
     cast_start_tick: u64,
     cast_end_tick: u64,       // When the ability would resolve
-    can_be_countered: bool,   // Some abilities are uncounterable
+    can_be_counterspelled: bool,   // Some abilities are uncounterspellable
 }
 ```
 
@@ -49,7 +49,7 @@ The casting state must be visible to nearby entities (and their Edge Nodes for U
 
 When counterspell hits a casting entity:
 1. Check: `target.casting_state.is_casting == true`
-2. Check: `target.casting_state.can_be_countered == true`
+2. Check: `target.casting_state.can_be_counterspelled == true`
 3. If both: CANCEL the cast
    - Set `target.casting_state.is_casting = false`
    - Do NOT resolve the ability (no damage, no effects, no projectile spawning)
@@ -60,7 +60,7 @@ When counterspell hits a casting entity:
 
 ```
 fn resolve_counterspell(caster: &Entity, target: &mut Entity) -> bool {
-    if target.casting_state.is_casting && target.casting_state.can_be_countered {
+    if target.casting_state.is_casting && target.casting_state.can_be_counterspelled {
         target.casting_state.is_casting = false;
         // Ability's resource was already deducted at cast start — leave it consumed
         // Ability goes on cooldown as if it was cast
@@ -84,10 +84,10 @@ The counterspell must HIT the target before `cast_end_tick`. If the counterspell
 ### Counterable Classification
 
 Not all abilities should be counterable. The compiler must tag abilities:
-- `can_be_countered: true` — standard abilities with cast times
-- `can_be_countered: false` — instant abilities, auto-attacks, passive procs, and specific "uncounterable" abilities
+- `can_be_counterspelled: true` — standard abilities with cast times
+- `can_be_counterspelled: false` — instant abilities, auto-attacks, passive procs, and specific "uncounterspellable" abilities
 
-The `can_be_countered` flag is part of the ability definition in SpellData.
+The `can_be_counterspelled` flag is part of the ability definition in SpellData.
 
 ### Reaction System (Optional)
 
@@ -122,7 +122,7 @@ TODO: The caster (counterspeller) and target (casting enemy) may be on different
 
 TODO: Designer specifies: targeted ability, must be used during target's cast time, cancels the ability (no resolution), resource still consumed by target, target ability goes on cooldown, counterspell has its own cooldown, some abilities marked uncounterable. Compiler produces:
 - Counterspell ability definition
-- Per-ability `can_be_countered: bool` flag in SpellData
+- Per-ability `can_be_counterspelled: bool` flag in SpellData
 - CastingState tracking on entities (start tick, end tick, ability ID)
 - Mid-cast cancellation hook
 - Casting state in downstream payloads (for cast bar rendering)

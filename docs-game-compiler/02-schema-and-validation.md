@@ -56,12 +56,12 @@ An ability is the primary compilation unit. Each ability compiles into one `Abil
 |-------|------|----------|---------|-----------|------------|
 | `ability_id` | `string` | YES | — | `AbilityIRBlock.ability_id` | Must be unique across all abilities. |
 | `cooldown` | `fixed` | YES | — | `AbilityIRBlock.cooldown_ticks` | Must be > 0. Converted to ticks at 60Hz. |
-| `resource_cost` | `ResourceCost` | NO | none | `AbilityIRBlock.resource_cost` | Pool ID must reference a valid resource pool. |
+| `resource_cost` | `ResourceCost` | NO | none | `AbilityIRBlock.resource_pool` + `AbilityIRBlock.resource_cost` | Pool ID must reference a valid resource pool. |
 | `cast_time` | `fixed` | NO | `0` | `AbilityIRBlock.cast_time_ticks` | Must be >= 0. Converted to ticks. |
 | `targeting` | `TargetingBlock` | YES | — | IR instructions (P-09/P-13) | See §5.2. |
-| `cast_immunity` | `enum` | NO | `none` | `AbilityIRBlock.cast_immunity` | One of: `none`, `push_immune`, `full_super_armor`. |
-| `is_counter` | `bool` | NO | `false` | `AbilityIRBlock.is_counter` | P-65: flags ability as counter-window trigger. |
-| `is_counterable` | `bool` | NO | `true` | `AbilityIRBlock.is_counterable` | P-40: can be counterspelled. |
+| `self_cc_immunity_during_cast` | `enum` | NO | `none` | `AbilityIRBlock.self_cc_immunity_during_cast` | One of: `none`, `push_immune`, `full_super_armor`. |
+| `can_counter_vulnerability_window` | `bool` | NO | `false` | `AbilityIRBlock.can_counter_vulnerability_window` | P-65: flags ability as eligible to trigger vulnerability-window counters. |
+| `can_be_counterspelled` | `bool` | NO | `true` | `AbilityIRBlock.can_be_counterspelled` | P-40: this ability can be counterspelled mid-cast. |
 | `combo_finisher` | `enum` | NO | `none` | `AbilityIRBlock.combo_finisher` | One of: `none`, `projectile`, `blast`, `whirl`, `leap`. |
 | `requires_concentration` | `bool` | NO | `false` | `AbilityIRBlock.requires_concentration` | P-55: maintained effect. |
 | `stagger_damage` | `fixed` | NO | `0` | IR instruction params | P-48: parallel stagger damage. |
@@ -152,7 +152,7 @@ ability:
     type: single_target
     range: 8.0
     filter: enemy_alive
-  is_counterable: false
+  can_be_counterspelled: false
   requirements:
     - capability: can_cast
   effects:

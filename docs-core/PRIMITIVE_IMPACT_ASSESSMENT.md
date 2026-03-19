@@ -84,27 +84,18 @@ Current canonical split:
 **Priority:** HIGH — blocks combat pipeline specification
 **Concrete proposal:** `docs-game-compiler/03-1-compiler-ir-specification.md` defines 12 canonical pipeline stages and maps all 65 primitives to stages. This is the compiler team's proposed hook taxonomy for engine adoption.
 
-**What exists:** The adapter contract defines 4 required hooks:
-1. Intent validation hook
-2. External action resolution hook
-3. Internal event resolution hook
-4. Spawn/initial-state construction hook
+**What exists:** The adapter contract has been upgraded to API v2. The legacy hooks (`resolve_external`, `resolve_internal`) are deprecated. The new surface is:
 
-**What's needed:** The combat resolution pipeline requires finer-grained hook points than "external action resolution." The 125 ability sketches demonstrate that game adapters need to intercept at specific stages:
+- `validate_intent` — dedicated hook for Stage 2 (IntentValidation) with reject/accept terminal outcome semantics
+- `dispatch_stage` — unified generic hook called once per active stage per tick, covering Stages 1 and 3-12
+- `initialize_spawn_configuration` — spawn-configuration initialization hook for P-32 Actor Spawning
+- `describe_compatibility` — startup negotiation
 
-| Hook Point | Primitives Served | Pipeline Stage |
-|------------|-------------------|----------------|
-| `validate_intent` (exists) | P-26 (capability check), P-40 (on-cast intercept) | Phase 1: Intent validation |
-| **`pre_damage_resolution`** (new) | P-18 (absorption barrier), P-19 (instance barrier), P-22 (deferred ledger) | Phase 2: Before damage applies to HP |
-| **`post_damage_resolution`** (new) | P-35 (on-hit), P-36 (on-damage-received), P-60 (event cloning), P-61 (projectile hijack) | Phase 2: After damage applied |
-| **`death_check`** (new) | P-23 (floor clamping), P-24 (resolution bypass), P-25 (multi-phase vitals), P-39 (on-death) | Phase 2: Entity reaches 0 HP |
-| `resolve_internal` (exists) | Cross-Arbiter relay resolution | Phase 2: Internal events |
+The 12-stage pipeline is defined in `04-1-game-adapter-contract.md` §3. The `dispatch_stage` hook contract — including the normative `StageId` enum, `DispatchStageRequest` payload schema, and `StageOutcome` response schema — is defined in `04-2-game-adapter-api-contract.md` §3.5.
 
-The amendment does NOT define the combat math — that stays game-owned. It defines the **pipeline stages** and **hook call order** so that game adapters have deterministic interception points.
+**Status: ADOPTED.** The architectural question (named hooks vs generic stage dispatch) is resolved. The remaining work is filling in per-stage context schemas as primitives are implemented.
 
-**Blast radius:** Moderate. Expands the adapter surface (§2) and call order (§3). Existing hooks are preserved; new hooks are additive. The API contract (04-2) gains new request/response envelope definitions for the new hooks.
-
-**Dependencies:** None directly, but complements Amendment A (spatial queries are inputs to combat resolution).
+**Dependencies:** Complements Amendment A (spatial queries are inputs fed into stage contexts).
 
 ---
 
@@ -120,7 +111,7 @@ The amendment does NOT define the combat math — that stays game-owned. It defi
 
 1. **Multi-phase lifecycle model.** The engine currently assumes Alive → Dead. Game adapters need to define intermediate phases (Downed, Transformed) where the entity persists but with different evaluation rules. The engine contract should specify:
    - Entity life phase as a kernel-tracked enum (game adapter defines the phases)
-   - Death check as an interceptable pipeline stage (Amendment B's `death_check` hook)
+   - Death check as an interceptable pipeline stage (Stage 10 `DeathCheck` via `dispatch_stage`)
    - Phase transitions as deterministic, atomic operations within a tick
 
 2. **Entity dormancy contract.** An entity can be paused (skipped during tick evaluation) while remaining in the R-Tree. The contract should specify: what "paused" means for timers, for spatial queries (included or excluded?), for downstream payloads.
@@ -131,7 +122,7 @@ The amendment does NOT define the combat math — that stays game-owned. It defi
 
 **Blast radius:** Moderate. Extends the kernel's entity model. Existing entities behave identically (single-phase lifecycle is the default). New phases are opt-in via game adapter configuration.
 
-**Dependencies:** Amendment B (death_check hook is where phase transitions are intercepted).
+**Dependencies:** Amendment B (Stage 10 `DeathCheck` via `dispatch_stage` is where phase transitions are intercepted).
 
 ---
 
@@ -239,7 +230,7 @@ Several entries in `docs/6-spec-drafts/GAPS_CHECKLIST.md` are directly addressed
 
 1. **Should spatial primitives (Amendment A) live in `01-spatial-runtime-kernel.md` as a new section, or as a separate `01-1-spatial-primitive-catalog.md`?** The kernel doc is already 116 lines of high-level contracts. Adding 14 primitive specifications would roughly triple its length.
 
-2. **Should the adapter hook expansion (Amendment B) define specific hook names (e.g., `pre_damage_resolution`), or define a generic "pipeline stage" model where the game adapter registers interception points?** The former is more prescriptive; the latter is more flexible but harder to conformance-test.
+2. **[RESOLVED] Should the adapter hook expansion (Amendment B) define specific hook names (e.g., `pre_damage_resolution`), or define a generic "pipeline stage" model where the game adapter registers interception points?** The team has adopted the generic 12-stage model via the `dispatch_stage` hook in API v2, allowing the compiler to emit deterministic IR without forcing the engine into a dozen bespoke Rust traits.
 
 3. **Are there primitives currently tagged `game-adapter` that the team believes should be engine-level?** The 20 game-adapter primitives in §4 were classified based on "the engine doesn't need to know about this." If the team disagrees on any, they should be promoted before amendments are drafted.
 

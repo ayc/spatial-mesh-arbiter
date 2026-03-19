@@ -54,7 +54,7 @@ Each finisher can combo with each field only once (dedup via `comboed_fields` se
 
 **Key constraints:** The vulnerability window is defined as part of the broadcasting entity's ability definition: `window_start_offset_ticks`, `window_duration_ticks`, `bonus_damage`, `stagger_duration_ticks`. The window is opened when the entity begins a specific attack animation and closed when the window duration elapses or a counter lands.
 
-Player abilities are tagged `is_counter: bool` at compile time. When a counter-tagged ability hits an entity during its vulnerability window:
+Player abilities are tagged `can_counter_vulnerability_window: bool` at compile time. When an ability with that tag hits an entity during its vulnerability window:
 1. The target's current ability is cancelled (mid-cast interruption).
 2. Bonus damage is applied.
 3. The target enters a brief stagger (stun + damage vulnerability).

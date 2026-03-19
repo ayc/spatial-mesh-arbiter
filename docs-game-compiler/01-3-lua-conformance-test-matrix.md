@@ -6,6 +6,7 @@ This document defines required compiler conformance tests for:
 2. `01-2-lua-whitelisted-api.md`
 3. `03-compiler-pipeline.md`
 4. `03-1-compiler-ir-specification.md`
+5. `04-game-image-format.md`
 
 Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -45,6 +46,7 @@ Test harness MUST support:
 8. `BINDING`: binding-table allocation and reference resolution.
 9. `IR_EQUIV`: canonicalization and output stability.
 10. `DIAG`: deterministic diagnostic quality.
+11. `IMAGE`: game image format, digest, directory, and signature conformance.
 
 ## 5. Required Test Cases
 
@@ -150,11 +152,38 @@ Test harness MUST support:
 | `LUA-DIAG-002` | `DIAG` | `REQ` | multiple violations in one file | stable ordering of primary/secondary diagnostics | deterministic diagnostic set |
 | `LUA-DIAG-003` | `DIAG` | `REQ` | failed compile | diagnostics include source span and symbol/rule id | deterministic diagnostic shape |
 
+### 5.1 Game Image Format Tests
+
+| Test ID | Group | Level | Scenario | Expected Result | Expected Diagnostic |
+|---|---|---|---|---|---|
+| `IMG-HDR-001` | `IMAGE` | `REQ` | emit image, verify header magic is `GMIM` and format_version is supported | verification succeeds | n/a |
+| `IMG-HDR-002` | `IMAGE` | `REQ` | emit image, verify `total_size` matches actual file size | verification succeeds | n/a |
+| `IMG-HDR-003` | `IMAGE` | `REQ` | corrupt one byte in a content section, verify digest mismatch | verification fails | `IMAGE_DIGEST_MISMATCH` |
+| `IMG-DIR-001` | `IMAGE` | `REQ` | emit image, verify section directory `section_count` matches number of directory entries | verification succeeds | n/a |
+| `IMG-DIR-002` | `IMAGE` | `REQ` | emit image, verify every directory entry's `offset + size` falls within `total_size` | verification succeeds | n/a |
+| `IMG-DIR-003` | `IMAGE` | `REQ` | emit image, verify per-section CRC-32 matches recomputed CRC-32 of section bytes | verification succeeds | n/a |
+| `IMG-DIR-004` | `IMAGE` | `REQ` | directory does NOT contain an entry for the SectionDirectory itself | verification succeeds | n/a |
+| `IMG-DIR-005` | `IMAGE` | `REQ` | directory does NOT contain an entry for the Signature section | verification succeeds | n/a |
+| `IMG-MAN-001` | `IMAGE` | `REQ` | emit image, parse manifest via directory type 0x01 entry, verify all identity fields are present and well-formed | verification succeeds | n/a |
+| `IMG-MAN-002` | `IMAGE` | `REQ` | manifest `adapter_api_major` mismatches runtime | activation rejected | `IMAGE_ADAPTER_INCOMPATIBLE` |
+| `IMG-MAN-003` | `IMAGE` | `REQ` | manifest `wire_schema_versions` has no intersection with runtime | activation rejected | `IMAGE_WIRE_INCOMPATIBLE` |
+| `IMG-DIGEST-001` | `IMAGE` | `REQ` | emit image, zero the 32-byte digest field, recompute SHA-256 over entire file (minus signature section), compare to stored digest | digest matches | n/a |
+| `IMG-DIGEST-002` | `IMAGE` | `REQ` | emit same source and build profile twice, compare authenticated digest | byte-identical digest | n/a |
+| `IMG-DIGEST-003` | `IMAGE` | `REQ` | emit debug build and release build of same source | digests differ (debug metadata changes the envelope) | n/a |
+| `IMG-SIG-001` | `IMAGE` | `REQ` | emit signed image, verify Ed25519 signature over `FileHeader.digest` | verification succeeds | n/a |
+| `IMG-SIG-002` | `IMAGE` | `REQ` | corrupt signature bytes, verify signature check fails | verification fails | `IMAGE_SIGNATURE_INVALID` |
+| `IMG-SIG-003` | `IMAGE` | `REQ` | emit unsigned image (`signed` flag clear), verify no signature section present | verification succeeds (signature check skipped) | n/a |
+| `IMG-SIG-004` | `IMAGE` | `REQ` | `signed` flag set but signature section missing or truncated | verification fails | `IMAGE_SIGNATURE_MISSING` |
+| `IMG-CONTENT-001` | `IMAGE` | `REQ` | emit image with one ability, verify AbilityIRTable section (0x10) contains exactly one entry parseable as `AbilityIREntry` | parse succeeds | n/a |
+| `IMG-CONTENT-002` | `IMAGE` | `REQ` | emit image, verify `resource_pool_id` field is present and matches the expected compiled pool identifier for abilities with resource costs | parse succeeds | n/a |
+| `IMG-CONTENT-003` | `IMAGE` | `REQ` | emit image, verify LookupIndexes (0x20) contain sorted entries for every ability, entity, status, and formula ID | index validation succeeds | n/a |
+| `IMG-DETERM-001` | `IMAGE` | `REQ` | emit same source, compiler version, build profile, and signing inputs twice | full image bytes preceding signature section are byte-identical | n/a |
+
 ## 6. Cross-Run Stability Requirements
 
 For every `REQ` success case:
 
-1. compile artifact hash MUST match across at least two repeated runs
+1. compile artifact hash MUST match across at least two repeated runs with identical source, build profile, and signing inputs
 2. emitted IR field ordering MUST be canonical
 3. numeric normalization output MUST be identical
 4. directive ordering and binding-slot numbering MUST be canonical
@@ -176,6 +205,7 @@ Implementations MUST maintain at least:
 4. `fixtures/lua/profile-bounds/` for budget/cap scenarios
 5. `fixtures/lua/lowering/` for guard/directive lowering tests
 6. `fixtures/lua/binding/` for binding allocation and overflow tests
+7. `fixtures/image/` for game image format, digest, and signature tests
 
 Fixture naming SHOULD include test id prefixes (for example:
 `LUA-API-003-wrong-arg-type.lua`).

@@ -63,10 +63,9 @@ Derived planning formula:
 | --- | --- | --- | --- |
 | `adapter_tick_budget_us` | `6_000` | microseconds/tick | cumulative adapter budget per authoritative tick |
 | `validate_hook_budget_us` | `200` | microseconds/call | soft budget |
-| `resolve_external_hook_budget_us` | `1_000` | microseconds/call | soft budget |
-| `resolve_internal_hook_budget_us` | `1_000` | microseconds/call | soft budget |
+| `dispatch_stage_budget_us` | `1_500` | microseconds/call | soft budget per stage execution |
 | `spawn_hook_budget_us` | `4_000` | microseconds/call | soft budget (off hot path) |
-| `hot_hook_timeout_us` | `2_000` | microseconds/call | hard timeout for validate/external/internal hooks |
+| `hot_hook_timeout_us` | `2_000` | microseconds/call | hard timeout for validate/dispatch hooks |
 | `spawn_hook_timeout_us` | `10_000` | microseconds/call | hard timeout for spawn hook |
 | `adapter_fault_window_ticks` | `300` | ticks | rolling fault window (5s at 60Hz) |
 | `adapter_fault_threshold` | `32` | faults/window | containment entry threshold |

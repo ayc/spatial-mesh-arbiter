@@ -169,14 +169,14 @@ These are not specs — they're test cases for validating that the compiler pipe
 ### Lost Ark Sweep
 117. [SK-117: Stagger Bar](sk-117-stagger-bar.md) — Secondary breakable bar that triggers vulnerability state on depletion
 118. [SK-118: Partial CC Immunity](sk-118-partial-cc-immunity.md) — Per-CC-type immunity flags (push immune but not stun immune)
-119. [SK-119: Counter Window](sk-119-counter-window.md) — Enemy vulnerability window that rewards player timing with a counter-classified ability
+119. [SK-119: Counter Window](sk-119-counter-window.md) — Enemy vulnerability window that rewards player timing with an ability that can counter a vulnerability window
 
 ### Guild Wars 2 Sweep
 120. [SK-120: Combo Field Matrix](sk-120-combo-field-matrix.md) — Generalized field × finisher = emergent effect, cross-player combo system
 121. [SK-121: Downed State](sk-121-downed-state.md) — Multi-phase HP: Full → Downed (new HP pool + abilities) → Dead, with rally/finish mechanics
 
 ### Baldur's Gate / D&D Sweep
-122. [SK-122: Counterspell](sk-122-counterspell.md) — Cancel an enemy's ability mid-cast before it resolves
+122. [SK-122: Counterspell](sk-122-counterspell.md) — Cancel a counterspellable enemy ability mid-cast before it resolves
 123. [SK-123: Concentration](sk-123-concentration.md) — Exclusive maintained effect with damage-triggered probabilistic break
 
 ### Classic MMO Sweep (EQ2 / LOTRO / Warhammer Online)
@@ -305,7 +305,7 @@ These are not specs — they're test cases for validating that the compiler pipe
 | SK-116 Charge-Finisher | Active cast (generators + spenders) | Shared cross-ability charge pool, typed charges, composition-based finisher scaling |
 | SK-117 Stagger Bar | Passive (combat system) | Secondary breakable bar, parallel stagger damage, depletion triggers vulnerability state |
 | SK-118 Partial CC Immunity | Passive (during casts) | Per-CC-category immunity flags, granular CC resistance, animation-bound immunity |
-| SK-119 Counter Window | Boss mechanic (PvE) | Enemy vulnerability broadcast, counter-classified abilities, timing-based skill check |
+| SK-119 Counter Window | Boss mechanic (PvE) | Enemy vulnerability broadcast, abilities that can counter a vulnerability window, timing-based skill check |
 | SK-120 Combo Field Matrix | Systemic (cross-player) | Field type × finisher type lookup matrix, emergent combo effects, cross-player detection |
 | SK-121 Downed State | Entity lifecycle | Three-phase HP (Alive → Downed → Dead), separate downed HP pool, rally/finish channels |
 | SK-122 Counterspell | Reactive (during enemy cast) | Mid-cast ability cancellation, casting state detection, prevents resolution entirely |
