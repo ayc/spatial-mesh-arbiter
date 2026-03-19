@@ -1,0 +1,400 @@
+2. Enemy is swallowed — their entity is removed from the game world entirely
+3. For 4 seconds: enemy has no position, cannot be targeted, cannot act, takes no damage, is invisible
+4. The caster can move freely while carrying the consumed entity
+5. The caster takes a movement speed penalty while carrying (e.g., -20%)
+6. After 4 seconds: enemy is spit out at the caster's current position
+7. The spit-out enemy is briefly stunned (0.5s)
+8. The caster can optionally reactivate early to spit out sooner
+9. Visual: gulp animation, caster's model shows distended belly, spit-out with stun effect
+1. Snowball launches in the cast direction at moderate speed
+2. As the snowball travels, its visual size and collision radius grow (e.g., starts at radius 1, grows to radius 4 at max range)
+3. Damage scales with distance traveled (further = more damage)
+4. The first enemy hit is pushed along with the snowball (captured, similar to SK-34 Charge)
+5. Subsequent enemies hit are also pushed — the snowball accumulates entities
+6. If the snowball hits a wall: detonates, dealing damage to all pushed enemies and enemies in the impact zone
+7. If no wall is hit: snowball expires at max range, releasing pushed enemies
+8. Visual: growing snowball, enemies visibly stuck to the front, explosion on wall impact
+1. Punch the target — they are launched backward (away from the caster) at high speed
+2. The launched enemy travels in a straight line
+3. Any enemies the launched body passes through take X damage and are briefly knocked aside (mini-stun, 0.25s)
+4. If the launched enemy hits a wall: they take Y bonus impact damage and stop
+5. If no wall is hit: they travel max distance and stop
+6. The launched enemy takes base damage from the punch + optional wall impact damage
+7. The launched enemy is CC'd during flight (cannot act)
+8. Visual: haymaker punch, enemy ragdolls through the air, bowling-pin effect on pass-through targets
+1. Activate — caster transforms (instant or brief animation)
+2. Stats change: gain bonus max HP (and current HP increases proportionally), bonus damage, bonus armor
+3. Ability bar changes: 3-4 abilities are replaced with alternate-form abilities
+4. Basic attack may change (different damage, range, speed)
+5. Existing buffs/debuffs persist through transformation
+6. After 15 seconds: revert to original form, original stats, original abilities
+7. If bonus HP exceeded original max HP: current HP is capped at original max HP on revert (no over-heal)
+8. Cooldown begins after revert
+9. Visual: dramatic transformation animation, different model, visual revert
+1. Cast on enemy — cocoon wraps around them instantly
+2. Cocooned entity: cannot move, attack, cast, or be targeted by abilities
+3. Cocooned entity: takes no damage from any source (invulnerable while cocooned)
+4. A Cocoon object appears at the entity's position — it has its own HP pool (e.g., 600 HP)
+5. The enemy's allies can attack the Cocoon object to destroy it and free their teammate
+6. If Cocoon HP reaches 0: cocoon breaks, enemy is freed immediately
+7. If 8 seconds pass: cocoon dissolves, enemy is freed
+8. On release: enemy is briefly slowed (0.5s, 30%) as they shake off the cocoon
+9. DoT timers on the cocooned entity: paused (they don't lose buff/debuff duration while cocooned)
+10. Visual: amber cocoon shell, cracks as it takes damage, shatters on break
+1. Cast — oil zone appears at target position (circular, fixed radius)
+2. **Oil phase:** Enemies inside are slowed by 40%. No damage. Oil persists until ignited or expired (8 seconds).
+3. Reactivate — oil ignites, transforming into fire
+4. **Fire phase:** Enemies inside take X fire damage per second. Slow is removed (fire doesn't slow). Fire lasts 4 seconds.
+5. If not reactivated: oil evaporates after 8 seconds with no fire phase
+6. Oil can also be ignited by any fire ability passing through it (SK-30 Trail of Fire, fire projectiles)
+7. Visual: dark oil pool → reactivation → blazing fire
+1. Bunker is placed at target position (has HP, is destructible, blocks pathing)
+2. Allies within interact range can enter the bunker (up to 4 occupants)
+3. While inside: occupants are untargetable and take no direct damage
+4. While inside: occupants can use their auto-attacks through firing ports (reduced range)
+5. While inside: occupants cannot move or use most abilities (only basic attacks)
+6. Occupants can exit the bunker voluntarily at any time
+7. Bunker has a duration (10 seconds) or HP pool — whichever runs out first
+8. When bunker is destroyed or expires: all occupants are ejected at the bunker's position
+9. Damage dealt to the bunker is split across its HP pool — occupants take no damage
+10. Visual: military bunker structure, visible firing ports, explosion on destruction
+1. Activate — caster disappears, three spirits spawn at caster's position
+2. Each spirit has 1/3 of the caster's max HP
+3. Each spirit has one unique ability (Storm: ranged AoE, Earth: AoE slow, Fire: dash + damage)
+4. Player controls one spirit at a time — movement and abilities
+5. The other two spirits follow the controlled one (AI leash behavior)
+6. Press swap key to rotate control: Storm → Earth → Fire → Storm
+7. Spirits can be killed independently — dead spirits are gone
+8. If all three die: caster dies (real death)
+9. Duration expires or reactivate: spirits merge, caster reforms at the controlled spirit's position
+10. Caster's HP on reform = sum of surviving spirits' remaining HP
+11. Visual: three distinct elemental spirits, active one highlighted, merge effect on reform
+1. Cast — fire waves launch outward from the caster in multiple directions (e.g., 8 waves in a radial pattern)
+2. Waves travel outward at constant speed, damaging enemies they pass through
+3. At max range: waves stop, reverse direction, and travel back toward the caster
+4. On the return trip: waves damage enemies again (double-hit possible)
+5. Waves disappear when they reach the caster's CURRENT position (which may have moved)
+6. Each enemy can be hit once per direction (once on outward, once on return — max 2 hits)
+7. Visual: fire waves rippling outward then collapsing back inward
+1. Channel begins — beam fires from caster in the initial direction
+2. Beam is a continuous line from the caster extending to max range (e.g., 12 meters)
+3. All enemies in the beam's path take X damage per second (continuous, not pulsed)
+4. Caster can slowly rotate the beam direction (e.g., max 90° per second turn rate)
+5. Caster cannot move while channeling (movement locked)
+6. Channel can be interrupted by stuns, silences, displacement
+7. After 4 seconds: channel ends, beam disappears
+8. Visual: bright lightning beam, scorch marks along the swept path
+1. Channel begins — all enemies within radius are stunned
+2. Stun persists for as long as the channel continues (up to 4 seconds)
+3. Enemies who enter the radius mid-channel are stunned on entry
+4. Enemies who are displaced OUT of the radius (by an ally's ability) are freed
+5. If the caster is interrupted (stun, silence, displacement): channel ends, ALL stuns end immediately
+6. Caster cannot move while channeling
+7. The caster is vulnerable during the channel — enemies outside the radius can interrupt
+8. Visual: rock concert stage effect, affected enemies headbanging
+1. Cast — all enemies within radius are taunted for 1.5 seconds
+2. Taunted enemies' auto-attacks are redirected to the taunter
+3. Taunted enemies CAN still move (they can walk away, walk toward, etc.)
+4. Taunted enemies CAN still cast abilities (they're not silenced)
+5. Taunted enemies CANNOT choose a different auto-attack target — all auto-attacks must target the taunter
+6. If the taunter dies during taunt: taunt breaks immediately
+7. If the taunted entity moves out of auto-attack range: they stop auto-attacking (but taunt persists — if they move back in range, they auto-attack the taunter again)
+8. Duration reduced by Tenacity
+9. Subject to Diminishing Returns (SK-28)
+10. Cleansable by SK-15 Purify
+11. Visual: rage/aggro effect on taunted enemies, "Taunted" indicator pointing to the taunter
+1. Cast on ally — caster attaches to the host (global range, no distance limit)
+2. Caster's body becomes immobile and vulnerable at its current position
+3. While attached: caster's ability bar changes to symbiote abilities (Spike Burst, Carapace, Stab)
+4. All symbiote abilities fire FROM the host's position, not the caster's position
+5. The host can act normally — the symbiote doesn't restrict them
+6. The caster sees the host's surroundings (camera follows the host)
+7. Detach: caster returns to controlling their body at its original position
+8. If the host dies: caster is forcibly detached
+9. If the caster's body is killed while symbioted: caster dies (body is vulnerable)
+10. Visual: symbiote hat on the host, spike effects emanating from the host
+1. Cast on ally — a clone of the targeted ally spawns at the caster's position
+2. The caster's body disappears (stored, like SK-54 Entity Consumption on self)
+3. The player controls the clone as if it were their own hero
+4. Clone has 75% of the original hero's max HP and offensive stats
+5. Clone has all of the original hero's basic abilities (Q, W, E) but NOT their ultimate (R)
+6. Clone abilities use the clone's reduced stats
+7. After 20 seconds: clone despawns, caster's body reappears at the clone's position
+8. If clone dies: caster's body reappears at the clone's death position
+9. The original hero is NOT affected — they keep their abilities and continue playing normally
+10. Visual: ghostly/translucent version of the cloned hero
+1. Player starts the game with 3 entities, each at the spawn point
+2. Each entity has its own HP pool, movement speed, and one unique ability
+3. Player can select one entity: movement and ability commands apply to that entity only
+4. Player can select all three: movement commands move all three (formation/group movement)
+5. Entities can be split across the map — sent to different locations independently
+6. Each entity can die independently. Dead entities respawn after a timer.
+7. The player is only eliminated when all three are dead simultaneously
+8. If one entity levels up or gains a buff, only that entity benefits (no sharing)
+9. Visual: three distinct characters with individual health bars and selection indicators
+1. First cast — Portal A appears at the caster's position
+2. Short delay (1-2 seconds), then second cast — Portal B appears at the caster's new position
+3. Both portals are linked and active for 9 seconds
+4. Any ally (including the caster) can right-click either portal to teleport to the other
+5. Teleportation is instant — same as SK-35 Blink Strike (position snap)
+6. Portals are bidirectional — A→B and B→A
+7. Brief cooldown per user after teleporting (1 second — can't spam back and forth)
+8. Enemies cannot use the portals
+9. Portals are visible to enemies but not interactable by them
+10. Visual: swirling magical doorways, whoosh effect on teleport
+1. Cast — shield is applied to the target (e.g., 400 HP shield, 3 second duration)
+2. Shield absorbs incoming damage normally
+3. For each point of damage absorbed: the CASTER gains 1 Energy (secondary resource, max 100)
+4. Energy increases the caster's damage output: each point of Energy = +0.5% damage bonus
+5. At max Energy (100): caster deals +50% bonus damage
+6. Energy decays over time (e.g., 3 Energy per second) if no new damage is absorbed
+7. Shield on ally: damage absorbed by the ALLY's shield gives Energy to the CASTER
+8. Visual: blue-white shield, caster's weapon glows brighter as Energy increases
+1. Cast on enemy — bomb attaches to the target
+2. The bomb is visible on the target (ticking indicator)
+3. The bomb moves with the target — wherever they go, the bomb follows
+4. After 2 seconds: bomb detonates at the target's current position
+5. AoE damage: the target takes full damage, nearby enemies take AoE damage
+6. The target cannot remove the bomb (not cleansable? Design choice)
+7. Visual: glowing bomb attached to the target, countdown timer, explosion on detonation
+1. First cast — Nydus Worm A spawns at target position (takes 2 seconds to emerge)
+2. Subsequent casts — additional worms (B, C, D...) spawn at target positions
+3. Any ally interacts with a worm: UI shows all other worms in the network, ally chooses destination
+4. Teleport to chosen worm is instant (after a brief channel/enter animation, 0.5s)
+5. Each worm has HP and can be destroyed by enemies
+6. Destroying a worm removes it from the network — other worms still function
+7. No limit on worm count (bounded by cooldown and game duration)
+8. Worms persist indefinitely until destroyed
+9. Worms are visible to enemies (can be scouted and killed)
+10. Visual: organic worm structures, entry/exit animation, tunnel effect during travel
+1. Activate — gain Death Immunity for 4 seconds
+2. All incoming damage is applied normally (not reduced, not absorbed)
+3. On-hit procs trigger normally (SK-09 Chain Lightning, SK-22 Reflection, etc.)
+4. HP can decrease all the way to 1, but NEVER to 0
+5. If incoming damage would reduce HP below 1: HP is set to 1 instead
+6. Healing still works normally (can recover above 1 during the window)
+7. When the duration expires: you're at whatever HP you have (potentially 1)
+8. No special effect on expiry — you're just vulnerable again
+9. Visual: fiery rage aura, HP bar flashes at low HP, "UNKILLABLE" indicator
+1. Fire skillshot in the cast direction
+2. Projectile travels, checks for first-hit collision (like SK-43 Drag)
+3. If HIT: deal damage to the enemy + caster dashes forward (e.g., 3 meters in the cast direction)
+4. If MISS (no enemy hit before max range): projectile expires, no dash, ability goes on cooldown
+5. The dash is automatic — no second input needed
+6. The dash is instant (or very fast — near-instant displacement)
+7. The ability's cooldown is reduced on hit (e.g., 6s on hit, 12s on miss)
+8. Visual: dark projectile, on-hit: caster slides forward with a flourish
+1. Cast — zone appears at target position (circular, fixed radius)
+2. First pulse: deal damage to all enemies inside
+3. If pulse hit at least 1 enemy: schedule next pulse in 1 second
+4. If pulse hit 0 enemies: zone ends immediately
+5. Each subsequent pulse follows the same rule: hit someone → continue, hit nobody → end
+6. No maximum duration (bounded only by enemy availability)
+7. Enemies can walk in and out — the zone only checks occupancy on pulse ticks
+8. Visual: dark maw chomping every second, fades when no targets remain
+1. Place Pylon — creates a power field (visible circle on the ground)
+2. Pylon has HP, can be destroyed by enemies
+3. Place Turret — can ONLY be placed within a pylon's power field radius
+4. If turret placement target is outside all power fields: placement fails (error message)
+5. Turret auto-attacks nearby enemies while in a powered field
+6. If the pylon powering a turret is destroyed AND no other pylon's field covers the turret: turret deactivates (stops attacking, loses shield, but doesn't die immediately — can be re-powered by placing a new pylon)
+7. Multiple pylons' fields can overlap — turrets in overlap zones are safe if any one pylon survives
+8. Visual: blue power field circles, turrets glow when powered, dim when depowered
+1. One entity exists on the map with a shared HP pool
+2. Player A controls movement — WASD/click-to-move
+3. Player A has tank abilities (stun, knockback, charge)
+4. Player B has damage abilities (skillshots, AoE, channel)
+5. Both players can use abilities simultaneously and independently
+6. Both players see through the same entity's position (shared camera)
+7. If the entity dies, both players die
+8. Both players respawn together at the same time
+1. Cast — all enemies within radius are feared for 2 seconds
+2. Feared enemies automatically run directly away from the caster's position
+3. Feared enemies cannot move voluntarily, attack, or cast (full disable + forced movement)
+4. The flee direction is calculated relative to the caster's position at the moment of application (not updated per-tick)
+5. If a feared enemy hits a wall, they stop moving but remain feared (can't act)
+6. Duration reduced by Tenacity
+7. Subject to Diminishing Returns (SK-28) — hard CC category
+8. Cleansable by SK-15 Purify
+9. Visual: purple terror effect, enemy runs with panic animation
+1. Press and hold ability button — charging begins
+2. Charge bar fills over 2 seconds
+3. While charging: caster moves at 50% speed, cannot use other abilities
+4. At any point: release to fire at current charge level
+5. Minimum charge (instant release): low damage, short range
+6. Maximum charge (2 seconds): high damage, long range
+7. Charge level scales linearly: damage and range interpolate between min and max
+8. If held beyond max charge: stays at max, doesn't overcharge
+9. Visual: bow draw animation intensifies, glowing effect increases with charge
+1. Arrow fires in the cast direction
+2. If the arrow hits static geometry (wall): it reflects off the surface at the angle of incidence
+3. The reflected arrow continues with the same speed
+4. Each bounce can hit enemies in its new path
+5. Maximum 3 bounces — after the 3rd bounce, the arrow expires
+6. If the arrow hits an enemy at any point: it deals damage and expires (consumes on hit)
+7. Visual: arrow with trail, visible bounce off walls, potentially hitting enemies behind cover
+1. Activate — bomb spawns at caster's position
+2. Caster becomes immobile and channeling (vulnerable, can be interrupted)
+3. Movement input controls the bomb, not the caster
+4. The bomb moves at fixed speed, can be steered freely
+5. The bomb has HP and can be destroyed by enemies
+6. Reactivate or timeout: bomb detonates, AoE damage at bomb's position
+7. If the bomb is destroyed: no detonation (reduced cooldown)
+8. If the caster is interrupted (stunned): bomb detonates immediately at current position
+9. Visual: rolling bomb entity, caster in trance state
+1. Activate — enter deflect stance for 1.25 seconds
+2. Protected: take no damage from any source
+3. Projectile hits during deflect: projectile is caught and returned to the attacker
+4. Returned projectile deals the original damage to the attacker (using attacker's own offensive stats)
+5. Non-projectile damage: blocked (Protected) but not returned
+6. Melee attacks: blocked, not returned
+7. AoE zone damage: blocked, not returned
+8. The deflect stance does not prevent CC (stun can interrupt the deflect)
+9. Visual: swirling blade animation, caught projectiles visibly redirected
+1. Activate trait — gain "Empowered" buff
+2. Next Q cast while empowered: enhanced Q (e.g., larger AoE, extra damage)
+3. OR next W cast while empowered: enhanced W (e.g., spreads to additional targets)
+4. OR next E cast while empowered: enhanced E (e.g., stuns instead of slows)
+5. The empowerment is consumed on the first ability cast
+6. Only ONE ability is empowered per trait activation
+7. If 6 seconds pass without casting: empowerment expires (wasted)
+8. Trait has its own cooldown separate from Q/W/E
+9. Visual: glowing hands indicator, enhanced ability has flashier visual effect
+1. Cast on enemy — their current position is stored, countdown begins (3 seconds)
+2. The enemy sees a visible countdown indicator and a marker at their stored position
+3. The enemy can move freely, use abilities, fight normally during the countdown
+4. After 3 seconds: the enemy is FORCIBLY teleported to the stored position (instant snap)
+5. The teleport cannot be avoided by normal movement (you're pulled back regardless)
+6. SK-51 Unstoppable can prevent the teleport (it's forced displacement — a form of CC)
+7. The teleport deals no damage (purely repositioning)
+8. Visual: hourglass marker at stored position, countdown clock on the enemy, time-warp effect on teleport
+1. Cast at target position — ring indicator appears (brief delay before activation)
+2. After 0.5 second delay: ring activates
+3. Enemies ON the ring (within the band between inner and outer radius) are hit: damage + root
+4. Enemies INSIDE the ring (within inner radius) are NOT hit — safe zone
+5. Enemies OUTSIDE the ring (beyond outer radius) are NOT hit
+6. One-time activation (not a persistent zone — single check on activation)
+7. Visual: frost ring on the ground, enemies caught on the edge are frozen
+1. Activate — decoy spawns at caster position (or mirrored position)
+2. The decoy looks IDENTICAL to the caster from the enemy's perspective
+3. The decoy's health bar appears full (fake — it actually has 1 HP)
+4. The decoy moves in a pattern (continues last movement direction, or mirrors caster movement)
+5. The decoy can perform fake ability animations (visual only, no gameplay effect)
+6. Any damage dealt to the decoy kills it instantly (reveals it was fake)
+7. The decoy persists for 5 seconds or until killed
+8. Allies can see which is the real one (slight visual indicator for friendlies)
+9. Visual: identical to caster for enemies, subtle shimmer for allies
+1. Activate — enter counter stance for 1 second
+2. During the stance: caster can't move or act (locked in place, vulnerable)
+3. If hit by ANY damage during the stance: counter TRIGGERS
+4. On trigger: caster becomes Protected for 0.75 seconds, AoE damage to all nearby enemies
+5. If NOT hit during the 1-second window: stance expires, nothing happens, full cooldown
+6. The trigger check is binary — any damage source triggers it (melee, ranged, DoT tick, AoE)
+7. Visual: defensive pose during stance, flash of energy on trigger, underwhelming fizzle on expiry
+1. Cast on enemy at melee range — a post is placed at the target's current position
+2. Chain connects the target to the post
+3. The target CAN move freely within the chain's radius (e.g., 3 meters)
+4. The target CAN attack, cast abilities, and use items normally
+5. If the target attempts to move beyond the chain radius: movement is clamped to the edge
+6. The target CANNOT dash, blink, or teleport beyond the radius (forced movement is also constrained)
+7. The chain persists for 3 seconds
+8. The post has no HP and cannot be destroyed (in base version)
+9. Duration reduced by Tenacity
+10. Subject to Diminishing Returns (SK-28) — soft CC category
+11. Cleansable by SK-15 Purify
+12. Visual: metal post + chain, chain pulls taut when target reaches the edge
+1. Place egg at target position — egg is hidden from enemies, visible to allies
+2. Only one egg can exist at a time (placing a new one despawns the old)
+3. When the caster dies: respawn at egg position after 5 seconds (instead of normal 30+ seconds)
+4. On respawn: egg is consumed (must place a new one)
+5. If the egg is destroyed by enemies before death: normal respawn applies
+6. Enemies can find the egg by walking near it (revealed within close proximity?)
+7. Egg has low HP (1-2 hits to destroy)
+8. Visual: small egg (allies see it clearly, enemies can't see it unless very close)
+1. Cast on enemy — caster attaches and begins orbiting around the target
+2. The caster physically moves in a circle around the target at a fixed radius (e.g., 3 meters)
+3. Orbit speed is constant (e.g., 1 revolution per second)
+4. Enemies in the orbital path take damage as the caster passes through them
+5. The orbit anchor (target enemy) can still move — the orbit center moves with them
+6. After ~2 revolutions: the player can press the detach key
+7. On detach: caster slams to the ground at the current orbital position, AoE damage + stun around the landing point
+8. If the player doesn't detach: orbit continues for up to 4 revolutions then auto-detaches
+9. If the orbit anchor dies: caster auto-detaches at current position
+10. Visual: grappling hook swing, trail of energy, slam effect on detach
+1. Cast at target position — visible indicator appears (0.5s delay before activation)
+2. After delay: ALL entities in the area enter stasis (friend AND foe, including the caster if inside)
+3. Stasis: can't act, invulnerable, untargetable — effectively frozen in time
+4. Duration: 5 seconds (not reduced by Tenacity — it's stasis, not CC?)
+5. When stasis ends: all affected entities resume exactly where they were
+6. Entities OUTSIDE the area when it activates are NOT affected (snapshot at activation)
+7. Entities cannot enter the stasis zone after activation (it's a one-time effect, not a persistent zone)
+8. The stasis is NOT cleansable (cannot be removed early by any means)
+9. Visual: purple crystal prison effect, frozen entities, time-stopped area
+1. Grenade lands at target position — AoE affects all entities in radius
+2. Enemies: take damage + receive "Healing Blocked" debuff (100% healing reduction, 2 seconds)
+3. Allies: receive heal + receive "Healing Amplified" buff (25% bonus healing, 2 seconds)
+4. While Healing Blocked: any heal on the target is reduced to 0 (DoT heals, direct heals, passive heals — all blocked)
+5. While Healing Amplified: any heal on the target is increased by 25%
+6. Both effects are cleansable by SK-15 Purify
+7. Visual: purple anti-heal indicator on enemies, green amplification glow on allies
+1. Cast on ally — they receive the "Divine Palm" buff for 3 seconds
+2. If the ally's HP would reach 0 during the buff: death is PREVENTED
+3. The ally is healed to 100% of their max HP instantly
+4. The buff is consumed (one-time use)
+5. If the buff expires without triggering: nothing happens, cooldown was spent
+6. The prevention is absolute — no damage amount can overcome it (even 50,000 damage)
+7. Visual: golden palm icon on the ally, dramatic full-heal burst if triggered
+1. Cast — potion appears at target position on the ground
+2. Potion is visible to all players (allies see heal amount, enemies see the potion exists)
+3. First ally to walk within pickup radius collects it → healed for X HP
+4. The collector chooses WHEN to pick it up (by walking over it)
+5. Potion persists for 20 seconds if not collected
+6. Maximum 5 potions on the ground simultaneously (oldest despawns if 6th is placed)
+7. Potions can be placed pre-fight (set up healing stations)
+8. Enemies CANNOT pick up or destroy potions (in base version)
+9. Visual: glowing flask on the ground, absorption effect on pickup
+1. Over time, I've applied Healing Pathogen to 4 allies and Weighted Pustule to 3 enemies
+2. Press D — ALL 7 effects detonate simultaneously
+3. Each Healing Pathogen: burst-heals the ally for a large amount, then the HoT is removed
+4. Each Weighted Pustule: burst-damages + roots the enemy for 1.5 seconds, then the slow is removed
+5. Effects that were about to expire still detonate (maximum value extraction)
+6. After detonation: all effects are consumed — targets are clean
+7. Visual: simultaneous burst effects on every affected target across the battlefield
+1. HP reaches 0 — entity "dies" but instead of despawning, enters ghost form
+2. Ghost form: can't move (fixed at death position), can't attack, can't be targeted
+3. Ghost form: CAN cast healing abilities on allies (reduced selection)
+4. Ghost form lasts 8 seconds
+5. After 8 seconds: ghost fades, entity is truly removed, normal respawn timer begins
+6. Ghost form has no HP (cannot be "killed again")
+7. The death event IS triggered (kill credit given to the killer) — ghost is a post-death bonus
+8. Visual: translucent/spectral appearance, restricted ability bar
+1. First cast: costs 30 mana. Gain 1 stack of Desperation.
+2. Second cast (within decay window): costs 45 mana (30 × 1.5). Gain 2nd stack.
+3. Third cast (within decay window): costs 67 mana (30 × 1.5 × 1.5). Gain 3rd stack.
+4. Each stack increases the cost multiplier by 50%
+5. Stacks decay one at a time every 4 seconds of not casting
+6. At 0 stacks: cost returns to base (30 mana)
+7. No maximum stack count (but mana runs out naturally)
+8. Visual: increasing desperation/strain indicator, mana bar draining faster
+1. Summon dropship at caster's position — dropship entity appears
+2. Allies walk near the dropship and interact to enter (like SK-60 Bunker entry)
+3. Up to 4 allies can enter (+ caster = 5 total occupants)
+4. Caster selects a destination on the map
+5. Dropship lifts off and flies to the destination (travel time proportional to distance)
+6. During flight: dropship is visible and targetable. It has HP.
+7. During flight: occupants are untargetable and cannot act
+8. On arrival: dropship lands, all occupants exit at the destination position
+9. If dropship is destroyed mid-flight: all occupants are ejected at the crash position with a brief stun
+10. Visual: military dropship, flight path line on minimap, landing effect
+1. Cast on enemy hero — beam locks onto them
+2. The beam follows the target's position every tick
+3. The target takes X damage per second while the beam is on them
+4. All enemies within AoE radius of the target ALSO take damage (collateral)
+5. The beam moves at a speed slightly slower than normal movement (target can kite it)
+6. If the target moves fast enough, the beam falls behind — dealing damage at the beam's position, not the target's
+7. The beam persists for 8 seconds regardless of line of sight or distance
+8. The caster can act freely after casting (fire and forget)
+9. If the target dies, the beam dissipates early
+10. Visual: golden beam from the sky, scorched ground, follows the target
+1. Permanent: always immune to all CC (stuns, roots, silences, slows, fear, taunt, displacement, sleep — everything)
+2. Permanent: allies cannot target me with any ability (heals, shields, buffs, cleanses all fail)

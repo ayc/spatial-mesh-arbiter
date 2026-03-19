@@ -4,6 +4,8 @@ This document defines required compiler conformance tests for:
 
 1. `01-1-lua-subset-profile.md`
 2. `01-2-lua-whitelisted-api.md`
+3. `03-compiler-pipeline.md`
+4. `03-1-compiler-ir-specification.md`
 
 Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -39,8 +41,10 @@ Test harness MUST support:
 4. `CONTEXT`: `edge`/`arbiter`/`meta` policy enforcement.
 5. `DETERMINISM`: nondeterminism rejection.
 6. `BOUNDS`: boundedness and budget enforcement.
-7. `IR_EQUIV`: canonicalization and output stability.
-8. `DIAG`: deterministic diagnostic quality.
+7. `LOWERING`: primitive/directive lowering and guard extraction.
+8. `BINDING`: binding-table allocation and reference resolution.
+9. `IR_EQUIV`: canonicalization and output stability.
+10. `DIAG`: deterministic diagnostic quality.
 
 ## 5. Required Test Cases
 
@@ -124,10 +128,24 @@ Test harness MUST support:
 | `LUA-BOUNDS-020` | `BOUNDS` | `REQ` | raid mutations exceed `max_raid_mutations_per_rule` | compile fails | `LUA_API_RAID_BUDGET_EXCEEDED` |
 | `LUA-BOUNDS-021` | `BOUNDS` | `REQ` | pvp queue ops exceed `max_pvp_queue_ops_per_rule` | compile fails | `LUA_API_PVP_BUDGET_EXCEEDED` |
 | `LUA-BOUNDS-022` | `BOUNDS` | `REQ` | pvp result reports exceed `max_pvp_result_reports_per_rule` | compile fails | `LUA_API_PVP_BUDGET_EXCEEDED` |
+| `LUA-BOUNDS-023` | `BOUNDS` | `REQ` | lowered ability exceeds `MAX_INSTRUCTIONS_PER_ABILITY` | compile fails | `IR_INSTRUCTION_LIMIT_EXCEEDED` |
+| `LUA-BOUNDS-024` | `BOUNDS` | `REQ` | reactive hook lowering would require same-tick re-entry | compile fails | `IR_REACTIVE_CASCADE_UNBOUNDED` |
+| `LUA-BOUNDS-025` | `BOUNDS` | `REQ` | timer payload lowering would require current-tick execution instead of next-tick defer | compile fails | `IR_NEXT_TICK_DEFER_REQUIRED` |
+| `LUA-LOWER-001` | `LOWERING` | `REQ` | `if target.hp < threshold then` guarded effect | compile succeeds; normalized IR contains `GuardExpr::HpBelow` and no runtime Lua control-flow op | n/a |
+| `LUA-LOWER-002` | `LOWERING` | `REQ` | guard pattern cannot map to `GuardExpr` | compile fails | `IR_GUARD_UNSUPPORTED_PATTERN` |
+| `LUA-LOWER-003` | `LOWERING` | `REQ` | semantically valid helper has no primitive/directive lowering rule | compile fails | `IR_LOWERING_UNMAPPABLE_CONSTRUCT` |
+| `LUA-LOWER-004` | `LOWERING` | `REQ` | cross-cutting primitive use (`P-26`/`P-32` style) | compile succeeds; normalized IR emits `IRDirective`, not stage-specific `IRInstruction` | n/a |
+| `LUA-LOWER-005` | `LOWERING` | `REQ` | landing-point AoE with requested target position beyond max throw distance | compile succeeds; normalized IR centers AoE query on resolved `landing_pos` binding in `PostKinematic`, not raw `RequestedTargetPosition` in `TargetResolution` | n/a |
+| `LUA-BIND-001` | `BINDING` | `REQ` | one query result reused by two downstream ops | compile succeeds; normalized IR reuses one binding slot deterministically | n/a |
+| `LUA-BIND-002` | `BINDING` | `REQ` | symbolic temp referenced but never defined after lowering | compile fails | `BINDING_UNRESOLVED_REFERENCE` |
+| `LUA-BIND-003` | `BINDING` | `REQ` | same symbolic temp inferred as incompatible types across uses | compile fails | `BINDING_TYPE_CONFLICT` |
+| `LUA-BIND-004` | `BINDING` | `REQ` | lowered ability requires more than `MAX_BINDINGS_PER_ABILITY` slots | compile fails | `BINDING_TABLE_OVERFLOW` |
 | `LUA-IR-001` | `IR_EQUIV` | `REQ` | same Lua source compiled twice | identical IR snapshot hash | n/a |
 | `LUA-IR-002` | `IR_EQUIV` | `REQ` | semantically equivalent source with reordered declarations | identical normalized IR snapshot hash | n/a |
 | `LUA-IR-003` | `IR_EQUIV` | `REQ` | equivalent Lua and YAML rule definitions | identical normalized IR snapshot hash | n/a |
 | `LUA-IR-004` | `IR_EQUIV` | `REQ` | fixed literals in variant textual forms | identical normalized numeric IR values | n/a |
+| `LUA-IR-005` | `IR_EQUIV` | `REQ` | equivalent source with different local temp names | identical normalized IR snapshot hash | n/a |
+| `LUA-IR-006` | `IR_EQUIV` | `REQ` | equivalent guarded forms (`elseif` vs nested `if`) | identical normalized `GuardExpr` tree and IR snapshot hash | n/a |
 | `LUA-DIAG-001` | `DIAG` | `REQ` | single deterministic violation | one primary diagnostic with stable code | `LUA_PROFILE_DETERMINISM_VIOLATION` |
 | `LUA-DIAG-002` | `DIAG` | `REQ` | multiple violations in one file | stable ordering of primary/secondary diagnostics | deterministic diagnostic set |
 | `LUA-DIAG-003` | `DIAG` | `REQ` | failed compile | diagnostics include source span and symbol/rule id | deterministic diagnostic shape |
@@ -139,6 +157,7 @@ For every `REQ` success case:
 1. compile artifact hash MUST match across at least two repeated runs
 2. emitted IR field ordering MUST be canonical
 3. numeric normalization output MUST be identical
+4. directive ordering and binding-slot numbering MUST be canonical
 
 For every `REQ` failure case:
 
@@ -155,6 +174,8 @@ Implementations MUST maintain at least:
 2. `fixtures/lua/fail/` for required negative tests
 3. `fixtures/lua/equivalence/` for IR-equivalence tests
 4. `fixtures/lua/profile-bounds/` for budget/cap scenarios
+5. `fixtures/lua/lowering/` for guard/directive lowering tests
+6. `fixtures/lua/binding/` for binding allocation and overflow tests
 
 Fixture naming SHOULD include test id prefixes (for example:
 `LUA-API-003-wrong-arg-type.lua`).

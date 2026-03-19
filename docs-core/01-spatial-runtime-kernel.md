@@ -35,6 +35,7 @@ The kernel owns:
 2. No unbounded queues in runtime mutation path.
 3. No non-deterministic iteration order for authoritative mutation collections.
 4. Runtime arithmetic and conversion rules must be consistent across hosts.
+5. A runtime node MUST NOT accept entity authority until it has loaded and activated a valid game content version. Content loading is asynchronous and MUST NOT block the tick path; activation occurs atomically at a frame boundary.
 
 ## 6. Quantitative Safety Profile (Baseline)
 

@@ -9,10 +9,9 @@ Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
 1. This contract is normative for symbol-level API admission in Lua game source.
 2. `01-1-lua-subset-profile.md` defines syntax/features policy.
-3. This document defines which symbols are legal, where they are legal, and how
-   they are validated.
-4. `08-sdk-catalog-wishlist.md` is roadmap-level and non-binding when conflicts
-   exist.
+3. This document defines which symbols are legal, where they are legal, and how they are validated.
+4. **Architectural Note:** The primary authoring surface for most combat abilities is the declarative YAML schema defined in `02-schema-and-validation.md`. The Lua `MUT` symbols in this document mirror those YAML effect types, providing a procedural fallback for complex, highly conditional logic that cannot be expressed purely in YAML.
+5. `08-sdk-catalog-wishlist.md` is roadmap-level and non-binding when conflicts exist.
 
 ## 2. Contract Model
 
@@ -68,15 +67,22 @@ Each symbol is classified as one of:
 
 ## 5.2 Predicate and Query Symbols
 
+Symbols marked as **[Guard-Eligible]** can be extracted by the compiler from Lua `if` statements into `GuardExpr` IR blocks (Phase 3).
+
 | Symbol | Class | Signature | Allowed Contexts | Boundedness Contract |
 |---|---|---|---|---|
 | `cooldown_ready` | `PURE` | `cooldown_ready(actor: id, cooldown_id: string) -> bool` | `edge`, `arbiter` | O(1) state lookup only. |
-| `resource_at_least` | `PURE` | `resource_at_least(actor: id, pool_id: string, amount: fixed) -> bool` | `edge`, `arbiter` | O(1) state lookup only. |
+| `resource_at_least` | `PURE` | `resource_at_least(actor: id, pool_id: string, amount: fixed) -> bool` | `edge`, `arbiter` | **[Guard-Eligible]** O(1) state lookup. |
 | `distance_leq` | `PURE` | `distance_leq(a: id, b: id, max_dist: fixed) -> bool` | `edge`, `arbiter` | O(1) numeric predicate only. |
 | `target_exists` | `PURE` | `target_exists(target: id) -> bool` | `edge`, `arbiter` | O(1) ownership-aware lookup only. |
 | `target_is_hostile` | `PURE` | `target_is_hostile(a: id, b: id) -> bool` | `edge`, `arbiter` | O(1) relation lookup only. |
 | `collect_targets_in_radius` | `PURE` | `collect_targets_in_radius(origin: id, radius: fixed, max_targets: int, filter_id: string) -> list<id>` | `arbiter` | `max_targets` literal is required and must be `<= selector_max_targets`. |
-| `has_status` | `PURE` | `has_status(target: id, status_id: string) -> bool` | `edge`, `arbiter` | O(1) status lookup only. |
+| `has_status` | `PURE` | `has_status(target: id, status_id: string) -> bool` | `edge`, `arbiter` | **[Guard-Eligible]** O(1) status lookup. |
+| `hp_below` | `PURE` | `hp_below(target: id, threshold_pct: fixed) -> bool` | `edge`, `arbiter` | **[Guard-Eligible]** O(1) vital check. |
+| `hp_above` | `PURE` | `hp_above(target: id, threshold_pct: fixed) -> bool` | `edge`, `arbiter` | **[Guard-Eligible]** O(1) vital check. |
+| `is_in_zone` | `PURE` | `is_in_zone(target: id, zone_type: string) -> bool` | `arbiter` | **[Guard-Eligible]** Bounds-checked zone presence. |
+| `facing_toward` | `PURE` | `facing_toward(viewer: id, target: id, dot_threshold: fixed) -> bool` | `arbiter` | **[Guard-Eligible]** Vector dot-product check. |
+| `stack_count` | `PURE` | `stack_count(target: id, pool_id: string) -> int` | `edge`, `arbiter` | **[Guard-Eligible]** when used with comparison ops. |
 | `is_npc` | `PURE` | `is_npc(entity: id) -> bool` | `edge`, `arbiter` | O(1) type-tag lookup only. |
 | `is_monster` | `PURE` | `is_monster(entity: id) -> bool` | `edge`, `arbiter` | O(1) type-tag lookup only. |
 | `is_named_unit` | `PURE` | `is_named_unit(entity: id) -> bool` | `edge`, `arbiter` | O(1) identity-tag lookup only. |
@@ -115,7 +121,14 @@ Each symbol is classified as one of:
 | `apply_status` | `MUT` | `apply_status(target: id, status_id: string, duration_ticks: int, stacks: int)` | `arbiter` | `duration_ticks` and `stacks` must satisfy schema caps. |
 | `remove_status` | `MUT` | `remove_status(target: id, status_id: string)` | `arbiter` | One mutation record per call. |
 | `apply_damage` | `MUT` | `apply_damage(source: id, target: id, amount: fixed, damage_type: string)` | `arbiter` | One mutation record per call. |
+| `apply_heal` | `MUT` | `apply_heal(source: id, target: id, amount: fixed)` | `arbiter` | One mutation record per call. |
+| `apply_cc` | `MUT` | `apply_cc(target: id, cc_type: string, duration_ticks: int)` | `arbiter` | CC type must be valid enum (stun, root, silence, etc). |
+| `apply_shield` | `MUT` | `apply_shield(target: id, shield_type: string, amount: fixed, charges: int, duration_ticks: int)` | `arbiter` | Shield type must be absorption or instance. |
+| `displace` | `MUT` | `displace(target: id, destination: record, arc: bool, duration_ticks: int)` | `arbiter` | Destination must be resolvable fixed-point vector. |
+| `steer_trajectory` | `MUT` | `steer_trajectory(target: id, mode: string, duration_ticks: int)` | `arbiter` | Mode must be toward_source, away_from_source, or toward_target. |
+| `value_conversion` | `MUT` | `value_conversion(source: id, target: id, source_type: string, target_type: string, ratio: fixed)` | `arbiter` | Bounded scalar conversion (e.g., lifesteal, mana burn). |
 | `spawn_entity` | `MUT` | `spawn_entity(archetype_id: string, owner: id, at: id) -> id` | `arbiter` | Spawn count per rule must satisfy `max_spawns_per_rule`. |
+| `spawn_zone` | `MUT` | `spawn_zone(shape: string, radius: fixed, position: record, duration_ticks: int) -> id` | `arbiter` | Zone spawn count must satisfy `max_spawns_per_rule`. |
 | `despawn_entity` | `MUT` | `despawn_entity(entity: id, reason: string)` | `arbiter`, `meta` | One mutation record per call. |
 | `add_stat_modifier` | `MUT` | `add_stat_modifier(target: id, modifier_id: string, stat_id: string, value: fixed, duration_ticks: int)` | `arbiter`, `meta` | Modifier count must satisfy `max_stat_modifiers_per_entity`. |
 | `remove_stat_modifier` | `MUT` | `remove_stat_modifier(target: id, modifier_id: string)` | `arbiter`, `meta` | One mutation record per call. |

@@ -26,9 +26,14 @@ If this directory conflicts with `docs-core/`, `docs-core/` wins.
 5. [01-3-lua-conformance-test-matrix.md](01-3-lua-conformance-test-matrix.md)
 6. [02-schema-and-validation.md](02-schema-and-validation.md)
 7. [03-compiler-pipeline.md](03-compiler-pipeline.md)
+8. [03-1-compiler-ir-specification.md](03-1-compiler-ir-specification.md)
 8. [04-game-image-format.md](04-game-image-format.md)
 9. [05-runtime-loading-and-activation.md](05-runtime-loading-and-activation.md)
 10. [06-version-line-cutover-and-rollback.md](06-version-line-cutover-and-rollback.md)
 11. [07-tooling-workflow.md](07-tooling-workflow.md)
 12. [08-sdk-catalog-wishlist.md](08-sdk-catalog-wishlist.md)
 13. [09-sdk-surface-draft.md](09-sdk-surface-draft.md)
+
+## Ability Primitives
+
+14. [ability-primitives/](ability-primitives/README.md) — Canonical taxonomy of 65 atomic engine primitives derived from 125 ability sketches. Defines the "Virtual Instruction Set for Spatial Logic" that the compiler targets.

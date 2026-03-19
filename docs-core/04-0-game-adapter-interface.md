@@ -36,6 +36,7 @@ The engine must provide:
 2. Deterministic RNG and numeric primitives.
 3. Transport and routing guarantees.
 4. Mutation application and event publication pipeline.
+5. Versioned game content distribution: the engine distributes content artifacts to runtime nodes, manages data-epoch versioning, and ensures nodes activate content atomically at frame boundaries before accepting entity authority.
 
 ## 4. Data Contract
 

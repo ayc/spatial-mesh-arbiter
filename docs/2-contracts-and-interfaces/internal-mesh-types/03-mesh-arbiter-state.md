@@ -244,7 +244,14 @@ struct SpatialActor<G: GameResolver> {
     creep_overrides: HashMap<EntityID, (CreepDirective, u64)>, // creep_id -> (directive, expires_at_tick)
     ai_controlled_entities: HashSet<EntityID>, // Named NPCs currently controlled by an AI Node
     merge_state: Option<MergeState>,
-    processed_proposals: LruCache<UUID, bool>, 
+    processed_proposals: LruCache<UUID, bool>,
+
+    // Crash Fencing: arbiter_ids declared dead by the Controller.
+    // Populated on AbortPendingHandoffs (crash cleanup). Internal mesh messages
+    // and ghost updates from fenced sources are silently dropped.
+    // Entries are cleared when the Arbiter processes a topology update that
+    // removes the dead arbiter from its neighbor set.
+    fenced_arbiter_ids: HashSet<u32>,
     
     // Event Idempotency Ledger: Prevents double-damage from delayed or duplicate relays.
     // Memory-bounded ring: max keys ~= idempotency_bucket_capacity * MAX_EVENT_AGE_TICKS.
@@ -275,6 +282,7 @@ impl<G: GameResolver> SpatialActor<G> {
     // Called by the RUDP network layer for authenticated intra-mesh events.
     fn on_internal_event_rudp(&mut self, header: MeshAuthHeader, event: MeshInternalEvent) {
         if !self.verify_mesh_auth(&header, &event) { return; }
+        if self.fenced_arbiter_ids.contains(&event.source_arbiter_id) { return; }
         self.internal_inbox.push_back(event);
     }
 
@@ -578,6 +586,7 @@ impl<G: GameResolver> SpatialActor<G> {
 
     // Called by the network layer when an unreliable UDP GhostUpdate arrives.
     fn on_ghost_update_unreliable(&mut self, update: GhostUpdate) {
+        if self.fenced_arbiter_ids.contains(&update.source_arbiter_id) { return; }
         if update.source_tick + MAX_EVENT_AGE_TICKS < self.current_tick { return; }
 
         let ghost = self.ghost_entities.entry(update.entity_id).or_insert(GhostState2D {
@@ -869,6 +878,7 @@ impl<G: GameResolver> SpatialActor<G> {
                 self.asset_loader.async_fetch_and_parse(new_epoch, asset_uri, checksum);
             }
             ControllerCommand::AbortPendingHandoffs { crashed_arbiter_id } => {
+                self.fenced_arbiter_ids.insert(crashed_arbiter_id);
                 self.abort_pending_projectile_handoffs_from(crashed_arbiter_id);
             }
             _ => { /* ExecuteGlobalEvent and Splits handled in scheduler block */ }

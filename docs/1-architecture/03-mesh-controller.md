@@ -101,11 +101,15 @@ When a hotspot moves geographically (e.g., a raid marching across the map), the 
 
 Standard Kubernetes HPA is fundamentally incompatible with the engine's millisecond-scale split requirements. The infrastructure maintains a **Warm Pool** of idle Arbiter pods.
 
-### 4.1 Registration Handshake
+### 4.1 Registration and Readiness Handshake
 
 1. Kubernetes boots surplus "Idle" Arbiter pods.
 2. Each pod binds to its host network port, opens a TCP connection to the Controller, and reports: `"I am alive, my routable UDP address is 10.x.x.x:7000."` (In Docker Compose, nodes register by hostname, not internal IP.)
-3. The Controller assigns a permanent `arbiter_id` and adds the pod to the Service Registry in a **Ready** (suspended) state.
+3. The Controller assigns a permanent `arbiter_id`.
+4. The Controller issues `PrepareDataEpoch { new_epoch, asset_uri, checksum }` for the current game content version (see §11). The Arbiter downloads, validates, and activates the content.
+5. Once the Arbiter confirms content activation, the Controller marks the pod as **Ready** in the Service Registry.
+
+An Arbiter MUST NOT be allocated from the Warm Pool until it has an active game content version. An Arbiter without loaded content cannot process proposals through the game adapter hooks.
 
 ### 4.2 Instant Allocation
 
@@ -366,18 +370,32 @@ Global Events represent <0.1% of combat traffic. The Controller acts as a high-l
 
 ---
 
-## 11. Live Data Distribution (Hot-Patching)
+## 11. Game Content Distribution
 
-The Controller distributes game-balance updates at runtime without restarts.
+The Controller is responsible for distributing versioned game content to all Arbiters and Edge Nodes. This is the mechanism by which the engine loads the game rules that the game adapter depends on — ability definitions, damage coefficients, configuration variables, and all designer-authored content compiled into the `SpellData` dictionary.
 
-### 11.1 Pipeline
+### 11.1 Primary Purpose: Arbiter Readiness
+
+An Arbiter without loaded game content is an empty runtime — it can tick at 60Hz and manage spatial authority, but it cannot resolve any game-specific proposal. `PrepareDataEpoch` is a required step in the Arbiter readiness pipeline (see §4.1). Every Arbiter receives the current content version before being made available for allocation from the Warm Pool.
+
+### 11.2 Pipeline
 
 1. **Command:** The Controller issues `PrepareDataEpoch { new_epoch, asset_uri, checksum }` over TCP.
 2. **Asynchronous Loading:** Each Arbiter spins up a background task to download the asset from the CDN URI (e.g., `s3://game-assets/balance/v1.02.fb`).
 3. **Validation:** The Arbiter verifies the checksum.
 4. **Atomic Activation:** The parsed dictionary is pushed into a lock-free queue. The 60Hz loop picks it up at the next frame boundary and atomically swaps to the new `SpellData`.
 
-Live configuration variables (interest radii, dilation curves, gameplay timers) are packaged inside the `SpellData` dictionary. See [Configuration Registry](../4-infrastructure/02-configuration-registry.md) for the full variable list.
+### 11.3 When PrepareDataEpoch Fires
+
+| Situation | Trigger |
+| :--- | :--- |
+| **Arbiter boot / Warm Pool registration** | Controller primes the Arbiter with the current content version as part of the readiness handshake (§4.1). |
+| **Version line transition** | A blue/green deployment rolls out new game rules. The Controller tells Arbiters in the new line which version to load, as part of the transition state machine (see `docs-core/04-3-version-line-transition-contract.md`). |
+| **Live hot-patch (optional)** | Balance changes pushed to a running cluster without restart. Same pipeline, but the Arbiter is already active and atomically swaps to the new version at the next frame boundary. |
+
+### 11.4 Content Scope
+
+Live configuration variables (interest radii, dilation curves, gameplay timers) are packaged inside the `SpellData` dictionary alongside ability definitions. See [Configuration Registry](../4-infrastructure/02-configuration-registry.md) for the full variable list.
 
 ---
 
