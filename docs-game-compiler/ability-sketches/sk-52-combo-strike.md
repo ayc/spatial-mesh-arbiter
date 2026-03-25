@@ -63,7 +63,7 @@ The `validate_intent` hook must read the combo state to determine which validati
 - Step 1: no cooldown check (mid-combo), range check, combo window check
 - Step 2: no cooldown check, range check, combo window check
 
-The `resolve_external` hook must read the combo state to determine the effect:
+The stage-execution path must read the combo state to determine the effect:
 - Step 0/1: damage only
 - Step 2: damage + heal
 
@@ -75,7 +75,7 @@ TODO: Each combo press can target a different entity. If the first hit targets a
 
 TODO: Designer specifies: combo steps (3), per-step effects (step 0: X damage, step 1: X damage, step 2: 1.5X damage + Y heal), combo window (2s), full cooldown after complete combo, short cooldown on timeout reset. Compiler produces:
 - Ability definition with combo state machine (step count, window duration)
-- Per-step resolution logic (branching in resolve_external based on current_step)
+- Per-step resolution logic (branching in stage execution based on `current_step`)
 - Per-step validation rules (skip cooldown check mid-combo)
 - Combo reset logic (timeout → reset, completion → reset + full cooldown)
 

@@ -4,6 +4,8 @@ This document defines the contract between the **Spatial Mesh Engine** (the reus
 
 The goal: a game team provides data definitions, stat formulas, and resolution logic. The engine provides the distributed mesh, topology management, deterministic physics, cross-boundary transport, and client connectivity.
 
+Historical note: this document predates the current `docs-core` API v2 terminology in a few places. The authoritative engine/game boundary now lives in `docs-core/04-1-game-adapter-contract.md` and `docs-core/04-2-game-adapter-api-contract.md`, centered on `validate_intent`, `dispatch_stage`, `initialize_spawn_configuration`, and `describe_compatibility`.
+
 ---
 
 ## 1. Design Principles
@@ -178,77 +180,62 @@ enum ActionPayload<G: GameActions> {
 
 **In the ARPG template**, `G::Action` covers `TargetedAbility`, `GroundTargetedAbility`, `SpawnProjectile`, `UseConsumable`, `Interact`, `IssueCreepCommand`.
 
-The engine handles `EngineAction` variants directly. For `Game(action)`, it calls into the game's resolver trait (Section 4).
+The engine handles `EngineAction` variants directly. For `Game(action)`, it routes the work through the game adapter boundary described below.
 
 ### 3.3 Combat / Resolution Logic
 
-The engine provides no built-in damage formulas, stat compilation, or combat math. The game implements resolution:
+The engine provides no built-in damage formulas, stat compilation, or combat math. In the current API v2 model, the game implements a stage-aware adapter boundary rather than older monolithic callback patterns:
 
 ```rust
-trait GameResolver: Send + Sync + 'static {
+trait GameAdapter: Send + Sync + 'static {
     type Entity: GameEntity;
     type Actions: GameActions;
 
-    /// Called when a game-specific action proposal passes epoch/topology
-    /// validation and rate limiting. The game validates game-specific
-    /// constraints (range, cooldowns, resource costs) and returns effects.
-    fn resolve_action(
+    /// Stage 2 entry point for game-specific validation.
+    fn validate_intent(
         &self,
         action: &<Self::Actions as GameActions>::Action,
         actor: &EntityView<Self::Entity>,
         world: &WorldView<Self::Entity>,
-        rng: &mut DeterministicRng,
         tick: u64,
-        dilation_factor: SimFixed,
-    ) -> ActionOutcome<Self::Entity>;
+    ) -> TerminalOutcome;
 
-    /// Called when a MeshInternalEvent carrying game data arrives from
-    /// a neighboring arbiter (cross-boundary impact, projectile handoff, etc.)
-    fn resolve_internal_event(
+    /// Unified entry point for Stages 1 and 3-12.
+    fn dispatch_stage(
         &self,
-        payload: &[u8],  // Game-serialized cross-boundary context
-        target: &mut EntityView<Self::Entity>,
+        stage_id: StageId,
+        batch: &[EntityStageContext<Self::Entity>],
         world: &WorldView<Self::Entity>,
         rng: &mut DeterministicRng,
         tick: u64,
-    ) -> ActionOutcome<Self::Entity>;
+        dilation_factor: SimFixed,
+    ) -> StageOutcome<Self::Entity>;
 
-    /// Edge Node ingress filter. The engine calls this before queueing a
-    /// game action to let the game reject obviously invalid proposals early
-    /// (e.g., unknown ability IDs, impossible targeting modes).
-    fn validate_proposal(
-        &self,
-        action: &<Self::Actions as GameActions>::Action,
-        actor_id: EntityID,
-    ) -> Result<(), &'static str>;
+    /// Called when the engine allocates a new entity ID for a spawned actor.
+    fn initialize_spawn_configuration(&self, spawn: &SpawnRequest) -> SpawnConfiguration<Self::Entity>;
+
+    /// Startup compatibility negotiation surface.
+    fn describe_compatibility(&self) -> CompatibilityDescriptor;
 }
 ```
 
-The `ActionOutcome` struct tells the engine what to apply:
+The adapter returns declarative payloads that the engine applies through its own pipeline:
 
 ```rust
-struct ActionOutcome<E: GameEntity> {
-    /// HP changes, stat overwrites, status effect mutations.
+struct StageOutcome<E: GameEntity> {
     entity_mutations: Vec<EntityMutation<E>>,
+    emitted_events: Vec<ImmediateEvent>,
+    deferred_events: Vec<DeferredEvent>,
+    faults: Vec<FaultRecord>,
+}
 
-    /// Projectile/zone spawns (engine handles the Actor lifecycle).
-    spawns: Vec<SpawnRequest>,
-
-    /// Cross-boundary payloads to relay to neighboring arbiters.
-    relay_events: Vec<RelayEvent>,
-
-    /// Hard state events to publish to the event bus (loot, kills, objectives).
-    hard_events: Vec<HardEvent>,
-
-    /// Downstream notifications to send to the acting player's Edge Node.
-    downstream: Vec<DownstreamNotification>,
-
-    /// If the action should escalate to a Global Event (geometry exceeds cell).
-    escalate_to_global: Option<GlobalEventRequest>,
+enum TerminalOutcome {
+    Accept,
+    Reject,
 }
 ```
 
-**Key insight:** The engine still owns projectile Actor lifecycle (movement integration, collision detection, boundary handoff, fuse expiry). But when a projectile *hits*, the engine calls `resolve_internal_event` with the game-serialized `CombatContext` to let the game apply damage formulas.
+**Key insight:** The engine still owns projectile Actor lifecycle (movement integration, collision detection, boundary handoff, fuse expiry). But when a projectile *hits* or a deferred combat payload becomes ready, the engine does not hand control to a special internal resolver hook. Instead, it injects the resulting payload into the appropriate API v2 stage (typically Stage 7 `PreMitigation`, or Stage 3 `TargetResolution` for spatial timer payloads) and lets the adapter return a declarative `StageOutcome`.
 
 ### 3.4 NPC Archetypes
 
@@ -343,19 +330,18 @@ The game defines:
 
 ## 4. The Extension Points (Where Engine Calls Game)
 
-The tick loop calls into the game layer at these specific points:
+The engine calls into the game layer at these specific extension points:
 
 | Tick Step | Engine Calls | Game Returns |
 |:----------|:-------------|:-------------|
-| **Proposal ingress** | `GameResolver::validate_proposal()` | `Ok(())` or rejection reason |
-| **Step 4: Global events** | `GameResolver::resolve_action()` with global event context | `ActionOutcome` |
-| **Step 5: Internal events** | `GameResolver::resolve_internal_event()` | `ActionOutcome` |
-| **Step 6: External proposals** | `GameResolver::resolve_action()` | `ActionOutcome` |
+| **Startup admission** | `GameAdapter::describe_compatibility()` | `CompatibilityDescriptor` |
+| **Stage 2: IntentValidation** | `GameAdapter::validate_intent()` | `TerminalOutcome` (and optionally `StageOutcome` for cast intercepts) |
+| **Stages 1 and 3-12** | `GameAdapter::dispatch_stage()` | `StageOutcome` |
 | **NPC tick (within Step 3)** | `GameNpcArchetype::tick()` | `NpcDecision` |
-| **Spawn** | `SpawnProvider::build_initial_state()` | Initial entity state |
+| **Spawn** | `GameAdapter::initialize_spawn_configuration()` | `SpawnConfiguration` |
 | **Hard event publish** | Engine publishes; `HardEventConsumer::on_hard_event()` on Meta side | Persistence result |
 
-The engine applies the returned `ActionOutcome` — mutating entity state, spawning projectiles, relaying cross-boundary events, publishing hard events. The game never directly mutates engine state.
+The engine applies the returned `StageOutcome` / `SpawnConfiguration` / `TerminalOutcome` objects through its own scheduler and ownership rules. The game never directly mutates engine state.
 
 ---
 
@@ -384,7 +370,7 @@ Cross-boundary relay payloads (e.g., `CombatContext` traveling with a projectile
 |:---------|:-------|
 | `docs/3-gameplay-systems/*` | Add `README.md` reframing as "ARPG Template — reference implementation of the engine's game layer traits." Content stays as-is. |
 | `docs/2-contracts-and-interfaces/internal-mesh-types/01-core-primitives.md` | Split `SoftState` into `EntityCore` (engine) + `SoftExt` (game). Split `ActionPayload` into `EngineAction` + `Game(T)`. Keep current definitions as ARPG template examples. |
-| `docs/2-contracts-and-interfaces/internal-mesh-types/03-mesh-arbiter-state.md` | `SpatialActor` becomes generic: `SpatialActor<G: GameResolver>`. Entity storage becomes `HashMap<EntityID, (EntityCore, G::Entity::SoftExt)>`. Tick loop delegation points documented. |
+| `docs/2-contracts-and-interfaces/internal-mesh-types/03-mesh-arbiter-state.md` | `SpatialActor` becomes generic over a game adapter boundary. Entity storage becomes `HashMap<EntityID, (EntityCore, G::Entity::SoftExt)>`. Tick loop delegation points are now expressed via API v2 (`validate_intent`, `dispatch_stage`, spawn initialization, compatibility negotiation). |
 | `docs/1-architecture/04-meta-services.md` | Reframe as ARPG template services. Extract `SpawnProvider` and `HardEventConsumer` traits into engine spec. Session management and EntityID allocation remain engine-owned. |
 | `docs/6-spec-drafts/GAPS_CHECKLIST.md` | Game-specific gaps (T1-01 stat formulas, T1-02 distance falloff, T1-03 combat pipeline, T3-05 threat/leash, T3-06 NPC assets) move to "ARPG Template Gaps" section. Engine gaps remain. |
 
@@ -394,9 +380,9 @@ Cross-boundary relay payloads (e.g., `CombatContext` traveling with a projectile
 
 | Phase | Change from Current Plan |
 |:------|:------------------------|
-| **Phase 1: shared-types** | Define `EntityCore`, `GameEntity`, `GameActions`, `GameResolver`, `GameNpcArchetype` traits. Define `EngineAction`. Provide ARPG implementations as a `game-arpg` crate (or feature-gated module). |
+| **Phase 1: shared-types** | Define `EntityCore`, `GameEntity`, `GameActions`, `GameAdapter`, and `GameNpcArchetype` traits plus the API v2 payload types. Define `EngineAction`. Provide ARPG implementations as a `game-arpg` crate (or feature-gated module). |
 | **Phase 2: mesh-controller** | No change. Controller is fully engine-owned. |
-| **Phase 3: spatial-arbiter** | `SpatialActor` becomes generic over `G: GameResolver`. Tick loop delegates to `G` at extension points. Physics, ghosts, dilation, idempotency remain engine code. |
+| **Phase 3: spatial-arbiter** | `SpatialActor` becomes generic over `G: GameAdapter`. Tick loop delegates to `G` through API v2 extension points. Physics, ghosts, dilation, idempotency remain engine code. |
 | **Phase 4: edge-node** | Edge Node becomes generic over game intent registry. Wire protocol transport is engine-owned. Game-specific meta request routing delegates to game-provided handlers. |
 | **Phase 5: swarm-tester** | Parameterized by game — the ARPG tester uses ARPG actions and assertions. |
 
@@ -407,7 +393,7 @@ Cross-boundary relay payloads (e.g., `CombatContext` traveling with a projectile
 With this boundary in place, the engine supports:
 
 - **ARPG MMO** (the current spec): Deep stat systems, loot, cross-boundary combat, AI bosses. The full `docs/3-gameplay-systems/` spec.
-- **Isometric MOBA**: Simpler stat model, no loot, lane/objective mechanics. Same mesh topology, same KiDi, same ghost replication. Different `GameResolver` and `GameNpcArchetype`.
+- **Isometric MOBA**: Simpler stat model, no loot, lane/objective mechanics. Same mesh topology, same KiDi, same ghost replication. Different `GameAdapter` and `GameNpcArchetype`.
 - **Survival MMO**: Hunger/thirst/temperature in `SoftExt`, crafting in Meta services, building placement as game actions. Same spatial partitioning and player density management.
 - **MMO-RTS**: Unit groups as entities, Commander pattern repurposed for player-commanded squads, strategic resource nodes as interactables.
 
@@ -417,7 +403,7 @@ The engine's value proposition is the hard distributed systems work — topology
 
 ## 9. Decided: One Stack, One Game
 
-The engine uses **monomorphization** (`SpatialActor<G: GameResolver>`) — not trait objects. The arbiter binary is compiled per-game with zero-cost dispatch at every extension point. There is no multi-game hosting. A different game pulls in the engine crates as dependencies, implements the traits, and compiles its own binaries.
+The engine uses **monomorphization** (`SpatialActor<G: GameAdapter>`) — not trait objects. The arbiter binary is compiled per-game with zero-cost dispatch at every extension point. There is no multi-game hosting. A different game pulls in the engine crates as dependencies, implements the traits, and compiles its own binaries.
 
 This is a hard architectural constraint, not an open question. It means:
 - No runtime game-switching or hot-loading of game logic.

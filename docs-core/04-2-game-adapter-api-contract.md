@@ -41,8 +41,10 @@ Every hook call MUST carry this request envelope:
 | `data_epoch` | u64 | yes | content/config context |
 | `deadline_us` | u32 | yes | hard call deadline from engine |
 | `primary_entity_id` | string or null | yes | primary entity in scope for this call, when applicable |
-| `payload` | object | yes | hook-specific payload |
+| `payload` | `HookPayload` | yes | hook-specific named payload class defined in §§3.4-3.6 |
 | `wire_schema_version` | u32 | yes | payload-wire schema version |
+
+The request `payload` field is NOT an anonymous blob. It MUST be one of the named hook payload classes defined by this contract (`ValidateIntentRequest`, `DispatchStageRequest`, `SpawnRequest`, or `CompatibilityRequest`).
 
 ### 3.2 Response Envelope
 
@@ -53,9 +55,10 @@ Every hook call MUST return this response envelope:
 | `call_id` | string | yes | must match request |
 | `hook_name` | enum | yes | must match request |
 | `status` | enum | yes | `OK`, `REJECT`, `FAULT`, `TIMEOUT` |
-| `stage_outcome` | object or null | no | required for `dispatch_stage` and optionally `validate_intent` (for P-40 intercepts) |
-| `terminal_outcome` | object or null | no | required for discrete intents in validation hooks |
-| `spawn_configuration` | object or null | no | required for `initialize_spawn_configuration` |
+| `stage_outcome` | `StageOutcome` or null | no | required for `dispatch_stage` and optionally `validate_intent` (for P-40 intercepts) |
+| `terminal_outcome` | `TerminalOutcome` or null | no | required for discrete intents in validation hooks |
+| `spawn_configuration` | `SpawnConfiguration` or null | no | required for `initialize_spawn_configuration` |
+| `compatibility_descriptor` | `CompatibilityDescriptor` or null | no | required for `describe_compatibility` |
 | `reject_code` | string or null | no | required when `status=REJECT` |
 | `fault_code` | string or null | no | required when `status=FAULT` or `status=TIMEOUT` |
 
@@ -64,28 +67,134 @@ Response rules:
 2. `status=REJECT` MUST include deterministic `reject_code` and MUST NOT include mutations.
 3. `status=FAULT` or `status=TIMEOUT` MUST fail closed (no mutation side effects).
 4. Envelope fields and ordering used for digest/replay MUST be deterministic.
+5. Only the typed response payload field appropriate for the invoked hook MAY be populated; all other typed response payload fields MUST be null.
 
-### 3.3 StageOutcome Payload (Declarative Boundary)
+### 3.3 Shared Payload Types
 
-For `dispatch_stage` and mutating `validate_intent` calls, the adapter MUST return all state changes declaratively via the `stage_outcome` object. No mutable engine contexts are exposed.
+All non-trivial payload-bearing fields in this contract MUST use named payload classes or schema-bound envelopes. Anonymous untyped blobs are non-conformant.
 
-```json
-{
-  "mutations": [],        // State changes to apply to specific entities
-  "emitted_events": [],   // Internal/Hard events to broadcast immediately
-  "deferred_events": [],  // Events queued for the next tick (required by Stage 9 & 11)
-  "faults": []            // Non-fatal errors to log/observe
+#### 3.3.1 `SchemaTypedPayload` Envelope
+
+`SchemaTypedPayload` is the generic wrapper for game-defined payload bodies exchanged across the engine/adapter boundary.
+
+```
+SchemaTypedPayload {
+    payload_type_id: string,   // Stable type identifier declared in ADAPTER_HELLO
+    schema_version:  u32,      // Negotiated schema version for this payload type
+    body:            object,   // Payload body interpreted by the declared schema
 }
 ```
+
+Rules:
+1. The pair `(payload_type_id, schema_version)` MUST appear in the adapter's negotiated `payload_schema_descriptors`.
+2. The `body` object MUST validate against the declared schema before mutation is admitted.
+3. Different `payload_type_id` values are different boundary types for conformance, replay, and digest stability.
+
+#### 3.3.2 `TerminalOutcome` Payload
+
+```
+TerminalOutcome {
+    outcome: enum,                  // `accept` or `reject`
+    payload: SchemaTypedPayload or null,
+}
+```
+
+`reject_code` and `fault_code` remain envelope-level fields. `TerminalOutcome` carries the terminal disposition plus any optional schema-bound game payload associated with that disposition.
+
+#### 3.3.3 `StageOutcome` Payload (Declarative Boundary)
+
+For `dispatch_stage` and mutating `validate_intent` calls, the adapter MUST return all state changes declaratively via the `StageOutcome` object. No mutable engine contexts are exposed.
+
+```
+StageOutcome {
+    mutations:       list<MutationRecord>,
+    emitted_events:  list<ImmediateEvent>,
+    deferred_events: list<DeferredEvent>,
+    faults:          list<FaultRecord>,
+}
+
+MutationRecord {
+    entity_id: string,
+    payload:   SchemaTypedPayload,
+}
+
+ImmediateEvent {
+    source_entity_id: string or null,
+    payload:          SchemaTypedPayload,
+}
+
+FaultRecord {
+    fault_code: string,
+    detail:     string or null,
+}
+```
+
+For `MutationRecord` and `ImmediateEvent`, `payload.payload_type_id` is the normative type discriminator. Parallel open-string classifiers are non-conformant.
+
+#### 3.3.4 `DeferredEvent` Envelope
+
+To satisfy the strict re-entrancy rules of the 12-stage pipeline, any event returned in the `deferred_events` array MUST explicitly declare its required re-entry stage. The Engine's Stage Scheduler MUST queue these events and inject them into the specified stage of the NEXT authoritative tick (or a future tick if specified).
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `target_stage` | u8 | yes | The pipeline stage where this event MUST re-enter. Under the current IR profile, only Stage 3 and Stage 7 are valid. |
+| `event_class` | enum | yes | `deferred_spatial_event` (Stage 3 re-entry) or `deferred_combat_event` (Stage 7 re-entry). |
+| `source_entity_id` | string | yes | The entity that generated the deferred event. |
+| `ready_tick` | u64 | yes | The tick when this event should be evaluated (usually current_tick + 1). |
+| `sort_key` | u64 | yes | Stable deterministic ordering key assigned by the adapter when emitting the deferred event. |
+| `payload` | `SchemaTypedPayload` | yes | Schema-bound deferred payload to evaluate on re-entry. |
+
+Current profile constraints:
+1. `event_class=deferred_spatial_event` MUST use `target_stage=3` (`TargetResolution`).
+2. `event_class=deferred_combat_event` MUST use `target_stage=7` (`PreMitigation`).
+3. Unknown `event_class` values or invalid `event_class`/`target_stage` pairs are non-conformant.
+4. The adapter MUST assign `sort_key` when emitting each `DeferredEvent`.
+5. For identical stage-local inputs under replay, the adapter MUST emit the same `sort_key` values.
+6. If one stage invocation emits multiple deferred events for the same `ready_tick` and `target_stage`, their `sort_key` values MUST encode a deterministic total order.
 
 ### 3.4 Hook-Specific Constraints
 
 | Hook | Required Input Payload Class | Allowed Status Values | Mutation Allowed |
 | --- | --- | --- | --- |
-| `validate_intent` | external intent + actor snapshot | `OK`, `REJECT`, `FAULT`, `TIMEOUT` | yes (via `stage_outcome` for Stage 2 cast intercepts) |
+| `validate_intent` | `ValidateIntentRequest` (§3.4.1) | `OK`, `REJECT`, `FAULT`, `TIMEOUT` | yes (via `stage_outcome` for Stage 2 cast intercepts) |
 | `dispatch_stage` | `DispatchStageRequest` (§3.5) | `OK`, `FAULT`, `TIMEOUT` | yes (via `stage_outcome`) |
 | `initialize_spawn_configuration` | `SpawnRequest` (§3.6) | `OK`, `REJECT`, `FAULT`, `TIMEOUT` | yes (via `spawn_configuration` per §3.6) |
-| `describe_compatibility` | empty payload | `OK`, `FAULT`, `TIMEOUT` | no |
+| `describe_compatibility` | `CompatibilityRequest` (§3.4.2) | `OK`, `FAULT`, `TIMEOUT` | no |
+
+#### 3.4.1 `ValidateIntentRequest` Payload
+
+```
+ValidateIntentRequest {
+    external_intent: SchemaTypedPayload,  // Client/agent/subsystem intent envelope
+    actor_snapshot:  SchemaTypedPayload,  // Game-defined authoritative actor snapshot
+}
+```
+
+#### 3.4.2 `CompatibilityRequest` Payload
+
+```
+CompatibilityRequest {}
+```
+
+#### 3.4.3 `CompatibilityDescriptor` Payload
+
+`describe_compatibility` returns a `CompatibilityDescriptor` in the response envelope.
+
+```
+CompatibilityDescriptor {
+    adapter_identity:            string,
+    adapter_version_semver:      string,
+    adapter_api_major:           u32,
+    supported_wire_schema_versions: list<u32>,
+    payload_schema_descriptors:  list<PayloadSchemaDescriptor>,
+}
+
+PayloadSchemaDescriptor {
+    payload_type_id:     string,
+    schema_version:      u32,
+    compatibility_mode:  enum,   // BACKWARD | FORWARD | BIDIRECTIONAL
+}
+```
 
 ### 3.5 `dispatch_stage` Contract
 
@@ -115,28 +224,30 @@ StageId values 0, 2, and 13+ are reserved and MUST be rejected by the adapter.
 
 ```
 DispatchStageRequest {
-    stage_id:           u8,             // StageId enum value
+    stage_id:           StageId,        // StageId enum value
     entity_batch:       list<EntityStageContext>,  // Entities with active work for this stage
     global_context:     GlobalStageContext,         // Tick-level shared state
 }
 
 EntityStageContext {
     entity_id:          string,         // Entity being evaluated
-    ir_instructions:    list<object>,   // IR instructions tagged for this stage (from game image)
-    ir_directives:      list<object>,   // Active cross-cutting directives for this entity
-    entity_snapshot:    object,         // Current authoritative entity state
-    ir_execution_binding_values: object, // Runtime values accumulated in IR binding slots from prior stages
+    ir_instructions:    list<IRInstruction>,   // IR instructions tagged for this stage (from game image)
+    ir_directives:      list<IRDirective>,     // Active cross-cutting directives for this entity
+    entity_snapshot:    SchemaTypedPayload,    // Current authoritative game-defined entity state snapshot
+    ir_execution_binding_values: IRExecutionBindingValueMap, // Runtime values accumulated in IR binding slots from prior stages
 }
 
 GlobalStageContext {
     tick:               u64,            // Current authoritative tick
     topology_epoch:     u64,
     data_epoch:         u64,
-    incoming_deferred_events: list<object>, // Deferred events arriving from the previous tick's Stage 9/11
+    incoming_deferred_events: list<DeferredEvent>, // Deferred events arriving from the previous tick's Stage 9/11 (defined in §3.3.4)
 }
 ```
 
 The engine batches all entities with active IR instructions for the given stage into a single `dispatch_stage` call. The adapter processes the batch and returns a `stage_outcome` containing mutations, events, and deferred events for all entities in the batch.
+
+`IRInstruction`, `IRDirective`, and `BindingValue` are shared engine/compiler contract types. In the current repository layout, their canonical structural definitions are hosted in [03-1-compiler-ir-specification.md](../docs-game-compiler/03-1-compiler-ir-specification.md). This does not make them compiler-private; both the engine/runtime and compiler MUST implement the same structures. `IRExecutionBindingValueMap` is a deterministic map from compiled binding names to runtime `BindingValue` instances.
 
 #### 3.5.3 Stage 1 (ControlAuthorityAndInputRouting) Semantics
 
@@ -157,7 +268,7 @@ SpawnRequest {
     entity_id:          string,         // Engine-allocated entity ID (Arbiter owns identity)
     archetype_id:       u32,            // Entity archetype from game image EntityDefinitions
     owner_entity_id:    string,         // Spawning entity
-    spawn_position:     object,         // Requested spawn position (Vec2F)
+    spawn_position:     Vec2F,          // Requested spawn position
     spawn_tick:         u64,            // Tick at which spawn was requested
 }
 ```
@@ -168,11 +279,13 @@ The adapter returns game-specific configuration only. The `entity_id` is NOT inc
 
 ```
 SpawnConfiguration {
-    initial_entity_state: object,       // Full initial entity state (stats, HP, abilities, soft state)
+    initial_entity_state: SchemaTypedPayload,  // Full initial game-defined entity state
     ghost_movement_replication_cadence: u8,  // GhostMovementReplicationCadence enum (see below)
     lifetime_ticks:     u32 or null,    // Bounded lifetime (null = permanent until despawned)
 }
 ```
+
+`Vec2F` is the engine's deterministic two-dimensional fixed-point vector type.
 
 `GhostMovementReplicationCadence` is a closed enum controlling how frequently the engine replicates this entity's movement-state Ghost updates to neighboring Arbiters. It does NOT affect the entity's actual movement speed or simulation behavior (which are governed by the entity's authoritative kinematic state).
 
@@ -211,6 +324,8 @@ Startup admission MUST execute this deterministic handshake:
 
 ### 5.2 `ADAPTER_HELLO` Required Fields
 
+`ADAPTER_HELLO` carries the adapter's `CompatibilityDescriptor`.
+
 1. `adapter_identity`
 2. `adapter_version_semver`
 3. `adapter_api_major`
@@ -219,6 +334,8 @@ Startup admission MUST execute this deterministic handshake:
    - `payload_type_id`
    - `schema_version`
    - `compatibility_mode` (`BACKWARD`, `FORWARD`, or `BIDIRECTIONAL`)
+
+Every `SchemaTypedPayload` exchanged after admission MUST reference a `(payload_type_id, schema_version)` pair declared here.
 
 ### 5.3 Admission Rules
 

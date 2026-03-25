@@ -1,400 +1,218 @@
+    fn tick(&mut self) {
+        let frame_start = monotonic_now();
+        self.current_tick += 1;
+        
+        // 0. O(1) Ledger Cleanup
+        let current_bucket = (self.current_tick % MAX_EVENT_AGE_TICKS) as usize;
+        self.event_idempotency_ledger[current_bucket].clear();
 
-=== OBSERVABLE BEHAVIORS ===
-1. Target is lifted and displaced along an arc from current position to landing position
-2. Target cannot act during displacement (CC'd — airborne state)
-3. On landing: target takes X impact damage
-4. On landing: AoE damage check at landing position — all enemies within radius take Y damage
-5. Caster is free to act during the toss flight time
-1. Projectile launches toward target
-2. On hit: apply initial damage + apply Poison debuff (DoT, 5s duration)
-3. DoT ticks every 1s (5 pulses), dealing poison damage per tick
-4. If caster deals any other damage to the target while Poison is active, Poison duration resets to 5s
-5. Each DoT tick: heal caster for Z% of damage dealt (drain)
-6. Each DoT tick: apply +1% damage buff stack to caster (stacking, no cap specified)
-1. Wall appears instantly at target position
-2. All entity movement is blocked by the wall (pathfinding treats it as impassable)
-3. All projectiles collide with the wall (raycasts hit it)
-4. Wall persists for 5 seconds
-5. Wall crumbles and is removed — movement and projectiles pass freely again
-6. Wall has no HP (cannot be destroyed early in base version)
-1. Tether establishes between caster and target — visible beam connects them
-2. While active: when either entity takes damage, 30% is redirected to the partner
-3. While active: when either entity receives healing, 50% is copied to the partner
-4. Distance is checked continuously — if distance exceeds break threshold, tether snaps
-5. Tether has a maximum duration (e.g., 12 seconds) even if distance is maintained
-6. Either player dying breaks the tether
-7. The tether can be dispelled/cleansed
-1. Caster begins channeling — movement locked, cast bar visible to all players
-2. Enemy players see a warning indicator (visual/audio cue that the channel is in progress)
-3. If channel completes (3 seconds uninterrupted): every enemy hero on the map takes X damage
-4. Damage is applied simultaneously on all targets at the same tick
-5. If channel is interrupted (stun, silence, displacement, death): ability fizzles, cooldown is partially refunded
-6. Each target's defensive stats are evaluated independently (resistances, shields, evasion)
-1. 6 minion entities spawn in a circle around the caster
-2. Each minion acquires the nearest enemy and attacks autonomously (basic melee/ranged attack)
-3. Minions follow the caster if no enemy is in range
-4. Minions have their own HP and can be killed
-5. After 15 seconds, surviving minions expire and despawn
-6. If the caster dies, all minions immediately die
-7. Each minion's attack deals damage and can trigger on-hit effects from the caster's stats
-1. Cast on enemy — identify the last ability they used
-2. That ability is copied into one of my ability slots (replacing my normal ability temporarily)
-3. I can cast the stolen ability once, using my own offensive stats
-4. After casting (or after a timeout), my original ability returns
-5. The enemy is not affected — they keep their ability
-6. Visual: my character takes on a visual indicator of the stolen ability
-1. Enemies entering the aura radius receive a debuff: damage per second + 20% movement slow
-2. Enemies leaving the aura radius lose the debuff immediately
-3. Damage ticks once per second on each affected enemy
-4. The aura moves with the caster
-5. No cast time, no cooldown, no resource cost (passive)
-6. The aura can be visually indicated (ground effect around caster)
-1. Normal attack lands on target
-2. 30% chance: lightning arcs from the target to the nearest unhit enemy within arc range
-3. Arc deals 70% of the previous arc's damage
-4. Each arc can trigger another arc (up to 5 total bounces)
-5. Each enemy can only be hit once per chain (no ping-pong)
-6. Visual: lightning bolt effect between each pair
-1. Normal attack crits on target
-2. Explosion at target's position — all enemies within radius take X% of the original crit damage
-3. Each explosion hit rolls its own crit chance
-4. If an explosion hit crits, a new explosion occurs at that target's position
-5. Each generation deals diminishing damage (e.g., 50% of the previous generation)
-6. Bounded by proc_depth — maximum N generations
-7. Visual: cascading explosions rippling outward through groups of enemies
-1. Enemy HP reaches zero from my damage — kill confirmed
-2. AoE explosion at the corpse's position — all enemies within radius take X damage
-3. Caster gains +10% damage buff (5s duration, refreshes on each kill)
-4. If the explosion kills another enemy, repeat from step 2 at the new corpse's position
-5. Each cascade uses the caster's current offensive stats (including accumulated damage buff)
-6. Cascade continues until no more kills occur or proc_depth is reached
-7. Visual: chain of explosions rippling through a group
-1. Cast an ability normally (resource cost paid, cooldown starts)
-2. 25% chance: the same ability fires again immediately at the same target — no resource cost, no cooldown consumed
-3. The echo is a full repeat — projectile, travel time, hit, damage, effects
-4. The echo itself has a 12.5% chance to echo again (halved each time)
-5. Theoretically infinite but probability converges to zero rapidly
-6. Visual: rapid-fire repetition of the same ability with a "ghostly" echo effect
-1. Enemy melee attack lands on me
-2. Block check succeeds during Phase 2 (defense resolution) — attack is blocked
-3. Immediately: counter-attack fires back at the attacker dealing 80% weapon damage
-4. Counter-attack bypasses the attacker's block and evasion (guaranteed hit)
-5. Counter-attack can crit (using blocker's crit chance)
-6. Counter-attack can trigger on-hit procs (e.g., SK-09 Chain Lightning)
-7. Visual: parry animation followed by an instant riposte
-1. I attack an enemy
-2. Before damage is applied, check: is target HP below 25%?
-3. If yes: damage is multiplied by 3x (base + 200% bonus)
-4. Damage is applied (potentially killing the target)
-5. If the target dies from this hit: the ability's cooldown resets to 0
-6. Visual: execute indicator when targeting low-HP enemies, enhanced hit effect
-1. Cast on ally — all negative status effects are immediately removed
-2. This includes: DoTs, slows, stuns, roots, silences, damage-over-time, movement debuffs
-3. Target gains a "Purified" buff granting debuff immunity for 1.5 seconds
-4. During immunity window: any incoming debuff application is blocked (not just delayed)
-5. Purify itself has a long cooldown (e.g., 120 seconds)
-6. Visual: cleansing light effect on the target, immunity glow during the window
-1. Healing zone appears at target position (circular, fixed radius)
-2. Every 1 second: all allies inside the zone are healed for X HP
-3. Allies entering the zone mid-duration begin receiving heals on the next pulse
-4. Allies leaving the zone stop receiving heals immediately
-5. Zone persists for 8 seconds then fades
-6. Multiple healing zones can overlap — healing stacks
-7. Visual: glowing circle on the ground, pulse effect on each heal tick
-1. Cast on ally — caster loses 20% of max HP immediately (cannot kill the caster — minimum 1 HP)
-2. Target gains a shield equal to 150% of HP sacrificed
-3. Incoming damage to the shielded target is absorbed by the shield first
-4. When shield HP reaches 0, remaining damage carries through to real HP
-5. Shield expires after 5 seconds if not fully consumed
-6. Expired shield HP is lost (no conversion back to caster HP)
-7. Visual: golden barrier around the target, cracks as shield is consumed
-1. Target a dead ally's corpse within range
-2. Begin channeling — caster is movement-locked for 3 seconds
-3. Channel can be interrupted by stuns, silences, displacement, caster death
-4. On channel complete: ally entity is restored at corpse position with 50% max HP
-5. Revived ally has all abilities on cooldown (cannot immediately cast)
-6. Revived ally has no active buffs or debuffs — clean state
-7. If channel is interrupted: ability goes on partial cooldown, ally remains dead
-8. Visual: resurrection circle around the corpse, light beam on completion
-1. Cast on ally — mark appears on the target for 5 seconds
-2. When the marked ally takes damage: 50% of pre-mitigation damage is redirected to the guardian
-3. The ally receives the remaining 50%, mitigated by their own defensive stats
-4. The guardian receives the redirected 50%, mitigated by the guardian's own defensive stats
-5. Both entities independently apply their own resistances, block, evasion to their respective portions
-6. If the guardian dies from redirected damage, the mark breaks — ally takes full damage for the remaining duration
-7. Visual: golden link between guardian and ward, flashes on each redirect
-1. Cast — spatial query for all allies within radius at this instant
-2. Each ally in range receives +20% attack speed buff (8 seconds)
-3. Each ally in range receives +15% movement speed buff (8 seconds)
-4. Allies who move out of range keep the buff for its full duration
-5. Allies who enter range after the cast do NOT receive the buff
-6. The caster also receives the buff
-7. Buff has independent expiry per recipient (all expire 8 seconds after application)
-8. Visual: war cry animation, speed lines on buffed allies
-1. Attack lands on me — block check is evaluated
-2. If block succeeds: damage is reduced to zero, "Blocked!" indicator shown
-3. After a successful block: block chance is reduced by a penalty (e.g., -15% per recent block)
-4. Block penalty decays over time (e.g., recovers fully over 3 seconds)
-5. Block can trigger SK-13 Counter-Strike (on-block proc)
-6. Block does NOT prevent non-damage effects (debuffs, displacement) unless specifically stated
-7. Visual: shield raise animation, spark effect on block
-1. Attack lands on me — normal damage is applied
-2. Reflection calculates: reflected_amount = incoming_damage * reflection_percentage
-3. Reflected damage is sent back to the attacker as a new damage event
-4. Attacker's defensive stats mitigate the reflected damage independently
-5. Reflection damage type matches the original damage type (fire reflected as fire)
-6. Reflected damage can trigger procs on the attacker (they are "taking damage")
-7. Visual: mirror/shimmer effect on the defender, reflected damage number on the attacker
-1. Enemy hits me with a melee attack
-2. Regardless of whether the attack is blocked, evaded, or mitigated — thorns fires
-3. Attacker takes flat X damage (based on my thorns stat, not the incoming damage)
-4. Thorns damage type is fixed (e.g., physical, or "true" — bypasses armor)
-5. Thorns damage is mitigated by the attacker's defensive stats (unless true damage)
-6. Thorns can trigger on-hit procs on the attacker (they are "taking damage from me")
-7. Visual: spike/thorn burst effect on the defender when triggered
-1. Ability lands on target — stun is applied for 2 seconds
-2. Target cannot move (movement input ignored)
-3. Target cannot attack (auto-attack disabled)
-4. Target cannot cast abilities (all ability inputs blocked)
-5. Active channels (SK-05 Global Strike) are interrupted immediately
-6. Stun duration is reduced by target's tenacity/CC reduction stat
-7. After stun expires: target gains CC immunity for 1 second (no new hard CC can be applied)
-8. If target is stunned again within 8 seconds of the first stun expiring, diminishing returns apply (duration reduced by 50%)
-9. Visual: stars/dizzy effect over the target's head, frozen pose
-1. Ability lands on target — root is applied for 3 seconds
-2. Target cannot move (movement input ignored, velocity forced to zero)
-3. Target CAN attack (auto-attack functional if enemies are in range)
-4. Target CAN cast abilities (all non-movement abilities functional)
-5. Active movement abilities (dashes, blinks) are blocked while rooted
-6. Root does NOT interrupt channels
-7. Duration reduced by tenacity
-8. Diminishing returns apply (same system as SK-24 but may be in a separate DR category)
-9. Cleansable by SK-15 Purify
-10. Visual: vines/ice/chains around the target's feet
-1. Ability lands on target — silence is applied for 4 seconds
-2. Target cannot cast abilities (all ability inputs rejected)
-3. Target CAN move (movement input functional)
-4. Target CAN auto-attack
-5. Active channels (SK-05 Global Strike) are interrupted immediately
-6. Passive abilities (SK-08 Aura, SK-23 Thorns) continue functioning
-7. Toggle abilities that are already active remain active (but cannot be toggled off/on)
-8. Duration reduced by tenacity
-9. Diminishing returns apply
-10. Cleansable by SK-15 Purify
-11. Visual: muzzle/gag effect, "silenced" indicator
-1. Ability lands on target — sleep is applied for 5 seconds
-2. Target cannot move, attack, or cast (full disable like stun)
-3. Active channels are interrupted
-4. If the sleeping entity takes ANY damage: sleep breaks immediately
-5. Damage from any source breaks sleep (allies, enemies, DoTs, environmental)
-6. After sleep breaks (by damage or expiry): CC immunity window applies
-7. Duration reduced by tenacity
-8. Diminishing returns apply (same hard CC category as stun)
-9. Cleansable by SK-15 Purify
-10. Visual: zzz effect, entity in a resting pose
-1. First slow applied: target moves at 50% speed for 3 seconds
-2. Slow expires. 8-second DR window begins.
-3. If slowed again within the window: new slow is 25% (50% * 0.5 DR) for 3 seconds
-4. If slowed a third time within the window: 12.5% slow for 3 seconds
-5. After 8 seconds with no new slow: DR resets, next slow is full effectiveness
-6. Multiple different slow sources each apply DR independently... or do they share a DR category?
-7. Movement speed has a floor (e.g., minimum 20% of base speed — cannot be fully immobilized by slows alone)
-8. Visual: frost/sluggish effect, intensity matches slow percentage
-1. Storm zone appears at target position (circular, fixed radius)
-2. Every 1 second: all enemies inside take X cold damage
-3. Every 1 second: all enemies inside receive 30% movement slow (refreshed each pulse, effectively permanent while inside)
-4. Enemies entering mid-duration begin taking damage/slow on the next pulse
-5. Enemies leaving the zone lose the slow after it expires (1-2 seconds)
-6. Caster is free to move and act after casting — zone is independent
-7. Zone persists for 8 seconds then dissipates
-8. Visual: swirling snow/ice effect within the zone boundary
-1. As the caster moves, fire appears along the path they traveled
-2. The trail is not a circle — it's a line/path with width following the caster's exact route
-3. Each segment of trail persists for 4 seconds from when it was deposited
-4. Enemies who touch any trail segment take fire damage
-5. Enemies who linger in the trail are ignited (DoT, 2 seconds, refreshed on continued contact)
-6. The caster is immune to their own trail
-7. Trail segments expire individually (oldest segments fade first)
-8. Visual: burning ground along the path, fading from back to front
-1. Vortex appears at target position (circular, fixed radius)
-2. Every tick: all enemies within radius have their velocity modified toward the vortex center
-3. Pull strength increases closer to the center (gravity well)
-4. Every 1 second: all enemies inside take X damage
-5. Enemies can attempt to walk out — if their movement speed exceeds the pull strength at their distance, they escape
-6. Enemies at the center are trapped unless they use a mobility ability (dash/blink)
-7. Vortex lasts 4 seconds then dissipates
-8. Visual: swirling dark energy, particles flowing inward, affected enemies sliding toward center
-1. 5 mines are placed in a predefined pattern (pentagon? line? random within radius?)
-2. Mines are invisible to enemies (unless they have detection/true sight)
-3. Each mine arms after 1 second (cannot detonate during arming)
-4. When any enemy entity enters an armed mine's trigger radius: mine detonates
-5. Detonation deals AoE damage to all enemies within blast radius (larger than trigger radius)
-6. Each mine detonates independently — one detonation does not chain to others unless enemies are pushed into them
-7. Undetonated mines persist for 60 seconds then despawn
-8. Mines are visible to the caster and allies
-9. Visual: subtle shimmer for allies, invisible to enemies, explosion on detonation
-1. Sandstorm zone appears at target position (circular, fixed radius)
-2. Zone begins drifting in the specified direction at a constant speed
-3. Every 1 second: enemies inside take X damage and are slowed by 40%
-4. As the zone moves, new enemies are caught and previously-inside enemies may escape
-5. Zone travels for 6 seconds then dissipates
-6. Caster is free to act — zone is autonomous after cast
-7. Visual: moving sandstorm cloud, visibility reduction inside the zone
-1. Cast — caster begins charging in the specified direction at high speed
-2. Caster cannot steer during the charge (locked direction, no turning)
-3. Caster is unstoppable during the charge (immune to CC? or reduced CC? Design choice)
-4. If caster collides with an enemy entity: enemy is "pinned" — attached to the caster's position and carried along
-5. Only the first enemy hit is pinned (subsequent enemies are knocked aside for minor damage)
-6. If caster hits a wall with a pinned enemy: charge ends, pinned enemy takes X impact damage + Y wall-slam bonus damage
-7. If caster hits a wall with no pinned enemy: charge ends, caster takes a brief self-stun (recovery frames)
-8. If no wall is hit: charge ends after max distance or max duration (e.g., 3 seconds)
-9. On charge end: pinned enemy is released at the caster's current position
-10. Visual: dust trail, shoulder-down running animation, wall impact crater
-1. Cast on target enemy — instant, no travel time
-2. Caster disappears from current position
-3. Caster appears at a position directly behind the target (relative to target's facing direction)
-4. Immediate strike on the target for X bonus damage (backstab bonus)
-5. The strike benefits from "attacking from behind" modifiers if the game has facing-based mechanics
-6. Caster can act normally after arriving (not locked)
-7. Visual: puff of smoke at origin, flash appearance at destination, slash effect on target
-1. First cast: caster blinks to target position (instant, like SK-35)
-2. A shadow/marker is left at the original position (visible to allies, optionally to enemies)
-3. For 3 seconds: ability icon changes to "Return" — pressing it again teleports the caster back to the shadow position
-4. If reactivated: caster snaps back to the shadow position instantly
-5. If not reactivated within 3 seconds: shadow fades, caster stays at current position, ability goes on full cooldown
-6. If the caster dies during the 3-second window: no return (shadow fades)
-7. Visual: dark shadow at the bookmark position, trail effect on return blink
-1. Activate — caster disappears from current position
-2. Caster reappears at the position they occupied 3 seconds ago
-3. Caster's HP is restored to the value it was 3 seconds ago (could be higher or lower than current)
-4. If HP 3 seconds ago was lower than current: caster LOSES health (rewinding into a worse state)
-5. Cooldowns, buffs, debuffs, resource — all remain at their CURRENT values (no rewind)
-6. Visual: time-reverse particle trail from current position through recent movement path to destination
-1. Dagger hits target — initial damage + Contagion debuff applied
-2. Contagion debuff deals damage over time while active (4 seconds per application)
-3. After 2 seconds: the debuff autonomously spreads to all enemies within spread radius of the carrier
-4. Newly infected enemies get their own Contagion debuff (fresh 4-second duration)
-5. After 2 seconds on each new carrier: it spreads again to nearby uninfected enemies
-6. An entity can only be infected once per cast (no re-infection from the same contagion chain)
-7. Maximum 4 generations of spreading (initial target = gen 0, their spread = gen 1, etc.)
-8. Visual: sickly green glow on infected targets, visible spread wave when it jumps
-1. Cast — wave launches from caster in the specified direction
-2. Wave travels forward at a constant speed (like a projectile, but passes through enemies without hitting)
-3. While the wave is in flight: ability icon changes to "Teleport" — pressing it teleports the caster to the wave's current position
-4. If reactivated: caster disappears and appears at the wave's position instantly. Wave dissipates.
-5. If not reactivated: wave reaches max range and dissipates. Ability goes on cooldown.
-6. The wave does not deal damage or interact with entities — it's purely a mobility tool
-7. Visual: ghostly banshee wave traveling forward, caster dissolves and reforms at the wave on reactivation
-1. Cast on enemy hero — channel begins
-2. Target is forced to walk in the direction the caster steers (caster's mouse direction relative to the target)
-3. Target moves at 50% of their normal speed
-4. Target cannot act — movement input overridden, abilities blocked, auto-attack blocked
-5. Caster is locked in place while channeling (cannot move, cannot cast other abilities)
-6. If channel is interrupted (caster takes damage above threshold? stun? silence?): effect ends immediately, enemy regains control
-7. Channel lasts 2.5 seconds maximum
-8. Visual: purple mind control beam between caster and target, target's eyes glow, puppet-like movement
-1. Cast — projectile launches in the specified direction
-2. Projectile travels at constant speed in a straight line
-3. Projectile passes through all entities (does not detonate on contact)
-4. While in flight: ability icon changes to "Detonate"
-5. If reactivated: projectile explodes at its current position — AoE damage + 2.5s silence to all enemies in blast radius
-6. If not reactivated: projectile detonates automatically at max range
-7. Caster can move and act normally while the projectile is in flight
-8. Visual: glowing arrow with a trail, expanding explosion on detonation
-1. Press ability — one arrow fires at the nearest enemy hero within range
-2. Arrow is instant (hitscan or very fast projectile — no meaningful travel time)
-3. Arrow deals X damage to the target
-4. One charge is consumed (5 max charges)
-5. Can be pressed rapidly — fire all 5 in quick succession (no cooldown between charges, just a minimum interval like 0.15s)
-6. Charges recharge independently: one charge every 8 seconds
-7. Charge recharge timer starts when a charge is consumed, not when all charges are spent
-8. If no enemy hero is in range: ability fails / fires at nearest non-hero enemy
-9. Visual: rapid arrow shots, charge counter UI element
-1. Tongue launches as a line projectile in the cast direction
-2. Tongue travels at high speed — hits the FIRST enemy entity in its path (skillshot)
-3. If no enemy is hit before max range: tongue retracts, short cooldown (e.g., 6s)
-4. If enemy is hit: latch on — enemy is dragged toward the caster over 1.75 seconds
-5. During the drag: the caster CAN move. The drag destination moves with the caster.
-6. During the drag: the target cannot act (hard CC — functionally a stun)
-7. The target is pulled along a direct line toward the caster's current position each tick
-8. At the end of the drag: target is released at their current position, near the caster
-9. Visual: tongue extending out, latching, enemy being reeled in
-1. Activate — caster burrows underground instantly
-2. While burrowed: caster is invulnerable (all incoming damage is negated)
-3. While burrowed: caster is untargetable (cannot be selected as a target by any ability — friendly or hostile)
-4. While burrowed: caster cannot move, attack, or cast
-5. While burrowed: caster heals for X HP per second
-6. After 2 seconds (or on reactivation): caster emerges at the same position
-7. All previously applied debuffs continue ticking but deal no damage (invulnerable) — or are they paused?
-8. Visual: caster sinks into the ground, dirt mound visible, emerges with a burst
-1. An enemy minion/monster dies within collection range of my character
-2. An essence orb spawns at the death position
-3. If I walk within pickup radius of the orb, it's automatically collected
-4. Collected essence is added to my essence counter (secondary resource, e.g., 0/50 max)
-5. Each minion death drops a fixed amount (e.g., 2 essence), elite monsters drop more (10 essence)
-6. Orbs persist on the ground for 8 seconds if not collected, then despawn
-7. Activate trait: consume all stored essence, heal for (essence_consumed * heal_per_essence) over 5 seconds
-8. Visual: green orbs on the ground, absorption effect on pickup, green healing glow on activation
-1. Activate — a 4-second tracking window begins
-2. During the window: every point of damage I take is accumulated in a counter
-3. All damage types count: direct hits, DoTs, reflected damage, AoE, everything
-4. Damage is still applied normally — I take full damage during the window (not reduced)
-5. After 4 seconds: I am healed for 100% of the accumulated damage total
-6. The heal is a single burst heal at the end, not a heal-over-time
-7. If I die during the 4-second window: the heal never fires (I'm dead)
-8. If I take 0 damage during the window: I am healed for 0 (ability was wasted)
-9. Visual: glowing adaptive carapace effect, damage counter visible to the player, burst heal on completion
-1. Activate — gain a large shield (e.g., 800 HP)
-2. Shield absorbs incoming damage normally (same as SK-17)
-3. If shield expires (3 seconds) with remaining value: explosion deals damage = remaining_shield * 1.0
-4. If shield is fully consumed by damage before expiry: explosion deals 0 damage (nothing remained)
-5. If shield is partially consumed: explosion deals proportional damage (e.g., 400 remaining = 400 damage explosion)
-6. Explosion hits all enemies within blast radius
-7. Visual: golden shield grows brighter as it nears expiry, detonates in a nova
-1. Cast on an enemy: projectile launches, on hit deals X damage
-2. Cast on an ally: projectile launches, on hit heals for Y HP
-3. Can also cast on self: heals self for Y HP (projectile is instant / zero travel time to self)
-4. Same cooldown regardless of target type
-5. Same resource cost regardless of target type
-6. Visual: dark projectile when targeting enemy, green projectile when targeting ally
-1. Cast — instant AoE in a cone shape in front of the caster
-2. Cone has an angle (e.g., 90 degrees) and a range (e.g., 6 meters)
-3. All enemies within the cone take X damage
-4. All enemies within the cone are slowed by 40% for 2 seconds
-5. Allies are not affected
-6. The cone is anchored to the caster's position and oriented in the cast direction
-7. This is instant (not a zone that persists) — snapshot query at cast time
-8. Visual: sweeping arc slash effect
-1. Enemies in the cone are blinded for 2 seconds
-2. While blinded: auto-attacks miss 100% of the time
-3. Miss means: no damage dealt, no on-hit effects trigger, attacker sees "Miss!" indicator
-4. Abilities are NOT affected — only auto-attacks
-5. Blind does not prevent movement, casting, or any action — it only causes auto-attacks to whiff
-6. Duration reduced by Tenacity
-7. Subject to Diminishing Returns (SK-28) — in the soft CC category
-8. Cleansable by SK-15 Purify
-9. Visual: bright flash, blinded enemies have a visual indicator (darkened screen/stars)
-1. Activate — gain Unstoppable status for 2 seconds + shield
-2. While Unstoppable: all incoming CC is negated (stuns, roots, silences, slows, blinds, sleep, displacement, pulls)
-3. CC abilities still deal their damage (if any) — only the CC component is stripped
-4. While Unstoppable: I can still take damage normally (NOT invulnerable)
-5. While Unstoppable: I can still be targeted by abilities (NOT untargetable)
-6. Existing CC is removed on activation (acts as a self-cleanse)
-7. Shield provides additional survivability during the Unstoppable window
-8. Visual: glowing golden outline, "Unstoppable" text indicator
-1. First Q press: quick slash dealing X damage to target
-2. Within 2 seconds, second Q press: quick slash dealing X damage to target
-3. Within 2 seconds, third Q press: heavy slash dealing 1.5X damage AND healing caster for Y HP
-4. After the third press: combo resets to first hit. Full cooldown begins.
-5. If 2 seconds pass between any press: combo resets to first hit. Short cooldown.
-6. Each press can target a different enemy (not locked to the first target)
-7. Visual: escalating slash animations, third hit has a pronounced wind-up and green heal effect
-1. Channel on an enemy for 2 seconds (can be interrupted)
-2. During channel: both entities can take damage normally (percentages keep changing)
-3. On channel complete: read both entities' current HP as a percentage of their max HP
-4. Caster's HP is set to (target's percentage × caster's max HP)
-5. Target's HP is set to (caster's percentage × target's max HP)
-6. The swap is instantaneous — happens in a single tick
-7. Neither entity can die from the swap (minimum 1 HP after swap)
-8. Visual: dark energy connecting both entities during channel, dramatic HP bar swap on completion
-1. Cast on enemy hero at melee range
+        // 1. Buffer incoming top-down commands into the persistent scheduler
+        for command in self.controller_inbox.drain(..) {
+            if let ControllerCommand::ExecuteGlobalEvent { event_id, .. } = command {
+                self.pending_global_events.insert(event_id, command);
+            } else {
+                self.process_controller_command(command);
+            }
+        }
+
+        // 2. Every tick is a full simulation tick. The Arbiter always runs at 60Hz.
+        // Kinematic Dilation slows entities, not the server. See 06-kinematic-dilation.md.
+        // Recalculate dilation_factor from current entity count.
+        self.recalculate_dilation();
+
+        self.simulate_physics_step();
+
+            // 3. Execute Scheduled Controller Commands
+            self.pending_global_events.retain(|_, cmd| {
+                if let ControllerCommand::ExecuteGlobalEvent {
+                    epicenter,
+                    event_id,
+                    geometry,
+                    target_filters,
+                    pulse_interval_ticks,
+                    duration_ticks,
+                    execute_at_tick,
+                    caster_id,
+                    ability_id,
+                    data_epoch,
+                    context,
+                } = cmd {
+                    // Ideal execution is `==`. `>=` acts as an emergency fallback if the 
+                    // reliable TCP packet was severely delayed due to a datacenter outage.
+                    if self.current_tick >= *execute_at_tick {
+                        // Deterministic Epoch Pinning:
+                        // Execute only under the same data dictionary used during pre-roll.
+                        if *data_epoch != self.current_data_epoch {
+                            if !self.try_activate_data_epoch(*data_epoch) {
+                                // Keep queued and retry next frame rather than detonating under the wrong balance set.
+                                return true;
+                            }
+                        }
+                        
+                        self.resolve_global_event_effect(
+                            *epicenter,
+                            geometry.clone(),
+                            target_filters.clone(),
+                            *pulse_interval_ticks,
+                            *duration_ticks,
+                            *event_id,
+                            *caster_id,
+                            *ability_id,
+                            *data_epoch,
+                            context.clone(),
+                        );
+                        
+                        // Pulse Lifecycle Management
+                        if let (Some(interval), Some(duration)) = (pulse_interval_ticks, duration_ticks) {
+                            if *duration > *interval {
+                                *duration -= *interval;
+                                *execute_at_tick += *interval as u64;
+                                return true; // Keep in queue for the next pulse
+                            }
+                        }
+                        return false; // Final execution, remove from queue
+                    }
+                }
+                true // Keep in queue for the future
+            });
+
+            // 4. Process Internal Mesh Events (Draining the persistent queue)
+            for event in self.internal_inbox.drain(..) {
+                // Internal Relay Deduplication
+                if self.processed_proposals.contains(&event.event_id) { continue; }
+                self.processed_proposals.insert(event.event_id, true);
+                
+                self.resolve_action(event.payload, event.actor_id, event.origin_tick, None, event.data_epoch);
+            }
+
+            // 5. Process External Proposals (Draining both persistent queue and stale buffer)
+            let mut next_tick_stale_buffer = BoundedQueue::new(1000); // 1,000 capacity protects a 400-player Arbiter
+            let mut latest_movement_by_actor: HashMap<EntityID, (ActionProposal, u64)> = HashMap::new();
+            
+            // We combine new arrivals with anything we held over from the previous tick.
+            // Movement packets are coalesced to latest-per-actor before validation to reduce pressure.
+            let all_proposals = self.external_inbox.drain(..).map(|p| (p, self.current_tick))
+                .chain(self.stale_proposals_buffer.drain(..));
+
+            for (proposal, local_arrival_tick) in all_proposals {
+                if matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
+                    latest_movement_by_actor.insert(proposal.actor_id, (proposal, local_arrival_tick));
+                    continue;
+                }
+
+                // --- Data Epoch Handshake Validation ---
+                if proposal.data_epoch < self.current_data_epoch {
+                    self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                        proposal_id: proposal.proposal_id,
+                        reason: "Data Epoch Mismatch".to_string()
+                    });
+                    continue;
+                } else if proposal.data_epoch > self.current_data_epoch {
+                    if !self.try_activate_data_epoch(proposal.data_epoch) {
+                        if self.current_tick.saturating_sub(local_arrival_tick) >= MAX_EVENT_AGE_TICKS {
+                            self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                                proposal_id: proposal.proposal_id,
+                                reason: "Data Epoch Sync Timeout".to_string()
+                            });
+                        } else {
+                            if next_tick_stale_buffer.is_full() {
+                                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                                    proposal_id: proposal.proposal_id,
+                                    reason: "Arbiter Queue Saturated".to_string()
+                                });
+                            } else {
+                                next_tick_stale_buffer.push_back((proposal, local_arrival_tick));
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // --- Topology Epoch Handshake Validation ---
+                if proposal.topology_epoch < self.topology_epoch {
+                    self.forward_to_correct_arbiter(proposal); // Proxy is stale
+                    continue;
+                } else if proposal.topology_epoch > self.topology_epoch {
+                    // Arbiter is stale. Buffer until the Controller's topology update arrives.
+                    // Timeout is based purely on the Arbiter's local clock, avoiding drift false-positives.
+                    // We use MAX_EVENT_AGE_TICKS (60 ticks / 1.0s) to unify the engine's latency budget,
+                    // allowing TCP up to 3 retransmissions to deliver the map update before we refund the player.
+                    if self.current_tick.saturating_sub(local_arrival_tick) >= MAX_EVENT_AGE_TICKS {
+                        self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                            proposal_id: proposal.proposal_id,
+                            reason: "Topology Sync Timeout (Arbiter Stale)".to_string()
+                        });
+                    } else {
+                        // Explicit rejection on saturation (never silent drop).
+                        if next_tick_stale_buffer.is_full() {
+                            self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                                proposal_id: proposal.proposal_id,
+                                reason: "Arbiter Queue Saturated".to_string()
+                            });
+                        } else {
+                            next_tick_stale_buffer.push_back((proposal, local_arrival_tick));
+                        }
+                    }
+                    continue;
+                }
+
+                if self.processed_proposals.contains(&proposal.proposal_id) { continue; }
+                self.processed_proposals.insert(proposal.proposal_id, true);
+                
+                if self.is_in_overlap_buffer(proposal.actor_id) {
+                    self.relay_to_neighbors(MeshInternalEvent {
+                        event_id: proposal.proposal_id,
+                        source_arbiter_id: self.arbiter_id,
+                        actor_id: Some(proposal.actor_id),
+                        origin_tick: proposal.origin_tick,
+                        data_epoch: proposal.data_epoch,
+                        payload: proposal.payload.clone()
+                    });
+                }
+
+                self.resolve_action(proposal.payload, Some(proposal.actor_id), proposal.origin_tick, Some(proposal.proposal_id), proposal.data_epoch);
+            }
+
+            // Process latest movement per actor after coalescing (no per-proposal terminal acks).
+            for (_, (proposal, local_arrival_tick)) in latest_movement_by_actor {
+                if proposal.data_epoch > self.current_data_epoch {
+                    if !self.try_activate_data_epoch(proposal.data_epoch)
+                        && self.current_tick.saturating_sub(local_arrival_tick) < MAX_EVENT_AGE_TICKS
+                    {
+                        let _ = next_tick_stale_buffer.try_push_back((proposal, local_arrival_tick));
+                        continue;
+                    }
+                } else if proposal.data_epoch < self.current_data_epoch {
+                    // Movement has no terminal ack; stale movement is dropped/coalesced.
+                    continue;
+                }
+
+                if proposal.topology_epoch < self.topology_epoch {
+                    self.forward_to_correct_arbiter(proposal);
+                    continue;
+                } else if proposal.topology_epoch > self.topology_epoch {
+                    if self.current_tick.saturating_sub(local_arrival_tick) < MAX_EVENT_AGE_TICKS {
+                        let _ = next_tick_stale_buffer.try_push_back((proposal, local_arrival_tick));
+                    }
+                    continue;
+                }
+                self.resolve_action(proposal.payload, Some(proposal.actor_id), proposal.origin_tick, None, proposal.data_epoch);
+            }
+            
+        // Save the held-over proposals for the next simulation tick
+        self.stale_proposals_buffer = next_tick_stale_buffer;
+
+        // Integrate dead-reckoned Ghosts with low-cost anomaly guards.
+        self.integrate_ghosts_lightweight();
+        self.broadcast_ghosts_to_neighbors();
+        self.broadcast_with_interest_management(); 
+        self.tick_merge_forwarding();
+        self.gc_expired_projectile_prepares();
+        self.update_metronome_correction();
+
+        let sim_elapsed_us = monotonic_elapsed_micros(frame_start);
+        let sleep_us = self.compute_frame_sleep_micros(sim_elapsed_us);
+        sleep_micros(sleep_us as u64);
+    }
+
+    // --- Ghost Integration (Low-Cost / Anomaly-Gated) ---

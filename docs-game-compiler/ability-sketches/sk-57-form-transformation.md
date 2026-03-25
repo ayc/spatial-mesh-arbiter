@@ -103,7 +103,7 @@ TODO: The transformation is local to the entity's Arbiter. The entity's stats ch
 TODO: Designer specifies: two full stat blocks (original form, alternate form), two ability sets (original, alternate), transformation trigger (activation or death), duration, HP scaling formula, revert behavior. Compiler produces:
 - Two complete entity profiles in SpellData (one per form)
 - FormTransformation status effect that stores/restores the original profile
-- Ability set routing in validate_intent and resolve_external hooks
+- Ability set routing in `validate_intent` and subsequent stage execution
 - HP scaling logic on transform and revert
 - Optional death-trigger variant (intercept death → transform instead)
 

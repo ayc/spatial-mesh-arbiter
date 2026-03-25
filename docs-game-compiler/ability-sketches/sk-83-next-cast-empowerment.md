@@ -52,9 +52,9 @@ enum AbilityModifier {
 }
 ```
 
-### Resolution Hook Integration
+### Stage Execution Integration
 
-When the `resolve_external` hook processes an ability:
+When the adapter processes an ability through its stage-execution path:
 1. Check: does the caster have an EmpowermentBuff?
 2. If yes: look up the enhancement for this specific ability
 3. Apply the modifier to the ability's resolution (bigger AoE, more damage, extra CC)
@@ -78,7 +78,7 @@ TODO: Minimal. The empowerment buff is on the caster's entity (local SoftState).
 TODO: Designer specifies: trait activation (applies empowerment buff), per-ability enhancements (Q: bigger AoE, W: extra targets, E: add stun), buff duration (6s), consumed on first ability cast, one empowerment per activation. Compiler produces:
 - EmpowermentBuff status effect with per-ability modifiers
 - Per-ability enhancement definitions (how each ability changes when empowered)
-- Resolution hook: check for empowerment → apply modifier → consume
+- Stage execution logic: check for empowerment → apply modifier → consume
 - Two versions of each ability in SpellData: normal and empowered (or: one version with conditional modifier)
 
 The compiler needs to support **ability modifiers** — data that transforms an ability's parameters at resolution time based on active buffs. This is a general mechanism that could support many "enhance next cast" patterns.

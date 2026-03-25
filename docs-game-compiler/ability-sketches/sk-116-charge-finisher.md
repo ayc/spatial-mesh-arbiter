@@ -90,7 +90,7 @@ The charges carry TYPE INFORMATION — not just a count, but WHAT KIND of charge
 - 1 fire + 1 lightning + 1 cold → tri-element finisher (moderate damage of each type)
 - 2 cold + 1 lightning → cold-heavy finisher (strong cold + moderate lightning)
 
-The finisher's resolve_external hook must read the charge types and produce different effects based on the composition. This is more complex than a simple count-based scaling — it's COMPOSITION-BASED resolution.
+The finisher's stage-execution path must read the charge types and produce different effects based on the composition. This is more complex than a simple count-based scaling — it's COMPOSITION-BASED resolution.
 
 ### Charge Decay
 

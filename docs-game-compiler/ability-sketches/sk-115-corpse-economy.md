@@ -58,7 +58,7 @@ When an ability targets or consumes a corpse, the ability resolution receives th
 - Raise Skeleton: `skeleton_hp = base + corpse.source_entity_level * scaling` — minion stats scale with corpse quality
 - Corpse Lance: `projectile_count = nearby_corpses.len()` — more corpses = more projectiles
 
-The ability's resolve_external hook must receive the consumed corpse's data alongside the normal CombatContext. This is a new input type for ability resolution — not just "caster stats + target stats" but also "consumed entity stats."
+The ability's stage-execution path must receive the consumed corpse's data alongside the normal CombatContext. This is a new input type for ability resolution — not just "caster stats + target stats" but also "consumed entity stats."
 
 ### Spatial Resource Management
 

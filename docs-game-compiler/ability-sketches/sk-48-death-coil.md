@@ -34,12 +34,12 @@ The `validate_intent` hook must:
 1. Accept any entity as a valid target (not filtered to enemies-only or allies-only)
 2. Determine the target's team/faction relative to the caster
 
-The `resolve_external` hook must:
+The adapter's stage-execution path must:
 1. Check target allegiance: `is_ally(caster, target)` or `is_enemy(caster, target)`
 2. If enemy: resolve as damage (Phase 1 offense → Phase 2 defense on target)
 3. If ally: resolve as heal (apply healing directly)
 
-This branching must happen inside the game adapter hooks, not in the engine. The engine just delivers the proposal — the adapter decides the outcome.
+This branching must happen inside the adapter's validation/stage logic, not in the engine. The engine just delivers the proposal — the adapter decides the outcome.
 
 ### Target Validation Flexibility
 

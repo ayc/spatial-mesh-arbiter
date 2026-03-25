@@ -6,7 +6,8 @@ The kernel owns:
 - spatial partitioning and authority assignment
 - topology mutation (split/merge/slide)
 - authoritative tick scheduling
-- movement integration and collision primitives
+- movement integration and collision primitives (specified in `01-1-spatial-primitive-catalog.md`)
+- entity lifecycle phases, dormancy, suspension, and spawning (specified in `01-2-entity-lifecycle-contract.md`)
 - cross-boundary visibility proxies
 - load adaptation mechanisms
 

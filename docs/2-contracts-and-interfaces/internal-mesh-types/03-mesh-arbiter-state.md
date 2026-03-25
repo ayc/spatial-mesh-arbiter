@@ -1,5 +1,7 @@
 # Internal Mesh Types: Mesh Arbiter State
 
+**API v2 Note:** The `tick()` execution loop below reflects the normative 12-stage pipeline and `dispatch_stage` mechanism defined in `docs-core/04-2-game-adapter-api-contract.md`. Utility functions outside the tick loop (ghost integration, physics helpers, ARPG combat math) predate the API v2 migration and will be reconciled during the `docs/` extraction workstream (`docs-core/06-architecture-section-mapping.md`).
+
 ## 3. Layer 2: The Mesh Arbiter (Spatial Actor)
 
 The Spatial Actor is a single-threaded, lock-free, 60Hz deterministic simulation loop. 
@@ -198,7 +200,7 @@ struct MergeState {
     forwarding_until_tick: u64,
 }
 
-struct SpatialActor<G: GameResolver> {
+struct SpatialActor<G: GameAdapter> {
     arbiter_id: u32,
     topology_epoch: u32,
     current_data_epoch: u32, // The version of the SpellData dictionary currently loaded in memory
@@ -226,6 +228,13 @@ struct SpatialActor<G: GameResolver> {
     
     // Future Event Scheduler
     pending_global_events: HashMap<UUID, ControllerCommand>,
+
+    // Deferred ingress normalized for the API v2 stage scheduler.
+    // `incoming_deferred_events` is the batch eligible for the current tick.
+    // `next_tick_deferred_events` accumulates Stage 9/11 outputs and ready controller timers
+    // for deterministic re-entry on the next authoritative tick.
+    incoming_deferred_events: Vec<DeferredEvent>,
+    next_tick_deferred_events: Vec<DeferredEvent>,
     
     // Stale Buffer: Holds (Proposal, local_arrival_tick) to measure timeout safely.
     // Must be a BoundedQueue to prevent OOM vulnerabilities during prolonged Mesh Controller 
@@ -257,11 +266,11 @@ struct SpatialActor<G: GameResolver> {
     // Memory-bounded ring: max keys ~= idempotency_bucket_capacity * MAX_EVENT_AGE_TICKS.
     event_idempotency_ledger: [BoundedLedgerBucket; MAX_EVENT_AGE_TICKS as usize], // each bucket initialized with boot_config.idempotency_bucket_capacity
     idempotency_overflow_drop_count: u64, // Impacts dropped fail-closed due to dedupe cap
-    idempotency_merge_overflow_drop_count: u64,
-    game_resolver: G, // Imported merge dedupe keys dropped due to cap
+    idempotency_merge_overflow_drop_count: u64, // Imported merge dedupe keys dropped due to cap
+    adapter: G,
 }
 
-impl<G: GameResolver> SpatialActor<G> {
+impl<G: GameAdapter> SpatialActor<G> {
     const FRAME_BUDGET_US: i64 = 16_666;
     const METRONOME_GAIN_US_PER_TICK: i64 = 50;
     const METRONOME_OFFSET_CLAMP_US: i64 = 1000;
@@ -289,18 +298,8 @@ impl<G: GameResolver> SpatialActor<G> {
     // Called by the network ingress layer for each proposal packet before queueing.
     fn on_external_proposal_received(&mut self, proposal: ActionProposal<G>) {
         // Zero-trust ingress: only intent-level payloads are valid from Edge Nodes.
-        // The engine delegates game-specific validation to the GameResolver
-        if let ActionPayload::Game(game_action) = &proposal.payload {
-            if let Err(reason) = self.game_resolver.validate_proposal(game_action, proposal.actor_id) {
-                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                    proposal_id: proposal.proposal_id,
-                    reason: reason.to_string(),
-                });
-                return;
-            }
-        }
-        
-        if false {
+        // Game-semantic legality is evaluated later in Stage 2 via `validate_intent`.
+        if !proposal.payload.is_edge_admissible() {
             self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
                 proposal_id: proposal.proposal_id,
                 reason: "Invalid Payload Type".to_string(),
@@ -359,197 +358,72 @@ impl<G: GameResolver> SpatialActor<G> {
             }
         }
 
-        // 2. Every tick is a full simulation tick. The Arbiter always runs at 60Hz.
-        // Kinematic Dilation slows entities, not the server. See 06-kinematic-dilation.md.
-        // Recalculate dilation_factor from current entity count.
+        // 2. Metronome & Kinematic Dilation
         self.recalculate_dilation();
 
-        self.simulate_physics_step();
+        // Normalize engine-owned ingress into API v2 stage inputs.
+        // This preparation step:
+        // - merges `external_inbox` with `stale_proposals_buffer`
+        // - applies topology/data-epoch gating and bounded stale buffering
+        // - coalesces continuous movement intents
+        // - drains `internal_inbox` and ready `pending_global_events` into typed DeferredEvents
+        // - deduplicates relay traffic before it enters Stage 2 or deferred stage ingress
+        let stage2_candidates = self.prepare_stage2_intents();
+        self.promote_ready_deferred_ingress();
+        
+        // --- STAGE 1: ControlAuthorityAndInputRouting ---
+        // (API v2) Engine resolves routing changes before validation
+        let stage1_outcome = self.adapter.dispatch_stage(1, self.build_stage_context());
+        self.apply_stage_outcome(stage1_outcome);
+        self.commit_routing_state();
 
-            // 3. Execute Scheduled Controller Commands
-            self.pending_global_events.retain(|_, cmd| {
-                if let ControllerCommand::ExecuteGlobalEvent {
-                    epicenter,
-                    event_id,
-                    geometry,
-                    target_filters,
-                    pulse_interval_ticks,
-                    duration_ticks,
-                    execute_at_tick,
-                    caster_id,
-                    ability_id,
-                    data_epoch,
-                    context,
-                } = cmd {
-                    // Ideal execution is `==`. `>=` acts as an emergency fallback if the 
-                    // reliable TCP packet was severely delayed due to a datacenter outage.
-                    if self.current_tick >= *execute_at_tick {
-                        // Deterministic Epoch Pinning:
-                        // Execute only under the same data dictionary used during pre-roll.
-                        if *data_epoch != self.current_data_epoch {
-                            if !self.try_activate_data_epoch(*data_epoch) {
-                                // Keep queued and retry next frame rather than detonating under the wrong balance set.
-                                return true;
-                            }
-                        }
-                        
-                        self.resolve_global_event_effect(
-                            *epicenter,
-                            geometry.clone(),
-                            target_filters.clone(),
-                            *pulse_interval_ticks,
-                            *duration_ticks,
-                            *event_id,
-                            *caster_id,
-                            *ability_id,
-                            *data_epoch,
-                            context.clone(),
-                        );
-                        
-                        // Pulse Lifecycle Management
-                        if let (Some(interval), Some(duration)) = (pulse_interval_ticks, duration_ticks) {
-                            if *duration > *interval {
-                                *duration -= *interval;
-                                *execute_at_tick += *interval as u64;
-                                return true; // Keep in queue for the next pulse
-                            }
-                        }
-                        return false; // Final execution, remove from queue
-                    }
+        // Drain normalized Stage 2 candidates into intent validation
+        let mut valid_intents = Vec::new();
+        for proposal in stage2_candidates {
+            let outcome = self.adapter.validate_intent(proposal.clone(), self.build_entity_snapshot(proposal.actor_id));
+            if outcome.status == Status::OK {
+                valid_intents.push(proposal);
+                if let Some(stage_outcome) = outcome.stage_outcome {
+                    self.apply_stage_outcome(stage_outcome); // Handle P-40 intercepts
                 }
-                true // Keep in queue for the future
-            });
-
-            // 4. Process Internal Mesh Events (Draining the persistent queue)
-            for event in self.internal_inbox.drain(..) {
-                // Internal Relay Deduplication
-                if self.processed_proposals.contains(&event.event_id) { continue; }
-                self.processed_proposals.insert(event.event_id, true);
-                
-                self.resolve_action(event.payload, event.actor_id, event.origin_tick, None, event.data_epoch);
+            } else {
+                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
+                    proposal_id: proposal.proposal_id,
+                    reason: outcome.reject_code.unwrap_or_default(),
+                });
             }
+        }
+        
+        // Inject Deferred Events (Sorted)
+        self.incoming_deferred_events.sort_by_key(|e| (e.ready_tick, e.target_stage, e.sort_key));
 
-            // 5. Process External Proposals (Draining both persistent queue and stale buffer)
-            let mut next_tick_stale_buffer = BoundedQueue::new(1000); // 1,000 capacity protects a 400-player Arbiter
-            let mut latest_movement_by_actor: HashMap<EntityID, (ActionProposal, u64)> = HashMap::new();
+        // --- STAGES 3 through 12 ---
+        // (API v2) The engine drives the global pipeline
+        for stage_id in 3..=12 {
+            let mut stage_batch = self.build_stage_batch(stage_id, &valid_intents);
             
-            // We combine new arrivals with anything we held over from the previous tick.
-            // Movement packets are coalesced to latest-per-actor before validation to reduce pressure.
-            let all_proposals = self.external_inbox.drain(..).map(|p| (p, self.current_tick))
-                .chain(self.stale_proposals_buffer.drain(..));
+            // Inject deferred events for this stage
+            self.inject_deferred_events(&mut stage_batch, stage_id);
 
-            for (proposal, local_arrival_tick) in all_proposals {
-                if matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
-                    latest_movement_by_actor.insert(proposal.actor_id, (proposal, local_arrival_tick));
-                    continue;
-                }
+            let stage_outcome = self.adapter.dispatch_stage(stage_id, stage_batch);
+            self.apply_stage_outcome(stage_outcome);
 
-                // --- Data Epoch Handshake Validation ---
-                if proposal.data_epoch < self.current_data_epoch {
-                    self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                        proposal_id: proposal.proposal_id,
-                        reason: "Data Epoch Mismatch".to_string()
-                    });
-                    continue;
-                } else if proposal.data_epoch > self.current_data_epoch {
-                    if !self.try_activate_data_epoch(proposal.data_epoch) {
-                        if self.current_tick.saturating_sub(local_arrival_tick) >= MAX_EVENT_AGE_TICKS {
-                            self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                                proposal_id: proposal.proposal_id,
-                                reason: "Data Epoch Sync Timeout".to_string()
-                            });
-                        } else {
-                            if next_tick_stale_buffer.is_full() {
-                                self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                                    proposal_id: proposal.proposal_id,
-                                    reason: "Arbiter Queue Saturated".to_string()
-                                });
-                            } else {
-                                next_tick_stale_buffer.push_back((proposal, local_arrival_tick));
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                // --- Topology Epoch Handshake Validation ---
-                if proposal.topology_epoch < self.topology_epoch {
-                    self.forward_to_correct_arbiter(proposal); // Proxy is stale
-                    continue;
-                } else if proposal.topology_epoch > self.topology_epoch {
-                    // Arbiter is stale. Buffer until the Controller's topology update arrives.
-                    // Timeout is based purely on the Arbiter's local clock, avoiding drift false-positives.
-                    // We use MAX_EVENT_AGE_TICKS (60 ticks / 1.0s) to unify the engine's latency budget,
-                    // allowing TCP up to 3 retransmissions to deliver the map update before we refund the player.
-                    if self.current_tick.saturating_sub(local_arrival_tick) >= MAX_EVENT_AGE_TICKS {
-                        self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                            proposal_id: proposal.proposal_id,
-                            reason: "Topology Sync Timeout (Arbiter Stale)".to_string()
-                        });
-                    } else {
-                        // Explicit rejection on saturation (never silent drop).
-                        if next_tick_stale_buffer.is_full() {
-                            self.send_downstream(proposal.actor_id, DownstreamPayload::ActionFailed {
-                                proposal_id: proposal.proposal_id,
-                                reason: "Arbiter Queue Saturated".to_string()
-                            });
-                        } else {
-                            next_tick_stale_buffer.push_back((proposal, local_arrival_tick));
-                        }
-                    }
-                    continue;
-                }
-
-                if self.processed_proposals.contains(&proposal.proposal_id) { continue; }
-                self.processed_proposals.insert(proposal.proposal_id, true);
-                
-                if self.is_in_overlap_buffer(proposal.actor_id) {
-                    self.relay_to_neighbors(MeshInternalEvent {
-                        event_id: proposal.proposal_id,
-                        source_arbiter_id: self.arbiter_id,
-                        actor_id: Some(proposal.actor_id),
-                        origin_tick: proposal.origin_tick,
-                        data_epoch: proposal.data_epoch,
-                        payload: proposal.payload.clone()
-                    });
-                }
-
-                self.resolve_action(proposal.payload, Some(proposal.actor_id), proposal.origin_tick, Some(proposal.proposal_id), proposal.data_epoch);
+            // Engine-owned Commit Boundaries
+            match stage_id {
+                5 => self.commit_kinematic_positions(), // Post-KinematicResolution
+                10 => self.commit_death_and_respawn(),  // Post-DeathCheck
+                12 => self.serialize_downstream_payloads(), // Post-Emission
+                _ => {}
             }
+        }
 
-            // Process latest movement per actor after coalescing (no per-proposal terminal acks).
-            for (_, (proposal, local_arrival_tick)) in latest_movement_by_actor {
-                if proposal.data_epoch > self.current_data_epoch {
-                    if !self.try_activate_data_epoch(proposal.data_epoch)
-                        && self.current_tick.saturating_sub(local_arrival_tick) < MAX_EVENT_AGE_TICKS
-                    {
-                        let _ = next_tick_stale_buffer.try_push_back((proposal, local_arrival_tick));
-                        continue;
-                    }
-                } else if proposal.data_epoch < self.current_data_epoch {
-                    // Movement has no terminal ack; stale movement is dropped/coalesced.
-                    continue;
-                }
+        // Stage 9/11 outputs and ready controller timers are now accumulated in
+        // `next_tick_deferred_events` and become the ingress source for the next tick.
+        self.roll_deferred_event_queues();
 
-                if proposal.topology_epoch < self.topology_epoch {
-                    self.forward_to_correct_arbiter(proposal);
-                    continue;
-                } else if proposal.topology_epoch > self.topology_epoch {
-                    if self.current_tick.saturating_sub(local_arrival_tick) < MAX_EVENT_AGE_TICKS {
-                        let _ = next_tick_stale_buffer.try_push_back((proposal, local_arrival_tick));
-                    }
-                    continue;
-                }
-                self.resolve_action(proposal.payload, Some(proposal.actor_id), proposal.origin_tick, None, proposal.data_epoch);
-            }
-            
-        // Save the held-over proposals for the next simulation tick
-        self.stale_proposals_buffer = next_tick_stale_buffer;
-
-        // Integrate dead-reckoned Ghosts with low-cost anomaly guards.
+        // Integrate dead-reckoned Ghosts
         self.integrate_ghosts_lightweight();
         self.broadcast_ghosts_to_neighbors();
-        self.broadcast_with_interest_management(); 
         self.tick_merge_forwarding();
         self.gc_expired_projectile_prepares();
         self.update_metronome_correction();
@@ -673,81 +547,7 @@ impl<G: GameResolver> SpatialActor<G> {
         }
     }
 
-    fn resolve_action(&mut self, payload: ActionPayload<G>, source_actor_id: Option<EntityID>, origin_tick: u64, original_proposal_id: Option<UUID>, data_epoch: u32) {
-        match payload {
-            ActionPayload::Engine(EngineAction::Movement { position, velocity, rotation }) => {
-                let actor_id = source_actor_id.expect("Movement requires a source actor");
-                if let Some((core, _)) = self.entities.get_mut(&actor_id) {
-                    if !self.has_jurisdiction_over(core.position) { return; }
-                    
-                    let dt = self.current_tick.saturating_sub(core.last_movement_tick);
-                    let max_displacement = (core.move_speed * SimFixed::from_num(dt)) + GHOST_ANOMALY_MARGIN;
-                    
-                    if core.position.distance_to(position) <= max_displacement {
-                        if !self.static_grid.is_colliding(position) {
-                            core.position = position;
-                            core.velocity = velocity;
-                            core.rotation = rotation;
-                            core.last_movement_tick = self.current_tick;
-                            self.local_grid.upsert(actor_id, position);
-                        } else {
-                            self.trigger_client_rollback(actor_id);
-                        }
-                    } else {
-                        self.trigger_client_rollback(actor_id);
-                    }
-                }
-            },
-            ActionPayload::Engine(EngineAction::RequestGhostCorrection { entity_id, requester_arbiter_id }) => {
-                if let Some((core, _)) = self.entities.get(&entity_id) {
-                    if !self.has_jurisdiction_over(core.position) { return; }
-                    let mut keyframe = core.get_ghost_update(self.current_tick);
-                    keyframe.is_keyframe = true;
-                    self.send_ghost_update_rudp(requester_arbiter_id, keyframe);
-                }
-            },
-            ActionPayload::Game(game_action) => {
-                let actor_id = source_actor_id.expect("Game actions require a source actor");
-                
-                // Construct views for the GameResolver
-                let actor_view = self.build_entity_view(actor_id);
-                let world_view = self.build_world_view();
-
-                let outcome = self.game_resolver.resolve_action(
-                    &game_action,
-                    &actor_view,
-                    &world_view,
-                    &mut self.rng,
-                    self.current_tick,
-                    self.dilation_factor,
-                );
-
-                // Apply returned outcome mutations to engine state
-                self.apply_action_outcome(outcome);
-
-                if let Some(prop_id) = original_proposal_id {
-                    self.send_downstream(actor_id, DownstreamPayload::ActionApplied { proposal_id: prop_id });
-                }
-            }
-        }
-    }
-
-    fn resolve_internal_event(&mut self, payload: &[u8], target_id: EntityID) {
-        let mut target_view = self.build_entity_mut_view(target_id);
-        let world_view = self.build_world_view();
-        
-        let outcome = self.game_resolver.resolve_internal_event(
-            payload,
-            &mut target_view,
-            &world_view,
-            &mut self.rng,
-            self.current_tick,
-        );
-        
-        self.apply_action_outcome(outcome);
-    }
-
-    // --- ARPG Template Reference Implementation ---
+        // --- ARPG Template Reference Implementation ---
     // This centralizes all complex ARPG/MOBA math (Armor, Resistance, Weight, Falloff)
     // ensuring it only runs on the true authoritative owner of the target.
     // (See ../../3-gameplay-systems/01-rpg-mechanics.md for the full mitigation formula including Evasion and Block).

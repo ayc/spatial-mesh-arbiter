@@ -26,7 +26,7 @@ P-40 (On-Cast Intercept) → P-31 (Identity/Loadout Swap)
 
 ## Engine Primitives Required
 
-TODO: The Arbiter needs to look up "last ability used by entity X" — this requires tracking recent ability history per entity. Then it needs to dynamically assign a different ability definition to the caster's ability slot. The validate_intent and resolve_external hooks need to resolve against a different AbilityEntry than normal for that slot. How is this represented — a status effect that overrides the ability mapping?
+TODO: The Arbiter needs to look up "last ability used by entity X" — this requires tracking recent ability history per entity. Then it needs to dynamically assign a different ability definition to the caster's ability slot. The `validate_intent` path and subsequent stage execution need to resolve against a different AbilityEntry than normal for that slot. How is this represented — a status effect that overrides the ability mapping?
 
 ## Cross-Boundary Concerns
 

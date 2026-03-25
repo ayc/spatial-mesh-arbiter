@@ -60,20 +60,17 @@ Current canonical split:
 ### Amendment A: Spatial Primitive Catalog
 
 **Primitives covered:** P-01 through P-14 (14 primitives)
-**Target document:** New section in `01-spatial-runtime-kernel.md` or standalone `01-1-spatial-primitive-catalog.md`
+**Target document:** `01-1-spatial-primitive-catalog.md`
 **Priority:** HIGH — blocks all spatial query and movement specifications downstream
 
-**What exists:** `01-spatial-runtime-kernel.md` §1 lists "movement integration and collision primitives" as kernel-owned. The baseline profile defines numeric bounds for position/velocity. `06-architecture-section-mapping.md` marks the collision algorithm as `RESOLVED` (T0-03). But no contract exists for the 14 specific spatial operations the game adapter depends on.
+**Status: ADOPTED.** Formalized in `01-1-spatial-primitive-catalog.md`. The catalog defines:
+- 8 kinematic mutations (P-01 through P-08): input/output types, engine behavior, Ghost policy, cross-boundary behavior, determinism requirements
+- 6 spatial queries (P-09 through P-14): input/output types, R-Tree interaction, Ghost inclusion rules, bounded result guarantees
+- Normative kinematic resolution sub-order (forced displacement → voluntary → attached → sweeps)
+- Per-primitive Ghost inclusion policy (queries include Ghosts for cross-boundary relay; mutations operate on authoritative entities only)
+- Baseline profile keys for query radii, buffer depths, geometry limits, and monitored zone caps
 
-**What's needed:** A catalog of engine-provided spatial operations with:
-
-- **Kinematic mutations** (P-01 through P-08): Instant translation, forced displacement, trajectory steering, positional clamping, historical state buffer, attached kinematics, entity-as-kinematic-volume, dynamic collision injection. For each: input parameters, execution phase within the tick, interaction with handoff, determinism guarantees.
-
-- **Spatial queries** (P-09 through P-14): Shape overlap, raycast, N-nearest neighbor, facing check, tag filtering, continuous proximity monitor. For each: input parameters, return type, R-Tree interaction, Ghost entity inclusion rules, bounded result guarantees.
-
-**Blast radius:** Moderate. This is additive — no existing contract changes, only new specification. The adapter contract (04-x) would gain references to these primitives as "engine-provided capabilities the adapter may invoke."
-
-**Dependencies:** None. Can proceed independently.
+**Dependencies:** None.
 
 ---
 
@@ -102,89 +99,54 @@ The 12-stage pipeline is defined in `04-1-game-adapter-contract.md` §3. The `di
 ### Amendment C: Entity Lifecycle Extension
 
 **Primitives covered:** P-25 (Multi-Phase Vitals), P-32 (Actor Spawning), P-33 (Entity Dormancy), P-53 (Entity Suspension)
-**Target document:** New section in `01-spatial-runtime-kernel.md` or new `01-2-entity-lifecycle-contract.md`
+**Target document:** `01-2-entity-lifecycle-contract.md`
 **Priority:** MEDIUM — blocks downed-state and stasis mechanics
 
-**What exists:** The implicit entity lifecycle is binary: an entity exists in the R-Tree and is evaluated each tick, or it doesn't exist. The durability bridge (03) classifies hard vs soft state. The adapter contract defines a spawn hook.
+**Status: ADOPTED.** Formalized in `01-2-entity-lifecycle-contract.md`. The contract defines:
+- Multi-phase lifecycle model with adapter-defined phases and engine-tracked `lifecycle_phase` state
+- Phase transitions at Stage 10 (`DeathCheck`) via `PhaseTransitionMutation` in `StageOutcome`
+- Entity dormancy (R-Tree present, tick evaluation skipped, timers paused, targetability independent)
+- Entity suspension (R-Tree removed, fully isolated, bounded duration with automatic un-suspension deadline)
+- Actor spawning lifecycle (directive → allocation → `initialize_spawn_configuration` → insertion on next tick)
+- Bounded entity counts per Arbiter and per owner
+- Interaction matrix (Active/Dormant/Suspended/Removed × R-Tree/Evaluation/Queries/Payloads/Timers)
 
-**What's needed:**
-
-1. **Multi-phase lifecycle model.** The engine currently assumes Alive → Dead. Game adapters need to define intermediate phases (Downed, Transformed) where the entity persists but with different evaluation rules. The engine contract should specify:
-   - Entity life phase as a kernel-tracked enum (game adapter defines the phases)
-   - Death check as an interceptable pipeline stage (Stage 10 `DeathCheck` via `dispatch_stage`)
-   - Phase transitions as deterministic, atomic operations within a tick
-
-2. **Entity dormancy contract.** An entity can be paused (skipped during tick evaluation) while remaining in the R-Tree. The contract should specify: what "paused" means for timers, for spatial queries (included or excluded?), for downstream payloads.
-
-3. **Entity suspension contract.** An entity can be fully removed from spatial/targeting/rendering while preserved in memory. Stronger than dormancy. The contract should specify: R-Tree removal and re-insertion semantics, timer behavior, state preservation guarantees.
-
-4. **Actor spawning contract.** Formalizing what "spawn an entity at runtime" means: R-Tree insertion, OwnerID linkage, bounded entity count per owner, handoff behavior for spawned actors.
-
-**Blast radius:** Moderate. Extends the kernel's entity model. Existing entities behave identically (single-phase lifecycle is the default). New phases are opt-in via game adapter configuration.
-
-**Dependencies:** Amendment B (Stage 10 `DeathCheck` via `dispatch_stage` is where phase transitions are intercepted).
+**Dependencies:** Amendment B (resolved — Stage 10 `DeathCheck` via `dispatch_stage`).
 
 ---
 
 ### Amendment D: Entity Relationship Contract
 
 **Primitives covered:** P-06 (Attached Kinematics), P-29 (Control Authority Swap), P-30 (Input Multiplexing), P-34 (Persistent Linkage)
-**Target document:** New `01-3-entity-relationship-contract.md` or section in `01-spatial-runtime-kernel.md`
+**Target document:** `01-3-entity-relationship-contract.md` (P-29, P-30, P-34) and `01-1-spatial-primitive-catalog.md` §3.6 (P-06)
 **Priority:** MEDIUM — blocks tether, symbiote, mind control, and multi-entity mechanics
 
-**What exists:** The authority contract (01 §2) defines single-authority ownership. The messaging plane (02) routes messages by entity owner. No contract exists for entity-to-entity relationships that the engine must track.
+**Status: ADOPTED.** P-06 (Attached Kinematics) formalized in `01-1-spatial-primitive-catalog.md` §3.6. P-29, P-30, and P-34 formalized in `01-3-entity-relationship-contract.md`. The contract defines:
+- Persistent bindings (P-34): two-way entity links with type, distance constraint, expiry, cross-boundary state management, and death cleanup protocol
+- Control authority swap (P-29): Edge Node input redirection with single-controller constraint, no-chain rule, atomic revert, and cross-boundary relay forwarding
+- Input multiplexing (P-30): one-to-many and many-to-one modes with configurable input policies (Mirror, RoleSplit, AdapterRouted), bounded group size, and coordinator model for cross-boundary groups
+- All relationships backed by P-34 bindings for unified cleanup semantics
+- 3 baseline profile keys for binding limits, cross-boundary binding capacity, and multiplex group size
 
-**What's needed:**
-
-1. **Persistent linkage (bindings).** A two-way dependency between entities that:
-   - Survives Arbiter handoff (replicated as SoftState on both entities)
-   - Is cleaned up when either entity dies or the link expires
-   - Has a bounded count per entity
-   - Can trigger cross-Arbiter relay when a linked entity changes state
-
-2. **Attached kinematics.** Parenting one entity's position to another's transform. The engine must:
-   - Overwrite the child's position each tick to match parent + offset
-   - Hand off the child with the parent when crossing boundaries (or orphan it)
-   - Skip independent kinematic resolution for attached entities
-
-3. **Control authority swap.** Routing one player's Edge Node input to a different entity. The engine must:
-   - Redirect input at the transport layer (not the game layer)
-   - Maintain single-authority — the controlled entity still has one authoritative Arbiter
-   - Revert atomically on expiry or break
-
-4. **Input multiplexing.** One-to-many (one player controls N entities) or many-to-one (N players control one entity). Extends the Edge Node input routing model.
-
-**Blast radius:** Significant. Touches the authority model (01), the messaging plane (02), and the adapter interface (04). Bindings introduce a new cross-Arbiter state synchronization requirement. This is the most architecturally complex amendment.
-
-**Dependencies:** None strictly, but pairs well with Amendment A (attached kinematics depends on kinematic resolution order).
+**Dependencies:** Amendment A (P-06 attached kinematics), Amendment B (Stage 1 routing).
 
 ---
 
 ### Amendment E: Dynamic Spatial Topology
 
 **Primitives covered:** P-08 (Dynamic Collision Injection), P-52 (Asymmetric Team-Rendering), P-56 (Spatial Instance Forking), P-57 (Polyline Collision Generator), P-58 (Container/Vehicle Logic), P-59 (N-Way Portal Network)
-**Target document:** New `01-4-dynamic-topology-contract.md`
-**Priority:** LOW — blocks terrain walls, pocket arenas, portals, and vehicles. These are powerful but less frequently needed than combat pipeline basics.
+**Target document:** `01-4-dynamic-topology-contract.md` (P-52, P-56, P-57, P-58, P-59) and `01-1-spatial-primitive-catalog.md` §3.8 (P-08)
+**Priority:** LOW — blocks terrain walls, pocket arenas, portals, and vehicles.
 
-**What exists:** The topology contract (01 §4) covers topology epochs and split/merge/slide. The Mesh Controller manages the R-Tree. No contract exists for game-triggered spatial modifications.
+**Status: ADOPTED.** P-08 formalized in `01-1-spatial-primitive-catalog.md` §3.8. The remaining 5 primitives formalized in `01-4-dynamic-topology-contract.md`. The contract defines:
+- Asymmetric team-rendering (P-52): per-entity `TeamVisibility` bitmask checked at Stage 12 engine boundary, Ghost-replicated, independent from targetability
+- Spatial instance forking (P-56): private R-Tree partitions within a single Arbiter, entity migration enter/exit protocol, isolation from parent R-Tree, mandatory expiry, instance-local spatial queries
+- Polyline collision generator (P-57): incremental segment construction with FIFO decay, extends P-08 collision injection, per-segment TTL for trail effects
+- Container/vehicle logic (P-58): extends P-06 attachment with capacity bounds, enter/exit protocol, grouped handoff, destruction ejection
+- Portal network (P-59): Controller-mediated anchor registry, cross-Arbiter teleport-as-handoff, network replication, displacement visible to P-63
+- 10 baseline profile keys for team count, instance limits, polyline capacity, container capacity, and portal network bounds
 
-**What's needed:**
-
-1. **Dynamic collision injection** (P-08): Temporarily adding/removing static geometry. Requires: spatial grid update, bounded area/lifetime, cross-boundary replication if geometry overlaps a boundary.
-
-2. **Spatial instance forking** (P-56): Creating a private R-Tree partition. Requires: entity migration protocol (remove from parent, insert into child), bounded lifetime, exit protocol (re-insert into parent on expiry).
-
-3. **Portal network** (P-59): A registry of spatial anchors for cross-Arbiter teleportation. Requires: Controller-mediated registry, teleport-as-handoff protocol, bounded anchor count.
-
-4. **Asymmetric rendering** (P-52): Per-team visibility flags on entities affecting downstream payloads. Requires: the downstream payload builder to check per-entity per-team visibility flags.
-
-5. **Container/vehicle logic** (P-58): Entities locked to a parent's transform with suppressed movement. Specialization of P-06 (attached kinematics) with capacity bounds and explicit enter/exit protocol.
-
-6. **Polyline collision generator** (P-57): Building collision geometry from a point sequence. Specialization of P-08 with incremental construction and FIFO segment expiry.
-
-**Blast radius:** Moderate per-primitive, but covers 6 primitives across different subsystems. Can be delivered incrementally — P-08 and P-52 are simpler; P-56 and P-59 are more complex.
-
-**Dependencies:** Amendment A (spatial queries underpin all of these). Amendment D (container logic depends on attached kinematics).
+**Dependencies:** Amendment A (P-08, P-06, P-01, P-09), Amendment D (container uses P-06 attachment, portals use owner linkage).
 
 ---
 

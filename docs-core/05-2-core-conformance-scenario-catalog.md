@@ -89,7 +89,28 @@ required classes above.
 | `SCN-BND-VERSION-TRANSITION-COMMIT` | valid transition generation commits with bounded phase durations and bounded non-continuous reject-rate impact |
 | `SCN-BND-VERSION-TRANSITION-ROLLBACK` | failed transition rolls back to source line within configured rollback timeout |
 
-### 3.7 Security and Trust
+### 3.7 Adapter API v2
+
+| Scenario ID | Required Assertion |
+| --- | --- |
+| `SCN-API-STAGE-ID-CLOSED-SET` | `dispatch_stage` accepts only normative StageId values `1` and `3-12`; values `0`, `2`, and `13+` are rejected deterministically with no mutation side effects |
+| `SCN-API-STAGE-ORDER-MONOTONIC` | within a single authoritative tick, `dispatch_stage` invocations arrive in strictly ascending StageId order and any out-of-order call is faulted deterministically before mutation |
+| `SCN-API-STAGE1-ROUTING-COMMIT` | Stage 1 (`ControlAuthorityAndInputRouting`) routing decisions are committed by the engine before Stage 2 (`validate_intent`) executes, and Stage 2 evaluation observes the committed Stage 1 routing state |
+| `SCN-API-STAGE9-DEFER-REQUIRED` | Stage 9 (`PostDamage`) follow-up combat work is returned only via `stage_outcome.deferred_events`; immediate emission from `stage_outcome.emitted_events` is non-conformant |
+| `SCN-API-STAGE11-DEFER-REQUIRED` | Stage 11 (`StateUpdate`) timer-fired follow-up work is returned only via `stage_outcome.deferred_events`; immediate emission from `stage_outcome.emitted_events` is non-conformant |
+| `SCN-API-SPAWN-CONFIG-SCHEMA` | `initialize_spawn_configuration` returns a `spawn_configuration` containing `initial_entity_state` as a valid `SchemaTypedPayload`, valid `ghost_movement_replication_cadence` enum value `0-3`, and `lifetime_ticks` that is positive or null, and MUST NOT return engine-owned `entity_id` |
+| `SCN-API-DISPATCH-BATCH-DETERMINISM` | identical `DispatchStageRequest` payloads produce byte-identical or digest-identical `stage_outcome` payloads under replay |
+| `SCN-API-VALIDATE-INTENT-TERMINAL` | every non-continuous `validate_intent` call terminates with exactly one deterministic `terminal_outcome` (`accept` or `reject`) |
+| `SCN-API-DEFERRED-EVENT-ENVELOPE` | every deferred event includes `target_stage`, `event_class`, `source_entity_id`, `ready_tick`, `sort_key`, and `payload`, and `payload` is a valid `SchemaTypedPayload`; under the current profile, only `deferred_spatial_event -> Stage 3` and `deferred_combat_event -> Stage 7` are valid |
+| `SCN-API-DEFERRED-EVENT-ORDERING` | before stage injection, `incoming_deferred_events` are sorted deterministically by `ready_tick`, then `target_stage`, then `sort_key`, and replay yields identical stage admission order |
+| `SCN-API-SCHEMA-TYPED-PAYLOAD-DECLARED` | every boundary `SchemaTypedPayload` uses a `(payload_type_id, schema_version)` pair declared by negotiated `payload_schema_descriptors`; undeclared pairs are rejected or faulted before mutation |
+| `SCN-API-SCHEMA-TYPED-PAYLOAD-VALID` | every boundary `SchemaTypedPayload.body` validates against the schema identified by its declared `(payload_type_id, schema_version)` pair before mutation |
+| `SCN-API-HOOK-RESPONSE-PAYLOAD-EXCLUSIVE` | only the typed response payload field appropriate for the invoked hook is populated; wrong-field or multi-field typed responses are non-conformant |
+| `SCN-API-COMPATIBILITY-DESCRIPTOR-SCHEMA` | `describe_compatibility` returns a well-formed `CompatibilityDescriptor` with required adapter identity/version fields, non-empty wire-schema support, and well-formed `payload_schema_descriptors` |
+| `SCN-API-STAGE-OUTCOME-PAYLOAD-DISCRIMINATOR` | `MutationRecord` and `ImmediateEvent` use `payload.payload_type_id` as the normative type discriminator; missing schema-typed discriminators, undeclared payload types, or parallel open-string classifiers are non-conformant |
+| `SCN-API-DEFERRED-SORT-KEY-STABILITY` | for identical stage-local inputs under replay, deferred-event `sort_key` assignments are identical and encode a deterministic total order for events sharing the same `ready_tick` and `target_stage` |
+
+### 3.8 Security and Trust
 
 | Scenario ID | Required Assertion |
 | --- | --- |

@@ -1,55 +1,137 @@
 # T1-01: Stat Compilation Formulas
 
-> **Status:** OPEN (narrowed after audit)
+> **Status:** REVIEW
 > **Checklist Ref:** [GAPS_CHECKLIST.md](../GAPS_CHECKLIST.md)
 > **Canonical Target:** `3-gameplay-systems/01-rpg-mechanics.md` + `1-architecture/04-meta-services.md`
 
 ## Audit Notes
 
-**The original draft overstated the gap.** Several aspects ARE specified:
+The compilation pipeline (6-step algorithm), durability penalty, stat caps, and attribute-to-stat mapping table are all specified. What's missing are the numeric coefficients, formula shape, and secondary attribute formulas.
 
-| Aspect | Status | Source |
-|--------|--------|--------|
-| Compilation pipeline | **Fully specified** — 6-step algorithm with pseudocode | `04-meta-services.md` lines 509-582 |
-| Durability penalty | **Specified as multiplicative** — `equipment_primaries += item_def.base_stats.primary * penalty` where penalty is `degraded_stat_penalty_pct` (e.g., 0.50) | `04-meta-services.md` lines 534-542 |
-| Stat caps | **Fully listed** with values and enforcement pseudocode (`min()` calls) | `04-meta-services.md` lines 574-580, 645-656 |
-| Which attrs map to which stats | **Specified** — Full mapping table showing primary/minor contributions | `01-rpg-mechanics.md` lines 112-173 |
+## Resolution
 
-## Remaining Gaps (Narrowed)
+### 1. Formula Shape: Linear with Per-Level Scaling
 
-### 1. `attribute-formulas.json` — Referenced But Does Not Exist
-
-The Meta Services doc references:
-```json
-"attribute_formulas_file": "data/attribute-formulas.json"
+```
+derived_stat = base_value + (coefficient × attribute_value × (1 + level_scaling × entity_level))
 ```
 
-And the RPG Mechanics doc explicitly states (line 110):
-> "The specific coefficients are designer-tuned values in the configuration file, not hardcoded."
+| Parameter | Type | Source |
+|-----------|------|--------|
+| `base_value` | `SimFixed` | Per-stat default from `attribute-formulas.json` |
+| `coefficient` | `SimFixed` | Per-attribute-per-stat multiplier |
+| `attribute_value` | `SimFixed` | Entity's current attribute points (post-equipment) |
+| `level_scaling` | `SimFixed` | Global per-level modifier (default: 0.02 = 2% per level) |
+| `entity_level` | `u16` | Entity's current level |
 
-The mapping table shows *which* attributes feed *which* stats, but provides **no numeric coefficients**. Example: Vigor is the "primary" contributor to `physical_damage_multiplier`, but "1 point of Vigor = ???% physical damage" is never stated.
+**Rationale for linear:** Transparent to designers and players. Diminishing returns are achieved through stat caps (T1-05), not formula curvature. Matches Diablo 4 and Lost Ark's approach.
 
-### 2. Secondary Attribute Formulas
+### 2. `attribute-formulas.json` Schema
 
-Momentum, Poise, Echo, Affinity, Synchrony are documented narratively (what they do conceptually) but have no implementation formulas, thresholds, or numeric values. Even if hidden from players, implementers need concrete numbers.
+```json
+{
+    "$schema": "game/attribute-formulas/v1",
+    "level_scaling": 0.02,
+    "formulas": {
+        "physical_damage_multiplier": {
+            "base": 1.0,
+            "contributors": [
+                { "attribute": "vigor", "coefficient": 0.015 },
+                { "attribute": "might", "coefficient": 0.005 }
+            ]
+        },
+        "crit_chance": {
+            "base": 0.05,
+            "contributors": [
+                { "attribute": "precision", "coefficient": 0.003 },
+                { "attribute": "cunning", "coefficient": 0.001 }
+            ]
+        },
+        "crit_multiplier": {
+            "base": 1.5,
+            "contributors": [
+                { "attribute": "precision", "coefficient": 0.008 }
+            ]
+        },
+        "cooldown_reduction": {
+            "base": 0.0,
+            "contributors": [
+                { "attribute": "arcane_mastery", "coefficient": 0.002 }
+            ]
+        },
+        "block_chance": {
+            "base": 0.0,
+            "contributors": [
+                { "attribute": "fortitude", "coefficient": 0.004 }
+            ]
+        },
+        "evasion_rating": {
+            "base": 0.0,
+            "contributors": [
+                { "attribute": "cunning", "coefficient": 0.003 },
+                { "attribute": "agility", "coefficient": 0.002 }
+            ]
+        },
+        "hp_max": {
+            "base": 100.0,
+            "contributors": [
+                { "attribute": "vitality", "coefficient": 10.0 },
+                { "attribute": "fortitude", "coefficient": 3.0 }
+            ]
+        },
+        "mana_max": {
+            "base": 50.0,
+            "contributors": [
+                { "attribute": "arcane_mastery", "coefficient": 8.0 },
+                { "attribute": "wisdom", "coefficient": 2.0 }
+            ]
+        },
+        "move_speed": {
+            "base": 1.0,
+            "contributors": [
+                { "attribute": "agility", "coefficient": 0.001 }
+            ]
+        }
+    }
+}
+```
 
-### 3. Conversion Formula Shape
+These are **starting coefficients** intended for designer tuning. The schema is the contract; the numbers are adjustable via Data Epoch hot-patches.
 
-Are formulas linear (`derived = coeff * minor_attr`)? Diminishing returns? Breakpoint-based? The spec says "designer-configured" but doesn't specify the function signature or parameter types.
+### 3. Secondary Attribute Formulas
 
-## Questions to Resolve
+Secondary attributes use the same linear formula shape and are added to `attribute-formulas.json`:
 
-- [ ] Schema for `attribute-formulas.json` (what fields, what types)
-- [ ] Initial coefficient values (can be tuned later, but need starting points)
-- [ ] Function shape: linear, polynomial, or lookup table?
-- [ ] Secondary Attribute formulas (Momentum, Poise, Echo, Affinity, Synchrony)
-- [ ] Are there per-level scaling factors on top of attribute coefficients?
+| Secondary | Description | Base | Contributor |
+|-----------|-------------|------|-------------|
+| Momentum | Charge generation rate bonus | 0.0 | agility × 0.005 |
+| Poise | CC duration reduction (stacks with DR tracker P-41) | 0.0 | fortitude × 0.004 |
+| Echo | Spell echo chance (proc check per cast) | 0.0 | arcane_mastery × 0.002 |
+| Affinity | Elemental resistance bonus (flat per-element) | 0.0 | wisdom × 0.3 |
+| Synchrony | Party buff effectiveness bonus (multiplicative on outgoing) | 0.0 | wisdom × 0.003 |
 
-## Proposed Resolution
+### 4. Compilation Integration
 
-_To be drafted._
+The Meta Service's step 4 ("Derive secondary stats from primaries") evaluates `attribute-formulas.json`:
+
+```rust
+fn compile_derived_stats(attrs: &Attributes, level: u16, formulas: &FormulaTable) -> DerivedStats {
+    let mut result = DerivedStats::default();
+    for (stat_id, formula) in formulas.entries() {
+        let mut value = formula.base;
+        for contrib in &formula.contributors {
+            let attr_val = attrs.get(contrib.attribute);
+            value += contrib.coefficient * attr_val * (SimFixed::ONE + formulas.level_scaling * SimFixed::from_num(level));
+        }
+        result.set(stat_id, value);
+    }
+    // Caps applied per T1-05 at evaluation time, not here
+    result
+}
+```
 
 ## References
 
-- `docs/3-gameplay-systems/01-rpg-mechanics.md` — Attribute mapping table (lines 112-173), secondary attributes (lines 193-211)
-- `docs/1-architecture/04-meta-services.md` — Compilation algorithm (lines 509-582), config schema (lines 640-656)
+- `docs/3-gameplay-systems/01-rpg-mechanics.md` — Attribute mapping table
+- `docs/1-architecture/04-meta-services.md` — Compilation pipeline, config schema
+- `docs/6-spec-drafts/tier-1-combat/05-stat-caps-and-overflow.md` — Cap/floor enforcement

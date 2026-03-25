@@ -138,6 +138,9 @@ Test harness MUST support:
 | `LUA-LOWER-003` | `LOWERING` | `REQ` | semantically valid helper has no primitive/directive lowering rule | compile fails | `IR_LOWERING_UNMAPPABLE_CONSTRUCT` |
 | `LUA-LOWER-004` | `LOWERING` | `REQ` | cross-cutting primitive use (`P-26`/`P-32` style) | compile succeeds; normalized IR emits `IRDirective`, not stage-specific `IRInstruction` | n/a |
 | `LUA-LOWER-005` | `LOWERING` | `REQ` | landing-point AoE with requested target position beyond max throw distance | compile succeeds; normalized IR centers AoE query on resolved `landing_pos` binding in `PostKinematic`, not raw `RequestedTargetPosition` in `TargetResolution` | n/a |
+| `LUA-LOWER-006` | `LOWERING` | `REQ` | Stage 11 accumulator update (`P-41`/`P-42`/`P-50` style) with no timer payload | compile succeeds; normalized IR classifies the Stage 11 operation as `in_place_state_update` and emits no deferred-event metadata | n/a |
+| `LUA-LOWER-007` | `LOWERING` | `REQ` | delayed AoE or pulse-zone timer whose payload requires a spatial query | compile succeeds; normalized IR tags the timer payload as `deferred_spatial_event` with next-tick Stage 3 (`TargetResolution`) re-entry | n/a |
+| `LUA-LOWER-008` | `LOWERING` | `REQ` | direct-target timer payload whose victim is already known and needs no spatial query | compile succeeds; normalized IR tags the timer payload as `deferred_combat_event` with next-tick Stage 7 (`PreMitigation`) re-entry | n/a |
 | `LUA-BIND-001` | `BINDING` | `REQ` | one query result reused by two downstream ops | compile succeeds; normalized IR reuses one binding slot deterministically | n/a |
 | `LUA-BIND-002` | `BINDING` | `REQ` | symbolic temp referenced but never defined after lowering | compile fails | `BINDING_UNRESOLVED_REFERENCE` |
 | `LUA-BIND-003` | `BINDING` | `REQ` | same symbolic temp inferred as incompatible types across uses | compile fails | `BINDING_TYPE_CONFLICT` |
