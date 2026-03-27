@@ -11,6 +11,6 @@ For the engine/game boundary and trait interfaces, see [Framework Boundary](../1
 | Document | Implements |
 |:---------|:-----------|
 | `01-rpg-mechanics.md` | `GameEntity::SoftExt`, `GameEntity::OffenseExt`, stat compilation, combat formulas |
-| `02-ability-framework.md` | `GameActions::Action` variants, `GameResolver::resolve_action()` logic |
+| `02-ability-framework.md` | `GameActions::Action` variants plus the game-layer logic surfaced through `GameAdapter::validate_intent()` and `GameAdapter::dispatch_stage()` |
 | `03-global-events.md` | Global event escalation and resolution patterns |
 | `04-npc-and-world-interaction.md` | `GameNpcArchetype` implementations, interaction validation |

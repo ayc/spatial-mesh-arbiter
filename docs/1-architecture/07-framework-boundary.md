@@ -416,6 +416,6 @@ This is a hard architectural constraint, not an open question. It means:
 
 1. **Interest management filtering.** The engine broadcasts `EntityCore` + `SoftExt` to Edge Nodes. Should the game be able to filter or transform `SoftExt` before broadcast (e.g., hide certain fields from enemies)? This would require an additional trait method: `fn filter_for_observer(&self, entity: &SoftExt, observer_id: EntityID) -> SoftExt`.
 
-2. **Projectile parameterization.** Projectiles currently carry game-specific `CombatContext` as opaque bytes. Should the engine understand projectile "type" (dumb-fire vs. homing vs. piercing) or should steering behavior also be game-defined? Current spec has the engine owning steering, which seems right — but the game needs to parameterize it (turn rate, pierce count, fuse duration).
+2. **[RESOLVED] Projectile parameterization.** The engine owns steering (P-03 with `projectile_turn_rate`), collision (`calculate_collisions` with capsule broadphase), and lifecycle. The game parameterizes via `AbilityEntry` fields: `projectile_turn_rate`, `pierce`, `arming_delay_ticks`, and `ProjectileDetonationPolicy` (entity/world/expiry/manual/proximity behaviors). See `01-core-primitives.md` and T3-01 draft.
 
 3. **Static geometry.** The `static_grid` (AABB collision, LOS raycasting) is engine-owned. But the map data itself (wall positions, terrain types) is game content loaded via Data Epoch. The loading/parsing boundary needs clarification.

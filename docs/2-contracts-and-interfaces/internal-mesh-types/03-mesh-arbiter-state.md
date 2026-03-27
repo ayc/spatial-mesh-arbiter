@@ -433,6 +433,127 @@ impl<G: GameAdapter> SpatialActor<G> {
         sleep_micros(sleep_us as u64);
     }
 
+    // Normalize current external proposals plus any stale-buffered proposals into the
+    // bounded Stage 2 candidate set. This is where the old pre-API-v2 ingress logic now lives.
+    fn prepare_stage2_intents(&mut self) -> Vec<ActionProposal<G>> {
+        let mut stage2_candidates = Vec::new();
+        let mut next_tick_stale_buffer = BoundedQueue::new(1000);
+        let mut latest_movement_by_actor: HashMap<EntityID, (ActionProposal<G>, u64)> = HashMap::new();
+
+        // Merge new arrivals with anything we held over while waiting on topology/data sync.
+        let all_proposals = self.external_inbox.drain(..).map(|p| (p, self.current_tick))
+            .chain(self.stale_proposals_buffer.drain(..));
+
+        for (proposal, local_arrival_tick) in all_proposals {
+            // Continuous movement is coalesced to latest-per-actor before validation.
+            if matches!(&proposal.payload, ActionPayload::Engine(EngineAction::Movement { .. })) {
+                latest_movement_by_actor.insert(proposal.actor_id, (proposal, local_arrival_tick));
+                continue;
+            }
+
+            // Data/topology mismatches are engine-owned admission concerns. The engine either:
+            // - retries under bounded buffering,
+            // - forwards to the correct Arbiter, or
+            // - fails closed with a deterministic rejection.
+            if !self.is_current_data_epoch_or_bufferable(&proposal, local_arrival_tick, &mut next_tick_stale_buffer) {
+                continue;
+            }
+            if !self.is_current_topology_epoch_or_bufferable(&proposal, local_arrival_tick, &mut next_tick_stale_buffer) {
+                continue;
+            }
+
+            if self.processed_proposals.contains(&proposal.proposal_id) { continue; }
+            self.processed_proposals.insert(proposal.proposal_id, true);
+
+            // Overlap-buffer relays remain engine-owned. The adapter only sees the normalized intent.
+            if self.is_in_overlap_buffer(proposal.actor_id) {
+                self.relay_to_neighbors(self.build_relay_event(&proposal));
+            }
+
+            stage2_candidates.push(proposal);
+        }
+
+        // Re-apply bounded epoch/topology checks to coalesced movement after latest-per-actor collapse.
+        for (_, (proposal, local_arrival_tick)) in latest_movement_by_actor {
+            if !self.is_current_data_epoch_or_bufferable(&proposal, local_arrival_tick, &mut next_tick_stale_buffer) {
+                continue;
+            }
+            if !self.is_current_topology_epoch_or_bufferable(&proposal, local_arrival_tick, &mut next_tick_stale_buffer) {
+                continue;
+            }
+            stage2_candidates.push(proposal);
+        }
+
+        self.stale_proposals_buffer = next_tick_stale_buffer;
+        stage2_candidates
+    }
+
+    // Promote all deferred work that is eligible to enter THIS authoritative tick.
+    // This includes:
+    // - next-tick deferred events emitted by prior Stage 9/11 execution
+    // - legacy `internal_inbox` payloads normalized into DeferredEvents
+    // - ready controller/global-event timers normalized into DeferredEvents
+    fn promote_ready_deferred_ingress(&mut self) {
+        self.incoming_deferred_events.clear();
+        self.incoming_deferred_events.extend(self.next_tick_deferred_events.drain(..));
+
+        for event in self.internal_inbox.drain(..) {
+            if self.processed_proposals.contains(&event.event_id) { continue; }
+            self.processed_proposals.insert(event.event_id, true);
+            self.incoming_deferred_events.push(self.normalize_internal_event(event));
+        }
+
+        self.pending_global_events.retain(|_, cmd| {
+            if !cmd.is_ready_at(self.current_tick) {
+                return true;
+            }
+            self.incoming_deferred_events.push(self.normalize_controller_command(cmd));
+            false
+        });
+    }
+
+    // Build the adapter-facing batch for a single stage.
+    // Stage 1 uses relationship/control directives only; Stages 3-12 project the validated
+    // intents plus currently active IR work into per-entity stage contexts.
+    fn build_stage_batch(&self, stage_id: u8, valid_intents: &Vec<ActionProposal<G>>) -> DispatchStageRequest {
+        let entity_batch = match stage_id {
+            1 => self.collect_stage1_entities(),
+            _ => self.collect_stage_entities_from_intents(stage_id, valid_intents),
+        };
+
+        DispatchStageRequest {
+            stage_id,
+            entity_batch,
+            global_context: GlobalStageContext {
+                tick: self.current_tick,
+                topology_epoch: self.topology_epoch as u64,
+                data_epoch: self.current_data_epoch as u64,
+                incoming_deferred_events: Vec::new(),
+            },
+        }
+    }
+
+    // Inject only the deferred events that are scheduled to re-enter at this stage.
+    // Events for later stages remain in the current tick ingress batch until their turn.
+    fn inject_deferred_events(&mut self, stage_batch: &mut DispatchStageRequest, stage_id: u8) {
+        let mut remaining = Vec::new();
+        for event in self.incoming_deferred_events.drain(..) {
+            if event.target_stage == stage_id {
+                stage_batch.global_context.incoming_deferred_events.push(event);
+            } else {
+                remaining.push(event);
+            }
+        }
+        self.incoming_deferred_events = remaining;
+    }
+
+    // Seal the tick's deferred outputs. Stage 9/11 outcomes emitted during this tick land in
+    // `next_tick_deferred_events` and MUST NOT re-enter until the next authoritative tick.
+    fn roll_deferred_event_queues(&mut self) {
+        self.incoming_deferred_events.clear();
+        self.next_tick_deferred_events.sort_by_key(|e| (e.ready_tick, e.target_stage, e.sort_key));
+    }
+
     // --- Ghost Integration (Low-Cost / Anomaly-Gated) ---
     fn integrate_ghosts_lightweight(&mut self) {
         let mut expired = Vec::new();
@@ -746,10 +867,12 @@ impl<G: GameAdapter> SpatialActor<G> {
     //   - is_colliding(position) -> bool: point-in-obstacle test
     //   - query_segment_aabb(a, b) -> Vec<AABB>: swept-segment test (CCD, ghost anomaly, LOS)
     //
-    // calculate_collisions() tests projectile geometry against local entities (BTreeMap,
-    // deterministic order) and ghosts (HashMap, order doesn't affect authoritative state).
-    // Fuse guard: unarmed projectiles (fuse_remaining_ticks > 0) don't register hits.
-    // All victims collected independently; pierce decrements per hit.
+    // calculate_collisions() normalizes local entities and ghosts into one deterministic
+    // contact-ordered batch. HashMap iteration order for ghosts MUST NOT leak into
+    // authoritative pierce results.
+    // Arming guard: unarmed projectiles (arming_remaining_ticks > 0) don't register detonation-capable hits.
+    // Pierce decrements per unique valid target hit. The projectile carries a
+    // hit_exclusion_list so one target cannot consume pierce more than once.
     //
     // Wall rejection is intentional: server validates position legality, client handles sliding.
     // See docs/6-spec-drafts/tier-0-foundations/03-collision-algorithm.md for full pseudocode.
@@ -882,8 +1005,9 @@ struct ProjectileActor {
     position: Vec2F,
     velocity: Vec2F,
     remaining_lifetime_ticks: u32,
-    fuse_remaining_ticks: u32,
+    arming_remaining_ticks: u32,
     pierce_remaining: u8,
+    hit_exclusion_list: BTreeSet<EntityID>,
     data_epoch: u32,
     damage_origin: DamageOrigin, // Inherited from the launch context
     proc_depth: u8,              // Propagated for deterministic proc recursion limits
@@ -896,10 +1020,28 @@ struct ProjectileActor {
     spell_data: SpellData,
 }
 
+struct ProjectileEntityHit {
+    entity_id: EntityID,
+    contact_t: SimFixed,
+    is_ghost: bool,
+}
+
+struct WorldContact {
+    contact_t: SimFixed,
+    point: Vec2F,
+    normal: Vec2F,
+}
+
+struct ProjectileCollisionBatch {
+    entity_hits: Vec<ProjectileEntityHit>,
+    first_world_hit: Option<WorldContact>,
+}
+
 impl ProjectileActor {
     // Projectiles run their own tick within the Host Arbiter's simulation loop.
-    // The Arbiter passes in the current_target_pos (resolved from Real entities or dead-reckoned Ghosts).
-    fn tick(&mut self, local_hitboxes: &Vec<Hitbox>, current_target_pos: Option<Vec2F>) -> Option<MeshInternalEvent> {
+    // The Arbiter passes in entity and ghost spatial indexes for collision queries,
+    // plus the current_target_pos (resolved from Real entities or dead-reckoned Ghosts).
+    fn tick(&mut self, local_entities: &SpatialIndex, ghost_entities: &SpatialIndex, current_target_pos: Option<Vec2F>) -> Option<MeshInternalEvent> {
         // Split/Handoff safety: shadow replicas must never simulate or emit impacts.
         if self.authoritative_arbiter_id != current_arbiter_id() { return None; }
 
@@ -948,14 +1090,6 @@ impl ProjectileActor {
             });
         }
 
-        // --- Homing "Dumb NPC" Steering Logic ---
-        if let Some(pos) = current_target_pos {
-            let desired_dir = (pos - self.position).normalize();
-            // In a full implementation, apply a max `turn_rate` here to prevent instant 180-degree snaps.
-            // If target is lost (current_target_pos is None), the projectile maintains its current velocity.
-            self.velocity = desired_dir * self.spell_data.projectile_speed;
-        }
-
         // Cross-boundary Temporal Swamp transition:
         // Blend source/destination dilation across the overlap band to avoid velocity snaps.
         let step_dilation = compute_projectile_step_dilation(
@@ -965,12 +1099,28 @@ impl ProjectileActor {
             current_neighbor_regions(),
             live_config().dilation.cross_boundary_blend_width_meters,
         );
+
+        // --- Homing "Dumb NPC" Steering Logic ---
+        if let Some(pos) = current_target_pos {
+            let desired_dir = (pos - self.position).normalize();
+            let current_dir = self.velocity.normalize();
+            let max_step = self.spell_data.projectile_turn_rate
+                .expect("validated at content load for homing projectiles");
+            let new_dir = rotate_toward_with_max_step(current_dir, desired_dir, max_step * step_dilation);
+            // If target is lost (current_target_pos is None), the projectile maintains its current velocity.
+            self.velocity = new_dir * self.spell_data.projectile_speed;
+        }
+
         self.position = self.position + (self.velocity * step_dilation);
         self.remaining_lifetime_ticks = self.remaining_lifetime_ticks.saturating_sub(1);
-        self.fuse_remaining_ticks = self.fuse_remaining_ticks.saturating_sub(1);
+        self.arming_remaining_ticks = self.arming_remaining_ticks.saturating_sub(1);
 
         // The Projectile determines who it hits (Real players AND Ghosts).
-        let victims = self.calculate_collisions(local_hitboxes);
+        // A full implementation compares ordered entity hits against `first_world_hit`
+        // using `detonation_policy` before choosing bounce/stop/detonate behavior.
+        // See T3-01 draft §4 for the canonical collision algorithm.
+        let collisions = self.calculate_collisions(&local_entities, &ghost_entities);
+        let victims: Vec<EntityID> = collisions.entity_hits.iter().map(|hit| hit.entity_id).collect();
         
         if !victims.is_empty() {
             // Generate a universally unique ID for this specific interaction/explosion.
@@ -991,7 +1141,7 @@ impl ProjectileActor {
                     impact_id: impact_uuid, 
                     target_ids: victims,
                     epicenter: self.position, // Provides absolute center for Ghost drift checks and distance falloff
-                    geometry: self.spell_data.collision_geometry,
+                    geometry: self.spell_data.geometry,
                     impact_tick: current_shard_tick(),
                     context: CombatContext {
                         base_damage: self.spell_data.base_damage,
@@ -1018,8 +1168,9 @@ impl ProjectileActor {
             position: self.position,
             velocity: self.velocity,
             remaining_lifetime_ticks: self.remaining_lifetime_ticks,
-            fuse_remaining_ticks: self.fuse_remaining_ticks,
+            arming_remaining_ticks: self.arming_remaining_ticks,
             pierce_remaining: self.pierce_remaining,
+            hit_exclusion_list: self.hit_exclusion_list.iter().copied().collect(),
             impact_sequence: self.impact_sequence,
             data_epoch: self.data_epoch,
             damage_origin: self.damage_origin as u8,

@@ -91,7 +91,8 @@ Because Global Events carry the `ability_id`, the Arbiter can be programmed to l
   "spell_id": "SIEGE_DESTROY_BRIDGE",
   "archetype": "SpawnProjectile",
   "mechanics": {
-    "fuse_timer_ticks": 180, // 3-second fall time
+    "arming_delay_ticks": 180, // 3-second fall time
+    "detonation_policy": { "entity_impact": "ignore", "world_impact": "ignore", "expiry": "detonate" },
     "geometry": { "type": "Box", "width": 50.0, "length": 50.0, "rotation": 0.0 },
     "target_filters": ["TAG_STRUCTURE"] // The Arbiter will ignore player entities
   },

@@ -83,12 +83,22 @@ Because there is no production cutover, rollback is release gating rather than r
 4. Topic provisioning, ACLs, and retention are automated in infrastructure code.
 5. No Redis Streams dependency remains in implementation mandates for production path.
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. Exact initial partition count policy for `controller.mesh.events` (fixed vs adaptive)?
-2. Per-service retry budget defaults before DLQ publish?
-3. Required non-prod footprint (single-broker dev mode vs 3-broker staging)?
-4. Do we keep a Redis transport adapter only for local developer experimentation?
+1. **Initial Partition Policy:** `controller.mesh.events` will use a fixed **12 partitions per Shard** to balance throughput with metadata overhead. Per-Arbiter command topics (`arbiter.{id}.commands`) remain single-partition (FIFO-strict).
+2. **Retry Budget:** 5 retries with exponential backoff (starting at 100ms) before a message is moved to the Dead Letter Queue (DLQ).
+3. **Developer Footprint:** Single-node Redpanda container for local development; 3-node minimum for Staging/Production.
+4. **Transport Pluralism:** The engine MUST maintain a pluggable `EventTransport` trait. While Production is Redpanda-only, an In-Memory transport MUST exist for unit tests and local "no-infra" experimentation.
+
+## Summary of Decisions
+
+| Item | Decision |
+|------|----------|
+| **Broker** | Redpanda (Kafka 3.x API compatible) |
+| **Durability** | `acks=all`, `idempotence=true` |
+| **Retry Policy** | 5 retries + DLQ |
+| **Ordering** | Strict FIFO per Arbiter/Entity key via partition pinning |
+| **Local Mode** | Docker-based single node or In-Memory Mock |
 
 ## References
 

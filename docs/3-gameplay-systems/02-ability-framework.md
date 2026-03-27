@@ -429,10 +429,10 @@ If an ability's radius is larger than the Arbiter's `MAX_SPELL_RANGE` (e.g., a m
 
 In ARPGs and MMOs (like *Lost Ark* or *Final Fantasy XIV*), boss encounters rely heavily on "Telegraphs"—red warning zones that appear on the ground before a massive attack lands. 
 
-The architecture handles these complex delays with zero continuous bandwidth cost by utilizing the `fuse_timer` of a `ProjectileActor`.
+The architecture handles these complex delays with zero continuous bandwidth cost by utilizing the `arming_delay` and `ProjectileDetonationPolicy` of a `ProjectileActor` (see `01-core-primitives.md`).
 
 ### The Telegraph Flow (Bandwidth Optimization)
-1.  **The Broadcast:** When the Boss casts a Telegraphed AoE, the Arbiter spawns a stationary `ProjectileActor` with a long fuse (e.g., 2.0 seconds). The Arbiter sends **exactly one** downstream `StateUpdate` to the Proxy Nodes containing the actor's Telegraph visual data.
+1.  **The Broadcast:** When the Boss casts a Telegraphed AoE, the Arbiter spawns a stationary `ProjectileActor` with a long arming delay (e.g., 120 ticks / 2.0 seconds) and `expiry: detonate`. The Arbiter sends **exactly one** downstream `StateUpdate` to the Proxy Nodes containing the actor's Telegraph visual data.
 2.  **The Client Render:** The client receives this single packet and locally interpolates the red warning circle filling up over the 2.0 seconds. 
 3.  **The Execution:** Exactly 120 ticks later, the `ProjectileActor` detonates, dealing damage to any hitboxes currently in the zone. If a player was stunned during the cast time and the actor was deleted, the client simply removes the warning circle.
 
@@ -447,7 +447,8 @@ The architecture handles these complex delays with zero continuous bandwidth cos
     "velocity": 0.0
   },
   "mechanics": {
-    "fuse_timer_ticks": 120, 
+    "arming_delay_ticks": 120,
+    "detonation_policy": { "entity_impact": "ignore", "world_impact": "ignore", "expiry": "detonate" },
     "geometry": { "type": "Circle", "radius": 15.0 }
   },
   "combat_context": {
@@ -465,7 +466,7 @@ The architecture handles these complex delays with zero continuous bandwidth cos
 ```
 
 ### Example 9.2: "Dragon's Breath" (Telegraphed Cone)
-If a boss breathes fire in a 90-degree cone, the engine doesn't need new networking logic. The designer simply changes the `geometry` in the JSON. The `ProjectileActor` uses vector angle math to determine victims at the moment the fuse blows, rather than standard radius math.
+If a boss breathes fire in a 90-degree cone, the engine doesn't need new networking logic. The designer simply changes the `geometry` in the JSON. The `ProjectileActor` uses vector angle math to determine victims at the moment the arming delay expires and detonation fires, rather than standard radius math.
 
 ```json
 {
@@ -476,8 +477,9 @@ If a boss breathes fire in a 90-degree cone, the engine doesn't need new network
     "velocity": 0.0
   },
   "mechanics": {
-    "fuse_timer_ticks": 60,
-    "geometry": { 
+    "arming_delay_ticks": 60,
+    "detonation_policy": { "entity_impact": "ignore", "world_impact": "ignore", "expiry": "detonate" },
+    "geometry": {
         "type": "Cone", 
         "radius": 20.0, 
         "angle_degrees": 90.0,

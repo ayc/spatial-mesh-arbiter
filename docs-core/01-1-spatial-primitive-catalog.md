@@ -35,6 +35,12 @@ Each operation specifies whether Ghost entities (cross-boundary visibility proxi
 
 Each operation specifies which pipeline stage(s) it executes in. These bindings are authoritative — they override any conflicting stage assignments in other documents. The compiler MUST tag IR instructions to match these bindings.
 
+### 2.4 Design Rationale: Algorithm Neutrality
+This catalog defines the **WHAT** (inputs, outputs, Ghost policy, determinism guarantees), not the **HOW**. 
+- **Implementation Freedom:** Developers MAY choose any intersection algorithm (e.g., SAT, Arvo’s method, Gilbert-Johnson-Keerthi) for primitives such as `P-09` or `P-10`. 
+- **Performance:** Algorithms SHOULD be optimized for the specific hardware/SIMD targets of the implementation.
+- **Compliance:** As long as the implementation (1) uses `SimFixed` arithmetic, (2) follows the rounding/overflow rules of the kernel, and (3) passes the machine-checkable **Conformance Test Matrix (05-1)**, the specific math implementation is non-normative.
+
 ---
 
 ## 3. Kinematic Mutations (P-01 through P-08)

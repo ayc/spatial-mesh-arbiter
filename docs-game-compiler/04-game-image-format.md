@@ -85,7 +85,7 @@ Fixed-size header at byte offset 0. Allows fast validation without parsing the f
 FileHeader {
     magic:          [u8; 4],    // "GMIM" (Game IMage)
     format_version: u16,        // Image format version
-    flags:          u16,        // Bit flags (signed, debug-present, compressed)
+    flags:          u16,        // Bit flags (see below)
     section_count:  u16,        // Number of SectionEntry records in SectionDirectory
     _reserved:      [u8; 6],    // Zero-padded for alignment
     total_size:     u64,        // Total file size in bytes
@@ -93,6 +93,16 @@ FileHeader {
 }
 // Fixed size: 56 bytes
 ```
+
+`FileHeader.flags` bit assignments:
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | `signed` | Signature section (0xFF) is present and MUST be verified |
+| 1 | `debug_present` | Debug Metadata section (0xF0) is present |
+| 2-15 | Reserved | MUST be zero. Readers MUST ignore unknown flags for forward compatibility. |
+
+Compression is intentionally not supported in this format version. Game images are small enough (sub-256 MB bound) that the complexity of compression scope, algorithm negotiation, and offset semantics is not justified. If a future `format_version` adds compression, it will define the algorithm, scope (per-section vs whole-file), and whether section directory offsets/checksums reference compressed or decompressed bytes.
 
 ### 2.2 Section Directory
 
@@ -181,7 +191,7 @@ AbilityIREntry {
     cast_time_ticks:        u32,
     targeting_type:         u8,         // TargetingType enum
     self_cc_immunity_during_cast: u8,   // CcImmunityTier enum (0 = none)
-    flags:                  u8,         // Bitfield: can_counter_vulnerability_window, can_be_counterspelled, requires_concentration
+    flags:                  u8,         // Bitfield: bit 0 = can_counter_vulnerability_window, bit 1 = can_be_counterspelled, bit 2 = requires_concentration, bits 3-7 reserved (zero)
     combo_finisher:         u8,         // ComboFinisherType enum (0 = none)
     _padding:               [u8; 4],    // Alignment padding
 
@@ -253,17 +263,106 @@ EntityDefinition_Wire {
     max_hp:             i64,        // I32F32
     movement_speed:     i64,        // I32F32
     stat_count:         u16,        // Number of base stat entries
+    resource_pool_count: u16,       // Number of resource pool entries
     ability_count:      u16,        // Number of ability ID references
     passive_count:      u16,        // Number of passive status effect references
-    flags:              u16,        // Bitfield: has_stagger_bar, has_downed_state
+    combo_field_type:   u8,         // P-64 combo field tag (0 = none)
+    _padding:           u8,         // Alignment
+    flags:              u16,        // Bitfield: bit 0 = has_stagger_bar, bit 1 = has_downed_state, bit 2 = has_projectile_config, bits 3-15 reserved (zero)
 
     // Variable-length inline data:
-    // 1. StatEntry[stat_count]         — { stat_id: u16, value: i64 }
-    // 2. AbilityRef[ability_count]     — { ability_id: u32 }
-    // 3. PassiveRef[passive_count]     — { status_id: u32 }
-    // 4. Optional: StaggerBarDef       — if has_stagger_bar flag
-    // 5. Optional: DownedStateDef      — if has_downed_state flag
+    // 1. StatEntry_Wire[stat_count]
+    // 2. ResourcePoolEntry_Wire[resource_pool_count]
+    // 3. AbilityRef_Wire[ability_count]
+    // 4. PassiveRef_Wire[passive_count]
+    // 5. Optional: StaggerBarDef_Wire          — if has_stagger_bar flag (§4.3)
+    // 6. Optional: DownedStateDef_Wire         — if has_downed_state flag (§4.4)
+    // 7. Optional: ProjectileConfigDef_Wire         — if has_projectile_config flag (§4.5)
 }
+```
+
+#### 4.2 Entity Subrecord Wire Types
+
+Tiny fixed-size records referenced by `EntityDefinition_Wire` variable-length arrays:
+
+```
+StatEntry_Wire {
+    stat_id:    u16,    // Pre-hashed stat name
+    _padding:   [u8; 6], // Alignment
+    value:      i64,    // I32F32
+}
+// Fixed size: 16 bytes
+
+ResourcePoolEntry_Wire {
+    pool_id:    u32,    // Pre-hashed pool name (mana, energy, rage, etc.)
+    _padding:   [u8; 4], // Alignment
+    max_value:  i64,    // I32F32: maximum pool capacity
+}
+// Fixed size: 16 bytes
+
+AbilityRef_Wire {
+    ability_id: u32,    // References AbilityIRTable entry
+}
+// Fixed size: 4 bytes
+
+PassiveRef_Wire {
+    status_id:  u32,    // References StatusEffectDefinitions entry
+}
+// Fixed size: 4 bytes
+```
+
+#### 4.3 StaggerBarDef_Wire
+
+Present when the `has_stagger_bar` flag is set. Serializes `02-schema-and-validation.md` §7.1.
+
+```
+StaggerBarDef_Wire {
+    max_stagger:            i64,    // I32F32
+    regen_rate_per_tick:    i64,    // I32F32
+    regen_delay_ticks:      u32,    // Ticks before regen starts after last stagger damage
+    stagger_duration_ticks: u32,    // Duration of the stagger state when bar depletes
+    vulnerability_bonus:    i64,    // I32F32: damage multiplier during stagger
+}
+// Fixed size: 32 bytes
+```
+
+#### 4.4 DownedStateDef_Wire
+
+Present when the `has_downed_state` flag is set. Serializes `02-schema-and-validation.md` §7.2.
+
+```
+DownedStateDef_Wire {
+    downed_hp_ratio:            i64,    // I32F32: fraction of max HP for downed pool
+    downed_movement_speed_ratio: i64,   // I32F32: fraction of base movement speed while downed
+    rally_channel_ticks:        u32,    // Ticks to channel self-rally
+    finish_channel_ticks:       u32,    // Ticks to channel finish on a downed enemy
+    downed_ability_count:       u16,    // Number of ability refs available while downed
+    _padding:                   [u8; 2],
+    // Inline: AbilityRef_Wire[downed_ability_count]
+}
+// Fixed header size: 28 bytes + variable ability refs
+```
+
+#### 4.5 ProjectileConfigDef_Wire
+
+Present when the `has_projectile_config` flag is set. Serializes the projectile/trap behavior fields from `02-schema-and-validation.md` §6.7.1-6.7.2.
+
+```
+ProjectileConfigDef_Wire {
+    speed:                      i64,    // I32F32: velocity in units/tick
+    turn_rate:                  i64,    // I32F32: max angular change per tick (0 = non-homing)
+    pierce:                     u8,     // Targets passed through before stopping
+    homing:                     u8,     // 0 = false, 1 = true
+    arming_delay_ticks:         u32,    // Ticks before detonation-capable triggers arm
+    // DetonationPolicy (inline)
+    manual_trigger_enabled:     u8,     // 0 = false, 1 = true
+    proximity_trigger_radius:   i64,    // I32F32: 0 = disabled, >0 = armed proximity radius
+    entity_impact_behavior:     u8,     // Enum: 0=Ignore, 1=Stop, 2=Detonate, 3=DetonateAfterPierceExhausted
+    world_impact_behavior:      u8,     // Enum: 0=Ignore, 1=Bounce, 2=Stop, 3=Detonate
+    expiry_behavior:            u8,     // Enum: 0=Despawn, 1=Detonate
+    _padding:                   [u8; 2], // Alignment to 4-byte boundary
+}
+// Fixed size: 36 bytes
 ```
 
 ---
@@ -278,12 +377,12 @@ Serialized buff/debuff/CC definitions from `02-schema-and-validation.md` §9.
 StatusEffectDef_Wire {
     status_id:          u32,        // Numeric status ID
     max_stacks:         u8,
-    flags:              u8,         // Bitfield: is_passive, is_cleansable
-    cc_category:        u8,         // CcCategory enum (0 = none)
+    flags:              u8,         // Bitfield: bit 0 = is_passive, bit 1 = is_cleansable, bits 2-7 reserved (zero)
+    cc_category:        u8,         // CcCategory enum: 0=none, 1=displacement, 2=hard_disable, 3=soft_disable, 4=forced_movement, 5=target_override, 6=mute
     _reserved:          u8,
     duration_ticks:     u32,
     modifier_count:     u16,        // Stat modifiers
-    capability_flags:   u16,        // P-26 capability mask (if CC)
+    capability_flags:   u16,        // P-26 capability bitmask: bit 0=CAN_MOVE, bit 1=CAN_CAST, bit 2=CAN_ATTACK, bit 3=CAN_USE_ITEMS, bit 4=PASSIVES_ACTIVE, bits 5-15 reserved
 
     // Variable-length inline data:
     // 1. StatModifier[modifier_count]  — { stat_id: u16, op: u8, value: i64 }

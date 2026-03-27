@@ -30,6 +30,11 @@ The kernel owns:
 2. All participants validate epoch compatibility for ingress and handoff traffic.
 3. Stale traffic is rejected or short-buffered under bounded timeout rules.
 
+### 4.1 Design Rationale: Deterministic Topology
+To ensure bit-identical simulation and hitless handoffs across heterogeneous hardware, topology decisions (splits/merges) MUST be driven by **deterministic entity counts** rather than hardware-specific metrics (CPU%, Memory usage, or Network latency).
+- **Thresholds:** The `safe_entity_threshold` and `critical_entity_threshold` defined in the baseline profile are the sole authoritative triggers for topology rebalancing.
+- **Hardware Agnosticism:** A "Blackhole" density event MUST trigger the same split logic whether the Arbiter is running on a high-end threadripper or a low-spec cloud instance. This ensures that a WAL-replay "fast-forward" on a surrogate node produces the exact same spatial state as the original node.
+
 ## 5. Runtime Safety Constraints
 
 1. No blocking disk/network/database calls in authoritative tick path.

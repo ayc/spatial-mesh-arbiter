@@ -256,6 +256,43 @@ If `center` references a binding from a kinematic effect (e.g., `landing_pos`), 
 | `owner` | `EntityRef` | NO | Defaults to caster |
 | `lifetime_ticks` | `int` | YES | Bounded actor duration |
 | `count` | `int` | NO | Default 1. MUST be <= `max_spawns_per_rule`. |
+| `projectile` | `ProjectileBlock` | NO | Projectile-specific fields (see §6.7.1) |
+
+#### 6.7.1 ProjectileBlock (optional, for projectile/trap actors)
+
+| Field | Type | Required | Mapping |
+|-------|------|----------|---------|
+| `speed` | `fixed` | YES | Projectile velocity (units/tick) |
+| `homing` | `bool` | NO | Default false. If true, `turn_rate` is required. |
+| `turn_rate` | `fixed` | When homing | P-03: max angular change per tick |
+| `pierce` | `int` | NO | Default 0. Targets passed through before stopping. |
+| `arming_delay_ticks` | `int` | NO | Default 0. Ticks before detonation-capable triggers arm. |
+| `detonation_policy` | `DetonationPolicyBlock` | NO | Default: `{ entity_impact: detonate, world_impact: stop, expiry: despawn }` |
+
+#### 6.7.2 DetonationPolicyBlock
+
+| Field | Type | Required | Default |
+|-------|------|----------|---------|
+| `manual_trigger` | `bool` | NO | `false` |
+| `proximity_radius` | `fixed` | NO | none |
+| `entity_impact` | `enum` | NO | `detonate` |
+| `world_impact` | `enum` | NO | `stop` |
+| `expiry` | `enum` | NO | `despawn` |
+
+`entity_impact` enum: `ignore`, `stop`, `detonate`, `detonate_after_pierce`.
+`world_impact` enum: `ignore`, `bounce`, `stop`, `detonate`.
+`expiry` enum: `despawn`, `detonate`.
+
+#### 6.7.3 Compilation Path: Ability → Entity Archetype
+
+Projectile fields defined in `spawn_actor.projectile` do NOT compile into the ability's `AbilityIRBlock`. Instead, the compiler merges them into the **entity archetype** referenced by `archetype_id`. The data flow is:
+
+1. The ability's `spawn_actor` effect compiles to a P-32 (Actor Spawning) `IRDirective` carrying the `archetype_id`.
+2. The `ProjectileBlock` fields compile into the `EntityDefinitions` section (0x11) of the game image, as part of the archetype's data.
+3. At runtime, when the engine processes the P-32 directive and calls `initialize_spawn_configuration`, the adapter reads the archetype's projectile fields from the game image's `EntityDefinitions` and returns them in the `SpawnConfiguration`.
+4. The engine uses the archetype's `ProjectileDetonationPolicy`, `arming_delay_ticks`, `pierce`, `homing`, and `turn_rate` to configure the spawned `ProjectileActor`.
+
+This separation exists because projectile configuration is per-entity-type (all fireballs behave the same), not per-ability-cast. Multiple abilities can spawn the same projectile archetype with different damage values but identical flight/detonation behavior.
 
 ### 6.8 `apply_shield`
 

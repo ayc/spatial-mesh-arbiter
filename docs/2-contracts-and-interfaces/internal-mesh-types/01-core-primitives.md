@@ -230,9 +230,11 @@ struct AbilityEntry {
 
     // Projectile-specific (ignored for instant abilities)
     projectile_speed: SimFixed,   // Units per tick; zero for stationary zones
+    projectile_turn_rate: Option<SimFixed>, // Max angular change per tick; required when homing == true
+    arming_delay_ticks: u32,      // Ticks before the spawned explosive becomes armed
+    detonation_policy: ProjectileDetonationPolicy, // How the explosive reacts to impacts, commands, proximity, and expiry
     lifetime_ticks: u32,          // Max lifetime before despawn
-    fuse_ticks: u32,              // Ticks before the projectile becomes "armed" and can detonate
-    pierce: u8,                   // Number of targets the projectile can pass through (0 = explode on first hit)
+    pierce: u8,                   // Additional unique valid targets after the first (0 = stop/detonate on first valid hit)
     homing: bool,                 // Whether the projectile steers toward target_id
 
     // Zone/pulse-specific (used by SpawnZone alias and Global Events)
@@ -240,6 +242,47 @@ struct AbilityEntry {
     duration_ticks: Option<u32>,       // Total zone lifetime in ticks
     target_filters: Option<Vec<u16>>,  // Optional entity tag filters (e.g., TAG_STRUCTURE)
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileDetonationPolicy {
+    manual_trigger_enabled: bool,                 // Owner may issue `DetonateOwnedProjectile { projectile_id }`
+    proximity_trigger_radius: Option<SimFixed>,   // Armed valid-target enter radius; pressure traps use a contact-sized radius
+    entity_impact_behavior: ProjectileEntityImpactBehavior,
+    world_impact_behavior: ProjectileWorldImpactBehavior,
+    expiry_behavior: ProjectileExpiryBehavior,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum ProjectileEntityImpactBehavior {
+    Ignore,                      // Pass through entities
+    Stop,                        // Stop on first valid entity but do not detonate
+    Detonate,                    // Detonate immediately on first valid entity hit
+    DetonateAfterPierceExhausted,// Apply hits until `pierce_remaining == 0`, then detonate
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum ProjectileWorldImpactBehavior {
+    Ignore,      // No world response
+    Bounce,      // Reflect/roll according to movement model
+    Stop,        // Stop on world collision but do not detonate
+    Detonate,    // Detonate on world collision
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum ProjectileExpiryBehavior {
+    Despawn,     // Vanish silently when `lifetime_ticks` reaches zero
+    Detonate,    // Detonate when `lifetime_ticks` reaches zero
+}
+
+// AbilityEntry cross-field validation rules:
+// - If homing == true, projectile_turn_rate MUST be Some(rate) and rate MUST be > 0.
+// - If homing == false, projectile_turn_rate MAY be None. If present, it is ignored by the engine.
+// - Implementations MUST NOT invent an implicit default turn rate for homing projectiles.
+// - `arming_delay_ticks` gates detonation-capable triggers. While arming is active, the projectile/trap is unarmed.
+// - Non-detonating projectiles are valid. `detonation_policy` also describes bounce/stop/despawn behaviors.
+// - `proximity_trigger_radius`, when present, MUST be > 0 and is evaluated only after arming has completed.
+// - `pierce` is consumed per unique valid target actually hit, never per frame and never per rejected candidate.
+// - No implicit damage falloff is applied per pierce. Any per-pierce damage scaling MUST be authored explicitly.
 
 enum AbilityArchetype {
     TargetedAbility,
@@ -656,8 +699,9 @@ struct ProjectileSnapshot {
     position: Vec2F,
     velocity: Vec2F,
     remaining_lifetime_ticks: u32,
-    fuse_remaining_ticks: u32,
+    arming_remaining_ticks: u32,
     pierce_remaining: u8,
+    hit_exclusion_list: Vec<EntityID>, // Deterministically ordered set of targets already struck by this projectile
     impact_sequence: u32,
     data_epoch: u32,
     damage_origin: u8, // DamageOrigin discriminant
@@ -1053,6 +1097,10 @@ enum ArpgAction {
         direction: Vec2F, 
         target_id: Option<EntityID>, 
         spell_id: u16 
+    },
+    // Combat (Reactivation / Owner-triggered projectile detonation)
+    DetonateOwnedProjectile {
+        projectile_id: UUID,
     },
     // Combat (Cross-Boundary Ghost Interactions)
     ImpactEvent {

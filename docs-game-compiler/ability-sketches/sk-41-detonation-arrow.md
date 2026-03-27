@@ -32,19 +32,20 @@ P-32 (Actor Spawning) → P-45 (Delay Timer) → P-09 (Shape Overlap Query)
 ### Player-Controlled Detonation
 Normal projectiles have two detonation triggers: entity collision (hit something) and fuse expiry (max lifetime/range). This projectile adds a third: **player command**.
 
-The ProjectileActor needs a detonation mode:
+The ProjectileActor needs a detonation policy:
 ```
-enum DetonationMode {
-    OnImpact,           // Standard: detonate on first entity collision
-    OnFuse,             // Standard: detonate when fuse reaches zero
-    OnPlayerCommand,    // New: detonate when caster sends detonation input
-    OnPlayerOrFuse,     // New: whichever comes first
+ProjectileDetonationPolicy {
+    manual_trigger_enabled: true,
+    proximity_trigger_radius: None,
+    entity_impact_behavior: Ignore,
+    world_impact_behavior: Ignore,
+    expiry_behavior: Detonate,
 }
 ```
 
-For `OnPlayerOrFuse`, the projectile flies until either:
-- The caster sends a detonation command (reactivation)
-- The fuse expires (max range safety)
+For this policy, the projectile flies until either:
+- The caster sends a `DetonateOwnedProjectile { projectile_id }` command (reactivation)
+- The projectile reaches its lifetime expiry and detonates as a safety cap
 
 ### Caster-Projectile Link
 The caster must be able to send a command to a specific live projectile. This is similar to SK-39 Spectral Dash (reactivating a live projectile), but instead of teleporting TO the projectile, the caster tells it to EXPLODE.
@@ -63,7 +64,7 @@ On reactivation:
 4. Despawn projectile
 
 ### Pass-Through Projectile
-The projectile ignores entity collisions during flight — it only responds to the player's detonation command or fuse expiry. This is a flag on the projectile: `collides_with_entities: false`.
+The projectile ignores entity collisions during flight — it only responds to the player's detonation command or lifetime expiry. This is a flag on the projectile: `collides_with_entities: false`.
 
 ## Cross-Boundary Concerns
 
@@ -77,8 +78,8 @@ The caster's Arbiter needs to know which Arbiter currently hosts the projectile 
 
 ## Compiler Requirements
 
-TODO: Designer specifies: projectile speed, max range, pass-through (no entity collision), detonation trigger (player command or fuse), AoE blast radius, AoE damage, silence duration (2.5s), targeting filter (enemies). Compiler produces:
-- ProjectileActor with `DetonationMode::OnPlayerOrFuse` and `collides_with_entities: false`
+TODO: Designer specifies: projectile speed, max range, pass-through (no entity collision), detonation policy (player command or lifetime expiry), AoE blast radius, AoE damage, silence duration (2.5s), targeting filter (enemies). Compiler produces:
+- ProjectileActor with `ProjectileDetonationPolicy { manual_trigger_enabled: true, entity_impact_behavior: Ignore, expiry_behavior: Detonate, ... }` and `collides_with_entities: false`
 - Status effect on caster linking to the projectile
 - Multi-phase ability: Phase 1 (launch), Phase 2 (detonate)
 - AoE resolution + silence application on detonation
