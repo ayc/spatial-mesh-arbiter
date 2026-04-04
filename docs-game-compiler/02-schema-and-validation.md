@@ -294,6 +294,22 @@ Projectile fields defined in `spawn_actor.projectile` do NOT compile into the ab
 
 This separation exists because projectile configuration is per-entity-type (all fireballs behave the same), not per-ability-cast. Multiple abilities can spawn the same projectile archetype with different damage values but identical flight/detonation behavior.
 
+#### 6.7.4 Shared-Archetype Conflict Rule
+
+If multiple authored `spawn_actor` effects reference the same `archetype_id` and provide a
+`ProjectileBlock`, the compiler MUST normalize those projectile blocks and compare the normalized
+results byte-for-byte.
+
+- If all explicit `ProjectileBlock` values for that `archetype_id` normalize identically, the
+  compiler emits one canonical archetype projectile config into `EntityDefinitions`.
+- If any explicit `ProjectileBlock` for that `archetype_id` differs after normalization, the
+  compile MUST fail deterministically with `ENTITY_PROJECTILE_CONFIG_CONFLICT`.
+- `spawn_actor` effects that omit `projectile` do not contribute a new archetype definition; they
+  inherit the archetype's canonical projectile config.
+
+This rule preserves the invariant that projectile behavior is owned by the entity archetype rather
+than by individual ability casts.
+
 ### 6.8 `apply_shield`
 
 | Field | Type | Required | Primitive |

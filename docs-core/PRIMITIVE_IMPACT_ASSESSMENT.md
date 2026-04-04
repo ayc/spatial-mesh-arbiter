@@ -88,7 +88,7 @@ Current canonical split:
 - `initialize_spawn_configuration` — spawn-configuration initialization hook for P-32 Actor Spawning
 - `describe_compatibility` — startup negotiation
 
-The 12-stage pipeline is defined in `04-1-game-adapter-contract.md` §3. The `dispatch_stage` hook contract — including the normative `StageId` enum, `DispatchStageRequest` payload schema, and `StageOutcome` response schema — is defined in `04-2-game-adapter-api-contract.md` §3.5.
+The 12-stage pipeline is defined in `04-1-game-adapter-contract.md` §3. The `dispatch_stage` hook contract — including the normative stage type model (`PipelineStageId`, `DispatchStageId`, `DeferredTargetStageId`), `DispatchStageRequest` payload schema, and `StageOutcome` response schema — is defined in `04-2-game-adapter-api-contract.md` §3.5.
 
 **Status: ADOPTED.** The architectural question (named hooks vs generic stage dispatch) is resolved. The remaining work is filling in per-stage context schemas as primitives are implemented.
 
@@ -184,9 +184,9 @@ Several entries in `docs/6-spec-drafts/GAPS_CHECKLIST.md` are directly addressed
 
 | Gap | Overlap |
 |-----|---------|
-| T1-03 (Combat Modifier Pipeline & Proc Order) | Amendment B directly formalizes the hook pipeline that T1-03 is drafting. These should be reconciled — T1-03's 11-step `apply_combat_math` expansion maps to Amendment B's hook stages. |
-| T1-04 (Contention Lock Algorithm) | Relevant to P-47 (Spatial Corpse Registry) where multiple consumers contend for the same corpse. Game-adapter level, but the algorithm gap remains. |
-| T1-06 (Reactive Proc & Cascade Depth) | Amendment B's `post_damage_resolution` hook is where reactive procs (P-35, P-36) fire. The cascade depth bound is a constraint on hook re-entrancy that Amendment B should specify. |
+| T1-03 (Combat Modifier Pipeline & Proc Order) | Now resolved in the canonical gameplay docs. Amendment B remains the primitive-level formalization of the same Stage 7-10 combat flow. |
+| T1-04 (Contention Lock Algorithm) | Now resolved in the canonical gameplay docs. Still relevant to P-47 (Spatial Corpse Registry) anywhere multiple consumers contend for the same corpse. |
+| T1-06 (Reactive Proc & Cascade Depth) | Now resolved in the canonical gameplay docs. Amendment B's `post_damage_resolution` hook remains the primitive-level home for reactive proc/defer semantics. |
 
 ## 7. Open Questions for Team Review
 

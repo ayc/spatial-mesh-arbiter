@@ -83,7 +83,10 @@ Instead of dealing raw damage, this relies entirely on the `status_effect_id`. T
 ### Example 2.3: "Bridge Collapse" (Environmental Targeting)
 During a siege, a Nuke is dropped to destroy the bridges leading to a fortress. 
 
-Because Global Events carry the `ability_id`, the Arbiter can be programmed to look for specific tags during the `resolve_action` loop. This spell deals massive damage, but *only* to entities tagged as `Structure`. Players standing next to the bridge take zero damage, but the bridge hitbox is destroyed.
+Because Global Events carry the `ability_id` plus deterministic `target_filters`, the receiving
+Arbiters apply the normal Stage 3 target-resolution and Stage 8 damage rules only to entities that
+match `TAG_STRUCTURE`. Players standing next to the bridge take zero damage, but the bridge
+hitbox is destroyed.
 
 **Designer JSON:**
 ```json
@@ -137,6 +140,19 @@ To avoid flooding the Mesh Controller with requests every second, the Controller
 }
 ```
 
+The important runtime detail is that the pulse loop is still stage-driven:
+
+1. The Mesh Controller schedules the initial zone spawn once.
+2. Each affected Arbiter spawns the stationary zone actor locally.
+3. On each `pulse_interval_ticks`, Stage 11 (`StateUpdate`) emits a
+   `deferred_spatial_event` for the **next tick's Stage 3 (`TargetResolution`)**.
+4. Each pulse uses a fresh per-pulse UUID so border entities are protected from duplicate hits
+   within one pulse but remain eligible for the next pulse.
+
+Immediate "on-enter" behavior is not implied by the pulse loop. If content needs edge-triggered
+zone entry semantics, it must use the continuous proximity monitor model instead of ordinary zone
+pulses.
+
 ---
 
 ## 3. The Underlying Engine Interface (For Engineers)
@@ -168,3 +184,8 @@ ControllerCommand::ExecuteGlobalEvent {
     execute_at_tick: 50000              // The exact Shard Tick for detonation
 }
 ```
+
+If `pulse_interval_ticks` and `duration_ticks` are present, the command means "spawn a local zone
+actor and let Stage 11 emit next-tick deferred spatial pulses" rather than "re-broadcast a fresh
+controller command every pulse." This keeps map-wide zone events synchronized without turning the
+Mesh Controller into a 1 Hz pulse broadcaster.

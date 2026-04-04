@@ -555,85 +555,66 @@ When a player clicks "Fire", the Arbiter that owns that player reads the entity'
 
 *Crucial Rule:* The `CombatContext` damage value is completely finalized from an offensive perspective before it ever leaves the origin server.
 
-### Phase 2: The Mitigation Resolution (Receiving Server)
-When the attack actually connects with the victim, the Arbiter that owns the victim executes `apply_combat_math`. It does **not** roll for crits or offensive multipliers. It only calculates Mitigation and Target-Based logic.
+### Phase 2: Stage-Aligned Mitigation Resolution (Receiving Server)
+When the attack actually connects with the victim, the Arbiter that owns the victim executes the
+**receiving-side combat stages**. It does **not** roll for crits or offensive multipliers. Those were
+ already fixed during Phase 1. The receiving server is responsible for evasion, mitigation, block,
+ shields, death prevention, and reactive follow-up.
 
-#### The Math Formula (`apply_combat_math`)
+The older 7-step `apply_combat_math` sketch is a legacy explanation only. The authoritative
+runtime model is the Stage 7-10 flow below, which aligns with the Game Adapter API v2 and
+the compiler IR spec.
 
-```rust
-// 1. Evasion Check
-if roll_dice() < victim.defense.evasion_rating {
-    return; // "DODGED!"
-}
+#### Receiving-Side Stage Map
 
-// 2. Distance Falloff
-let falloff_mult = calculate_falloff(distance);
-let mut incoming_damage = context.base_damage as SimFixed * falloff_mult;
+| Runtime Stage | Responsibility | Gameplay Meaning |
+| :--- | :--- | :--- |
+| **Stage 7: PreMitigation** | `P-19`, `P-22`, `P-62`, `P-65` | Instance barriers, deferred ledgers, CC-immunity gates, vulnerability-window state |
+| **Stage 8: DamageResolution** | `P-15`, `P-16`, `P-18`, `P-20`, `P-21`, `P-49` | Combat math, shields, redirection, conversion, resistance/penetration, final HP/resource loss |
+| **Stage 9: PostDamage** | `P-35`, `P-36`, `P-37`, `P-38`, `P-55`, `P-60`, `P-61` | Reactive hooks and secondary events only |
+| **Stage 10: DeathCheck** | `P-23`, `P-24`, `P-25`, `P-39` | Death prevention, force-kill, multi-phase life pools, on-death effects |
 
-// 3. Unroll Attacker's Phase 2 Directives (Conditionals)
-// This resolves complex item logic (e.g., "+50% damage if target HP < 30%") 
-// exactly where the target's HP is authoritatively known.
-let victim_hp_pct = victim.hp as SimFixed / victim.max_hp as SimFixed;
-for condition in &context.conditionals {
-    match condition {
-        OffensiveCondition::MultiplyDamageIfTargetHpBelow { threshold_pct, multiplier } => {
-            if victim_hp_pct < *threshold_pct {
-                incoming_damage *= *multiplier;
-            }
-        },
-        OffensiveCondition::AddDamageTargetMaxHpPct { pct_as_damage, .. } => {
-            incoming_damage += (victim.max_hp as SimFixed * *pct_as_damage);
-        }
-        // ...
-    }
-}
+#### Stage 8 Deterministic Sub-Order
 
-// 4. Block Check
-let mut is_blocked = false;
-if roll_dice() < victim.defense.block_chance {
-    incoming_damage *= SimFixed::from_num(0.5); // Reduce damage by 50%
-    is_blocked = true;                         // Trigger "BLOCKED!" VFX
-}
+Within `DamageResolution`, the receiving Arbiter MUST evaluate a hit in this order:
 
-// 5. Resistance & Penetration Math
-// Determinism Rule: All literal numbers must be converted to SimFixed. Standard f32 math is forbidden.
-if context.damage_type != 99 && context.damage_type != 100 { // Ignore True/Healing
-    // Get the victim's raw resistance to this specific element (e.g., FIRE)
-    let mut effective_resistance = victim.defense.resistances[context.damage_type as usize];
-    
-    // Apply Attacker's Penetration
-    effective_resistance *= (SimFixed::from_num(1) - context.armor_penetration_pct);
-    effective_resistance -= context.armor_penetration_flat;
-    
-    // Clamp resistance between -100 (Taking double damage) and 85 (Taking 15% damage)
-    effective_resistance = effective_resistance.clamp(SimFixed::from_num(-100), SimFixed::from_num(85));
-    
-    // Calculate Final Mitigation
-    let one_hundred = SimFixed::from_num(100);
-    if effective_resistance > SimFixed::from_num(0) {
-        incoming_damage *= (SimFixed::from_num(1) - (effective_resistance / one_hundred));
-    } else {
-        // Negative resistance amplifies damage
-        incoming_damage *= (SimFixed::from_num(1) + (effective_resistance.abs() / one_hundred));
-    }
-}
+1. Evasion check.
+2. Distance falloff.
+3. Target-state conditionals carried in `CombatContext.conditionals`.
+4. Block check.
+5. Incoming value modification and stat layering.
+6. Redirection / conversion / destruction-to-damage side effects.
+7. Absorption barriers.
+8. Resistance and penetration math.
+9. Final HP/resource application.
 
-// 6. Final Application
-victim.hp -= incoming_damage as i32;
+This keeps the gameplay intent from the old `apply_combat_math` sketch while aligning it to the
+stage scheduler.
 
-// 7. Reactive Procs (Non-Recursive Guard)
-if victim.defense.thorns_damage > 0
-    && matches!(context.damage_origin, DamageOrigin::DirectCast)
-    && context.proc_depth == 0
-{
-    trigger_thorns_mesh_event(
-        attacker_id,
-        victim.defense.thorns_damage,
-        DamageOrigin::ReactiveProc,
-        context.proc_depth + 1
-    );
-}
-```
+#### Important Consequences
+
+- **Absorption happens before resistance.** A 100-damage hit against a 60-HP barrier and 50%
+  resistance removes 60 barrier HP first; the remaining 40 then enters resistance, resulting in
+  20 actual HP loss.
+- **Hits resolve sequentially, not from a pre-tick snapshot.** If Hit 1 pushes the target below
+  30% HP, Hit 2 in the same tick sees that updated HP value when evaluating its conditionals.
+- **Dead targets still finish the tick's ordered hit stream.** Later hits in the same tick can
+  still apply damage and attribution, but the dead entity cannot act again.
+
+#### Reactive and Death-Check Rules
+
+- **Stage 9 (`PostDamage`) never resolves new combat inline.** Reactive hooks emit deferred
+  follow-up work for the **next tick**, re-entering at Stage 7 (`PreMitigation`).
+- The engine MUST track `reactive_depth` / `proc_depth` per chain. The default maximum reactive
+  depth is `1`; events at or above that bound MUST NOT spawn further Stage 9 follow-up hooks.
+- **Stage 10 (`DeathCheck`)** evaluates in this order:
+  1. Resolution Bypass (`P-24`)
+  2. Floor Clamping (`P-23`)
+  3. Multi-Phase Vitals (`P-25`)
+  4. On-Death Hook (`P-39`)
+
+Threshold-style "cannot die" effects therefore prevent `On-Kill` logic, while ordinary `On-Hit`
+logic still fires because the hit itself landed during Stage 8.
 
 ---
 

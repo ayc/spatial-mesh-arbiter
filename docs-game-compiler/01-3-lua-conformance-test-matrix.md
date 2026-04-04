@@ -141,6 +141,9 @@ Test harness MUST support:
 | `LUA-LOWER-006` | `LOWERING` | `REQ` | Stage 11 accumulator update (`P-41`/`P-42`/`P-50` style) with no timer payload | compile succeeds; normalized IR classifies the Stage 11 operation as `in_place_state_update` and emits no deferred-event metadata | n/a |
 | `LUA-LOWER-007` | `LOWERING` | `REQ` | delayed AoE or pulse-zone timer whose payload requires a spatial query | compile succeeds; normalized IR tags the timer payload as `deferred_spatial_event` with next-tick Stage 3 (`TargetResolution`) re-entry | n/a |
 | `LUA-LOWER-008` | `LOWERING` | `REQ` | direct-target timer payload whose victim is already known and needs no spatial query | compile succeeds; normalized IR tags the timer payload as `deferred_combat_event` with next-tick Stage 7 (`PreMitigation`) re-entry | n/a |
+| `LUA-LOWER-009` | `LOWERING` | `REQ` | `spawn_actor.projectile` authored on a projectile/trap archetype | compile succeeds; projectile fields lower into the archetype's `EntityDefinitions` payload and do not appear inline in the originating `AbilityIRBlock` | n/a |
+| `LUA-LOWER-010` | `LOWERING` | `REQ` | two abilities reference the same `archetype_id` with identical normalized `ProjectileBlock` values | compile succeeds; emitted archetype projectile config is canonical and deduplicated | n/a |
+| `LUA-LOWER-011` | `LOWERING` | `REQ` | two abilities reference the same `archetype_id` with conflicting normalized `ProjectileBlock` values | compile fails deterministically | `ENTITY_PROJECTILE_CONFIG_CONFLICT` |
 | `LUA-BIND-001` | `BINDING` | `REQ` | one query result reused by two downstream ops | compile succeeds; normalized IR reuses one binding slot deterministically | n/a |
 | `LUA-BIND-002` | `BINDING` | `REQ` | symbolic temp referenced but never defined after lowering | compile fails | `BINDING_UNRESOLVED_REFERENCE` |
 | `LUA-BIND-003` | `BINDING` | `REQ` | same symbolic temp inferred as incompatible types across uses | compile fails | `BINDING_TYPE_CONFLICT` |
@@ -180,6 +183,8 @@ Test harness MUST support:
 | `IMG-CONTENT-001` | `IMAGE` | `REQ` | emit image with one ability, verify AbilityIRTable section (0x10) contains exactly one entry parseable as `AbilityIREntry` | parse succeeds | n/a |
 | `IMG-CONTENT-002` | `IMAGE` | `REQ` | emit image, verify `resource_pool_id` field is present and matches the expected compiled pool identifier for abilities with resource costs | parse succeeds | n/a |
 | `IMG-CONTENT-003` | `IMAGE` | `REQ` | emit image, verify LookupIndexes (0x20) contain sorted entries for every ability, entity, status, and formula ID | index validation succeeds | n/a |
+| `IMG-CONTENT-004` | `IMAGE` | `REQ` | emit projectile/trap archetype content, verify EntityDefinitions section (0x11) contains a parseable `ProjectileConfigDef_Wire` with expected `arming_delay_ticks`, `turn_rate`, `pierce`, and detonation policy fields | parse succeeds | n/a |
+| `IMG-CONTENT-005` | `IMAGE` | `REQ` | emit NPC definitions plus spawn rules, verify EntityDefinitions and Static Data Tables contain parseable NPC archetype data and spawn-table entries that reference the expected archetype IDs | parse succeeds | n/a |
 | `IMG-DETERM-001` | `IMAGE` | `REQ` | emit same source, compiler version, build profile, and signing inputs twice | full image bytes preceding signature section are byte-identical | n/a |
 
 ## 6. Cross-Run Stability Requirements

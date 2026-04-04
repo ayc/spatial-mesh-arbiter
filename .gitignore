@@ -1,0 +1,5 @@
+/target/
+/_scratch/
+*.swp
+*.swo
+.DS_Store

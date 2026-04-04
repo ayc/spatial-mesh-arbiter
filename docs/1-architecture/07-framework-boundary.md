@@ -203,7 +203,7 @@ trait GameAdapter: Send + Sync + 'static {
     /// Unified entry point for Stages 1 and 3-12.
     fn dispatch_stage(
         &self,
-        stage_id: StageId,
+        stage_id: DispatchStageId,
         batch: &[EntityStageContext<Self::Entity>],
         world: &WorldView<Self::Entity>,
         rng: &mut DeterministicRng,

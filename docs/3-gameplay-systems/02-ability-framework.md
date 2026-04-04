@@ -227,57 +227,94 @@ A plague that spreads from player to player.
 
 ---
 
-## 6. Cascading & Triggered Abilities (Procs)
+## 6. Cascading, Projectile, and Zone Mechanics
 
-Complex ARPGs often feature abilities that spawn *other* abilities upon impact (e.g., "Corpse Explosions" or "On-Hit" procs). The architecture handles this by allowing the Spatial Arbiter to recursively push new events into its own internal queue.
+Complex ARPGs often feature abilities that spawn *other* abilities on hit, create long-lived
+projectiles with authored detonation rules, or maintain pulsing zone actors over time. The
+authoritative model is:
+
+1. **Direct hit math** resolves in the Stage 7-10 combat stages.
+2. **Reactive follow-up work** from Stage 9 (`PostDamage`) is deferred to the **next tick**.
+3. **Timer-fired work** from Stage 11 (`StateUpdate`) is also deferred to the **next tick**.
+
+The Arbiter MUST NOT recurse by pushing same-tick combat work into an ad hoc `internal_inbox`
+mechanism. All follow-up work is emitted as deferred events with an explicit re-entry stage.
+
+### 6.1 Projectile Authoring Rules
+
+`SpawnProjectile` content uses the shared projectile fields defined on `AbilityEntry`:
+
+- `projectile_speed`
+- `homing`
+- `projectile_turn_rate`
+- `arming_delay_ticks`
+- `detonation_policy`
+- `lifetime_ticks`
+- `pierce`
+
+Authoritative rules:
+
+1. If `homing == true`, `projectile_turn_rate` is required and acts as the bounded turn-rate for
+   trajectory steering.
+2. `pierce` means **additional unique valid targets after the first**. It is consumed per unique
+   target hit, not per frame.
+3. `detonation_policy` controls manual trigger, proximity trigger, entity impact behavior, world
+   impact behavior, and expiry behavior independently.
+4. There is **no implicit damage falloff per pierce**. Any diminishing damage must be authored as
+   a separate mechanic.
+
+### 6.2 Triggered and Reactive Ability Rules
+
+- **Stage 9 (`PostDamage`)** is the only place where reactive hooks fire.
+- Any follow-up combat event created there MUST re-enter on the **next tick** at
+  **Stage 7 (`PreMitigation`)**.
+- The engine tracks `proc_depth` / `reactive_depth` per chain. Default maximum reactive depth is
+  `1`. Events at or above the cap MUST NOT trigger further reactive hooks.
+
+This means "thorns," "on-hit proc," and "spawn another spell on impact" mechanics are all
+authoritative, but none of them can explode into unbounded same-tick recursion.
 
 ### Example 6.1: "Plague Carrier" (On-Hit Secondary Spawn)
-A player fires a dart. When it hits an enemy, it explodes into a lingering, stationary poison cloud.
-*   **The Impact:** The dart `ProjectileActor` hits the enemy and generates:
-    ```rust
-    ActionPayload::Game(ArpgAction::ImpactEvent {
-        impact_id: "uuid-dart-1",
-        target_ids: vec![Enemy_A],
-        context: CombatContext {
-            base_damage: 50,
-            damage_type: POISON,
-            knockback_force: 0.0,
-            status_effect_id: Some(TRIGGER_PLAGUE_BURST), // The Cascade Trigger
-            damage_origin: DamageOrigin::DirectCast,
-            proc_depth: 0
-        }
-    })
-    ```
-*   **The Cascade (Inside the Arbiter):** During `apply_combat_math()`, the Arbiter processes the damage and detects `TRIGGER_PLAGUE_BURST`. It immediately constructs a new internal event to spawn the secondary cloud, and pushes it to its own `internal_inbox`:
-    ```rust
-    self.internal_inbox.push(MeshInternalEvent {
-        event_id: generate_uuid(),
-        source_arbiter_id: self.arbiter_id,
-        actor_id: Some(original_attacker_id),
-        origin_tick: current_shard_tick(), // Inherit current temporal context
-        data_epoch: current_data_epoch(), // Pin this cascade to the current dictionary version
-        payload: ActionPayload::Game(ArpgAction::SpawnProjectile { 
-            direction: Vec2F::ZERO, // Stationary
-            spell_id: SPELL_PLAGUE_CLOUD // Inherits its position from Enemy A's current location
-        })
-    });
-    ```
-*   **The Result:** On the very next tick, a new `ProjectileActor` (acting as a stationary 5-second cloud) is instantiated perfectly within the lock-free loop, subject to all standard Ghost Relay rules.
+A player fires a dart. When it hits an enemy, it explodes into a lingering, stationary poison
+cloud.
+
+*   **The Impact:** The dart `ProjectileActor` lands a normal combat event with
+    `damage_origin = DirectCast` and `proc_depth = 0`.
+*   **The Cascade:** During Stage 9 (`PostDamage`), the adapter sees
+    `TRIGGER_PLAGUE_BURST` and emits a **deferred combat event** for the next tick. The deferred
+    payload carries the victim position or victim entity reference needed to create the secondary
+    cloud.
+*   **The Result:** On the next tick, the deferred event re-enters at Stage 7 and issues a
+    `P-32` actor-spawn directive for a stationary poison-cloud projectile/zone. No same-tick
+    recursion occurs.
 
 ### Example 6.2: "Chilling Aura" (Attached Zone Actor)
-A Paladin activates an aura that slows and damages all nearby enemies. The aura physically moves with the Paladin.
-*   **Mechanic:** The ability spawns a specialized `ProjectileActor` (or `ZoneActor`) that is **parented** to the Paladin's EntityID.
-*   **The Movement Loop:** Every tick, the Aura Actor updates its coordinates to match the Paladin's authoritative position.
-*   **The Pulse:** Every 60 ticks, the Aura Actor performs a radial collision check against all hitboxes. If the Paladin is standing on a border, the check includes both real players and **Ghost entities**.
-*   **The Impact:** The Aura Actor generates an `ImpactEvent` with a unique UUID for that specific pulse and hands it to the Arbiter.
-*   **The Relay:** If Ghost entities were caught in the blast, the Host Arbiter relays the `ImpactEvent` to the neighboring Arbiters via the standard Arbiter Relay Protocol (Section 2.4). Enemy players on the other side of the border receive the slow debuff seamlessly.
+A Paladin activates an aura that slows and damages all nearby enemies. The aura physically moves
+with the Paladin.
+
+*   **Mechanic:** The ability spawns a specialized `ProjectileActor`/Zone Actor parented to the
+    Paladin's `EntityID`.
+*   **The Movement Loop:** Every tick, the zone actor updates its coordinates to match the
+    Paladin's authoritative position.
+*   **The Pulse:** On each `pulse_interval_ticks`, Stage 11 emits a
+    `deferred_spatial_event` for the **next tick's Stage 3 (`TargetResolution`)**. The pulse uses
+    a fresh per-pulse UUID and runs a `P-09` shape-overlap query against both local entities and
+    ghosts.
+*   **The Edge Case:** Entering the zone between pulses does nothing by default. Immediate
+    on-enter behavior requires `P-14 Continuous Proximity Monitor` as a separate mechanic.
 
 ### Example 6.3: "Thorns Armor" (Reactive Procs)
-A player activates a buff that reflects 15 True damage back to anyone who hits them with a melee attack. 
-*   **The Application:** The designer assigns `EFFECT_THORNS_AURA` to a buff spell. The Arbiter adds this to the player's `SoftState.active_status_effects`.
-*   **The Engine Trigger:** When an enemy hits the player, the Arbiter executes `apply_combat_math`. It calculates the damage to the victim, then sees the Thorns buff. 
-*   **The Resolution:** The Arbiter does *not* instantly damage the attacker (this avoids memory access violations/Borrow Checker errors). Instead, the Arbiter automatically pushes a new `MeshInternalEvent` with `ActionPayload::Game(ArpgAction::InternalPreparedHit)` targeting the attacker into its own queue. The attacker takes the 15 True damage on the very next simulation tick.
-*   **The Proc Guard:** The reflected hit is stamped as `damage_origin = ReactiveProc` and `proc_depth = 1`, so it cannot recursively trigger another Thorns reflect. This prevents infinite Thorns-vs-Thorns event loops.
+A player activates a buff that reflects 15 True damage back to anyone who hits them with a melee
+attack.
+
+*   **The Application:** The designer assigns `EFFECT_THORNS_AURA` to a buff spell. The Arbiter
+    adds this to the player's `SoftState.active_status_effects`.
+*   **The Engine Trigger:** When an enemy hits the player, Stage 9 (`PostDamage`) evaluates the
+    reactive hook after the original damage is committed.
+*   **The Resolution:** The counter-hit is emitted as a **deferred combat event** for the next
+    tick's Stage 7, stamped with `damage_origin = ReactiveProc` and `proc_depth + 1`.
+*   **The Proc Guard:** Because the default maximum reactive depth is `1`, the reflected hit
+    cannot recursively trigger another Stage 9 thorns chain.
 
 ---
 
@@ -397,7 +434,9 @@ A Time Wizard drops a stationary zone that heavily dilates local time for enemie
 }
 ```
 
-Because the Networking layer (`ActionPayload`) and the Engine Math (`apply_combat_math`) use these generic, polymorphic envelopes, a designer can create 1,000 unique spells without requiring the networking engineers to alter a single line of server routing code.
+Because the Networking layer (`ActionPayload`) and the stage-aligned combat pipeline use these
+generic, polymorphic envelopes, a designer can create 1,000 unique spells without requiring the
+networking engineers to alter a single line of server routing code.
 
 ---
 
@@ -414,7 +453,10 @@ Abilities like "Shadowstep" or "Blink" don't just apply damage; they forcibly mu
 ### 8.2 Hard Crowd Control (Stuns, Polymorphs, and Banishes)
 When a player is Stunned, they lose the ability to propose movement or actions.
 *   **The Application:** A "Kidney Shot" applies `EFFECT_STUN`. The Arbiter adds this to the victim's `SoftState.active_status_effects`.
-*   **The Enforcement:** In the next tick, if the victim's Edge Node sends a `Movement` proposal, the Arbiter's `resolve_action` check sees the `STUN` flag and drops/coalesces movement under the continuous-stream rule. Discrete actions still receive explicit `ActionFailed` terminal outcomes. 
+*   **The Enforcement:** In the next tick, if the victim's Edge Node sends a `Movement`
+    proposal, Stage 2 `validate_intent` and the continuous-input admission rules see the `STUN`
+    flag and drop/coalesce movement under the continuous-stream rule. Discrete actions still
+    receive explicit `ActionFailed` terminal outcomes.
 *   **The Result:** The player's inputs are ignored by the authoritative mesh until the stun duration expires. The Edge Node (Proxy) also sees the `STUN` flag in the downstream update and locally disables the player's UI/input to prevent prediction jitter.
 
 ### 8.3 "The Nuke" (Area of Effect Escalation)

@@ -137,7 +137,7 @@ To satisfy the strict re-entrancy rules of the 12-stage pipeline, any event retu
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `target_stage` | u8 | yes | The pipeline stage where this event MUST re-enter. Under the current IR profile, only Stage 3 and Stage 7 are valid. |
+| `target_stage` | `DeferredTargetStageId` | yes | The pipeline stage where this event MUST re-enter. Under the current IR profile, only Stage 3 and Stage 7 are valid. |
 | `event_class` | enum | yes | `deferred_spatial_event` (Stage 3 re-entry) or `deferred_combat_event` (Stage 7 re-entry). |
 | `source_entity_id` | string | yes | The entity that generated the deferred event. |
 | `ready_tick` | u64 | yes | The tick when this event should be evaluated (usually current_tick + 1). |
@@ -200,31 +200,70 @@ PayloadSchemaDescriptor {
 
 The `dispatch_stage` hook is the unified entry point for Stages 1 and 3 through 12 of the tick lifecycle. The engine calls it once per active stage per tick.
 
-#### 3.5.1 StageId Enum (Normative)
+#### 3.5.1 Canonical Stage Type Model (Normative)
+
+The stage system uses three related type domains:
+
+1. `PipelineStageId` — the full conceptual 12-stage authoritative pipeline.
+2. `DispatchStageId` — the subset accepted by `dispatch_stage`.
+3. `DeferredTargetStageId` — the subset currently valid for deferred re-entry.
+
+##### `PipelineStageId`
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 1 | `ControlAuthorityAndInputRouting` | Resolve control authority swaps and input multiplexing (P-29, P-30). See §3.5.3 for Stage 1 semantics. |
-| 3 | `TargetResolution` | Resolve intent-time spatial queries (P-09 through P-13) |
-| 4 | `PreKinematic` | Apply movement modifiers — roots, slows, steering vectors (P-03, P-26) |
-| 5 | `KinematicResolution` | Resolve all movement — teleport, displacement, attached, sweeps (P-01, P-02, P-06, P-07) |
-| 6 | `PostKinematic` | Position-dependent consequences — clamping, proximity events, collision geometry (P-04, P-05, P-08, P-09, P-14, P-57, P-63) |
-| 7 | `PreMitigation` | Combat interception — instance barriers, deferred ledger, CC immunity (P-19, P-22, P-62, P-65) |
-| 8 | `DamageResolution` | Combat math — shields, mitigation, value modification, conversion (P-15, P-16, P-18, P-20, P-21, P-49) |
+| 1 | `ControlAuthorityAndInputRouting` | Resolve control authority swaps and input multiplexing (P-29, P-30). |
+| 2 | `IntentValidation` | Validate legality of the intent (P-26, P-40, P-43, P-51). |
+| 3 | `TargetResolution` | Resolve intent-time spatial queries (P-09 through P-13). |
+| 4 | `PreKinematic` | Apply movement modifiers — roots, slows, steering vectors (P-03, P-26). |
+| 5 | `KinematicResolution` | Resolve all movement — teleport, displacement, attached, sweeps (P-01, P-02, P-06, P-07). |
+| 6 | `PostKinematic` | Position-dependent consequences — clamping, proximity events, collision geometry (P-04, P-05, P-08, P-09, P-14, P-57, P-63). |
+| 7 | `PreMitigation` | Combat interception — instance barriers, deferred ledger, CC immunity (P-19, P-22, P-62, P-65). |
+| 8 | `DamageResolution` | Combat math — shields, mitigation, value modification, conversion (P-15, P-16, P-18, P-20, P-21, P-49). |
 | 9 | `PostDamage` | Reactive hooks — on-hit, on-damage-received, event cloning (P-35, P-36, P-37, P-38, P-55, P-60, P-61). Deferred events MUST be queued for next tick. |
-| 10 | `DeathCheck` | Life-phase transitions — floor clamping, bypass, multi-phase, on-death (P-23, P-24, P-25, P-39) |
+| 10 | `DeathCheck` | Life-phase transitions — floor clamping, bypass, multi-phase, on-death (P-23, P-24, P-25, P-39). |
 | 11 | `StateUpdate` | Accumulators and timers — counters, charges, loadout swaps, pulse/delay timers (P-31, P-41, P-42, P-44, P-45, P-46, P-48, P-50). Deferred events MUST be queued for next tick. |
-| 12 | `ObserverScopedPayloadEmission` | Downstream payload filtering — asymmetric rendering, suspension, group UI (P-52, P-53, P-54) |
+| 12 | `ObserverScopedPayloadEmission` | Downstream payload filtering — asymmetric rendering, suspension, group UI (P-52, P-53, P-54). |
 
-Stage 2 (`IntentValidation`) is NOT dispatched via `dispatch_stage`. It uses the dedicated `validate_intent` hook, which has distinct reject/accept terminal outcome semantics.
+##### `DispatchStageId`
 
-StageId values 0, 2, and 13+ are reserved and MUST be rejected by the adapter.
+`dispatch_stage` is a hook surface, not the full conceptual pipeline. It accepts only:
+
+| Value | Name | Description |
+|-------|------|-------------|
+| 1 | `ControlAuthorityAndInputRouting` | Resolve control authority swaps and input multiplexing. See §3.5.3 for Stage 1 semantics. |
+| 3 | `TargetResolution` | Resolve intent-time spatial queries (P-09 through P-13). |
+| 4 | `PreKinematic` | Apply movement modifiers — roots, slows, steering vectors (P-03, P-26). |
+| 5 | `KinematicResolution` | Resolve all movement — teleport, displacement, attached, sweeps (P-01, P-02, P-06, P-07). |
+| 6 | `PostKinematic` | Position-dependent consequences — clamping, proximity events, collision geometry (P-04, P-05, P-08, P-09, P-14, P-57, P-63). |
+| 7 | `PreMitigation` | Combat interception — instance barriers, deferred ledger, CC immunity (P-19, P-22, P-62, P-65). |
+| 8 | `DamageResolution` | Combat math — shields, mitigation, value modification, conversion (P-15, P-16, P-18, P-20, P-21, P-49). |
+| 9 | `PostDamage` | Reactive hooks — on-hit, on-damage-received, event cloning (P-35, P-36, P-37, P-38, P-55, P-60, P-61). Deferred events MUST be queued for next tick. |
+| 10 | `DeathCheck` | Life-phase transitions — floor clamping, bypass, multi-phase, on-death (P-23, P-24, P-25, P-39). |
+| 11 | `StateUpdate` | Accumulators and timers — counters, charges, loadout swaps, pulse/delay timers (P-31, P-41, P-42, P-44, P-45, P-46, P-48, P-50). Deferred events MUST be queued for next tick. |
+| 12 | `ObserverScopedPayloadEmission` | Downstream payload filtering — asymmetric rendering, suspension, group UI (P-52, P-53, P-54). |
+
+Stage 2 (`IntentValidation`) is NOT dispatched via `dispatch_stage`. It uses the dedicated
+`validate_intent` hook, which has distinct reject/accept terminal outcome semantics.
+
+`DispatchStageId` values 0, 2, and 13+ are reserved and MUST be rejected by the adapter.
+
+##### `DeferredTargetStageId`
+
+Under the current IR profile, deferred events may re-enter only at:
+
+| Value | Name |
+|-------|------|
+| 3 | `TargetResolution` |
+| 7 | `PreMitigation` |
+
+Any other deferred target stage is non-conformant under the current profile.
 
 #### 3.5.2 DispatchStageRequest Payload
 
 ```
 DispatchStageRequest {
-    stage_id:           StageId,        // StageId enum value
+    stage_id:           DispatchStageId,        // Dispatch-only stage enum
     entity_batch:       list<EntityStageContext>,  // Entities with active work for this stage
     global_context:     GlobalStageContext,         // Tick-level shared state
 }

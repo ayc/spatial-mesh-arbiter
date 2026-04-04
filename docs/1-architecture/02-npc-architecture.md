@@ -240,6 +240,128 @@ The `AiNodeSpecialization` enum (§2.7) maps to archetypes as a scheduling hint 
 
 The Orchestrator SHOULD NOT pack `Reactive Combat` and `Conversational` archetypes onto the same AI Engine process. An LLM inference spike on a dialogue NPC MUST NOT starve a boss encounter's decision loop.
 
+### 2.9 NPC Asset and Spawn Data Contract
+
+NPC runtime behavior is data-authored and compiled into the game image. The canonical authoring
+model is:
+
+```
+NPC YAML definitions   -> EntityDefinitions (game image 0x11)
+Spawn rule YAML        -> Static Data Tables / Spawn Tables
+```
+
+#### 2.9.1 NPC definition asset
+
+NPC definitions declare the per-archetype runtime state the Arbiter or AI Node consumes:
+
+```yaml
+npc:
+  npc_type_id: "forest_wolf"
+  display_name: "Dire Wolf"
+  archetype: "NeutralMonster"
+  runtime_tier: 1
+
+  stats:
+    max_hp: 450
+    movement_speed: 0.35
+    base_stats:
+      vigor: 15
+      fortitude: 10
+      agility: 20
+    offensive:
+      physical_damage: 45
+      attack_speed: 1.2
+    defensive:
+      resistances: { physical: 10, fire: -10 }
+
+  abilities:
+    - "wolf_bite"
+    - "wolf_howl"
+
+  threat:
+    swap_threshold_pct: 0.10
+    leash_range: 30.0
+    leash_return_speed_multiplier: 2.0
+    aggro_range: 15.0
+
+  loot:
+    loot_table_id: "forest_wolf_drops"
+
+  lifecycle:
+    orphan_ttl_ticks: 600
+    despawn_on_owner_death: false
+    corpse_duration_ticks: 1800
+```
+
+Required invariants:
+
+- `npc_type_id` MUST be unique within a content pack.
+- referenced abilities MUST exist in `AbilityDefinitions`
+- referenced loot table IDs MUST exist in the loot/Meta content set
+- threat, leash, and lifecycle values compile into the same `EntityDefinition_Wire` used at
+  runtime by `initialize_spawn_configuration`
+
+#### 2.9.2 Spawn rule asset
+
+Spawn rules are authored separately from NPC definitions so one archetype can appear in many
+locations:
+
+```yaml
+spawn_rule:
+  rule_id: "forest_wolves_zone_a"
+  npc_type_id: "forest_wolf"
+
+  location:
+    zone_id: "enchanted_forest"
+    spawn_points:
+      - { position: [150.0, 200.0], radius: 5.0 }
+      - { position: [170.0, 210.0], radius: 5.0 }
+
+  population:
+    min_alive: 2
+    max_alive: 3
+    respawn_delay_ticks: 600
+    stagger_ticks: 60
+
+  conditions:
+    time_of_day: "night"
+    quest_flag: null
+
+  patrol:
+    mode: "waypoint_loop"
+    waypoints:
+      - [150.0, 200.0]
+      - [165.0, 215.0]
+      - [180.0, 200.0]
+    pause_at_waypoint_ticks: 180
+    patrol_speed_multiplier: 0.7
+```
+
+Supported patrol modes are `none`, `waypoint_loop`, `waypoint_bounce`, and `random_wander`.
+Waypoints are absolute world coordinates (`Vec2F`) and are consumed by Arbiter-local FSMs or AI
+Nodes as advisory path anchors.
+
+#### 2.9.3 Compilation and runtime consumption
+
+The compiler MUST:
+
+1. validate NPC type IDs for uniqueness
+2. validate ability, loot, and spawn-rule references
+3. compile NPC stats through the same stat-compilation pipeline used for other authored entities
+4. serialize NPC archetypes into `EntityDefinitions`
+5. serialize spawn rules into `Static Data Tables` / `Spawn Tables`
+
+At runtime:
+
+1. Meta or world scripting reads the compiled spawn tables.
+2. Meta issues the appropriate spawn command to the owning Arbiter.
+3. The Arbiter calls `initialize_spawn_configuration`.
+4. The adapter reads the compiled `EntityDefinitions` entry and returns the NPC's initial state,
+   including threat, leash, lifecycle, ability-list, and runtime-tier data.
+
+This keeps NPC runtime behavior authored, compiled, and activated through the same game-image and
+adapter boundary used for other entities.
+
 ---
 
 ## 3. Core Timing Model (Normative)

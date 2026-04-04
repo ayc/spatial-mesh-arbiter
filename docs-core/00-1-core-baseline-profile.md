@@ -113,12 +113,63 @@ Derived planning formula:
 | `max_abs_velocity_units_per_tick` | `200_000` | fixed units/tick | absolute per-tick velocity guardrail |
 | `max_abs_acceleration_units_per_tick2` | `50_000` | fixed units/tick^2 | absolute per-tick acceleration guardrail |
 
+### 3.9 Spatial Primitives (Amendment A)
+
+| Key | Default | Unit | Constraint |
+| --- | --- | --- | --- |
+| `selector_max_targets` | `32` | entities | maximum entities returned by any spatial query (P-09, P-11) |
+| `max_query_radius` | `100` | fixed units | maximum radius for shape overlap (P-09) and nearest-neighbor (P-11) queries |
+| `max_raycast_length` | `200` | fixed units | maximum ray length for swept-segment raycast (P-10) |
+| `shape_overlap_tolerance` | `10` | fixed sub-units (0.01 meters at default scale) | tolerance for shape boundary intersection (P-09) |
+| `max_history_buffer_ticks` | `240` | ticks | maximum rewind buffer depth per entity (P-05); 4 seconds at 60Hz |
+| `max_dynamic_geometry_per_arbiter` | `64` | objects | maximum injected geometry objects (P-08) |
+| `max_dynamic_geometry_area` | `50_000` | fixed area units | maximum total area of injected geometry (P-08) |
+| `max_monitored_zones_per_arbiter` | `128` | zones | maximum active proximity monitors (P-14) |
+
+### 3.10 Entity Lifecycle (Amendment C)
+
+| Key | Default | Unit | Constraint |
+| --- | --- | --- | --- |
+| `max_lifecycle_phases_per_entity` | `3` | phases | maximum game-defined life phases per entity type (P-25). Phase IDs 0 (Active) and 255 (Removed) are engine-reserved. |
+| `max_entities_per_arbiter` | `2000` | entities | total entities (owned + spawned) on one Arbiter |
+| `max_spawned_actors_per_owner` | `8` | entities | maximum actors spawned by a single owner entity (P-32) |
+| `max_dormant_entities_per_arbiter` | `256` | entities | maximum simultaneously dormant entities (P-33) |
+| `max_suspension_duration_ticks` | `1800` | ticks | maximum entity suspension duration before auto-unsuspend (P-53); 30 seconds at 60Hz |
+
+### 3.11 Entity Relationships (Amendment D)
+
+| Key | Default | Unit | Constraint |
+| --- | --- | --- | --- |
+| `max_bindings_per_entity` | `8` | bindings | maximum active P-34 bindings on a single entity |
+| `max_cross_boundary_bindings_per_arbiter` | `256` | bindings | maximum cross-boundary bindings tracked per Arbiter |
+| `max_multiplex_group_size` | `4` | entities | maximum entities in an input multiplex group (P-30) |
+
+### 3.12 Dynamic Topology (Amendment E)
+
+| Key | Default | Unit | Constraint |
+| --- | --- | --- | --- |
+| `max_team_count` | `16` | teams | maximum team IDs for P-52 visibility bitmask. MUST be <= 64. |
+| `max_instances_per_arbiter` | `4` | instances | maximum concurrent spatial instances (P-56) |
+| `max_entities_per_instance` | `16` | entities | maximum entities in a single spatial instance (P-56) |
+| `max_instance_duration_ticks` | `3600` | ticks | maximum instance lifetime (P-56); 60 seconds at 60Hz |
+| `max_polyline_geometries_per_arbiter` | `32` | polylines | maximum active polyline generators (P-57) |
+| `max_polyline_segments` | `64` | segments | maximum segments per polyline (P-57) |
+| `max_container_capacity` | `8` | entities | maximum entities per container (P-58) |
+| `max_containers_per_arbiter` | `16` | containers | maximum active containers (P-58) |
+| `max_portal_anchors_per_arbiter` | `8` | anchors | maximum portal anchors on one Arbiter (P-59) |
+| `max_portal_anchors_per_network` | `8` | anchors | maximum anchors in one portal network (P-59) |
+| `max_portal_networks` | `16` | networks | maximum active portal networks across the mesh (P-59) |
+
 ## 4. Cross-Document References
 
 This profile is consumed by:
 1. `01-spatial-runtime-kernel.md`
-2. `02-spatial-messaging-plane.md`
-3. `04-1-game-adapter-contract.md`
-4. `03-durability-bridge.md`
-5. `05-1-conformance-test-matrix.md`
-6. `04-3-version-line-transition-contract.md`
+2. `01-1-spatial-primitive-catalog.md`
+3. `01-2-entity-lifecycle-contract.md`
+4. `01-3-entity-relationship-contract.md`
+5. `01-4-dynamic-topology-contract.md`
+6. `02-spatial-messaging-plane.md`
+7. `03-durability-bridge.md`
+8. `04-1-game-adapter-contract.md`
+9. `04-3-version-line-transition-contract.md`
+10. `05-1-conformance-test-matrix.md`

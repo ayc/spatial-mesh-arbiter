@@ -1,5 +1,7 @@
 # Implementation Blueprint & Mandates
 
+> **Status: Superseded (partially).** This roadmap was written when `docs/` was the sole specification layer, before the engine extraction into `docs-core/`. The **Technical Stack & Crate Mandates** (§1) and **Agent Constraints** (§3) remain valid. The **Implementation Phases** (§2) describe an ARPG-first build order that no longer reflects the current approach — the project is now building the game-agnostic engine layer (`docs-core/`) first. The replacement engine-focused roadmap is at `memory-bank/ENGINE_ROADMAP.md`.
+
 This document serves as the high-level technical mandate for implementing the Spatial Mesh Arbiter. It defines crate selection and the roadmap.
 
 **ALL implementing agents MUST adhere to the constraints defined in this document.**
