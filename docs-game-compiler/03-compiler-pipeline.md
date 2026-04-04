@@ -52,7 +52,7 @@ If any phase encounters an error, the compilation MUST fail closed and emit dete
 
 This is the core translation phase where game logic becomes engine primitives.
 
-1. **Primitive Mapping:** Allowed API calls are mapped to either a corresponding `PrimitiveId` (P-01 through P-65), an ability-metadata field, or a cross-cutting `IRDirective`.
+1. **Primitive Mapping:** Allowed API calls are mapped to either a corresponding `PrimitiveId` (P-01 through P-66), an ability-metadata field, or a cross-cutting `IRDirective`.
 2. **Metadata Population:** Ability-scoped properties such as cooldown, resource cost, cast time, targeting type, counter flags, concentration flags, and finisher classifications are extracted into the `AbilityIRBlock` metadata.
 3. **Guard Extraction and P-17 Lowering:** 
     * The compiler walks the AST looking for `if/elseif` control-flow blocks.

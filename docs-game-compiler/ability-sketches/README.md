@@ -4,6 +4,10 @@ Scratch space for exploring ability designs and what it takes to implement them 
 
 These are not specs — they're test cases for validating that the compiler pipeline and engine actor model can express the kinds of abilities the game needs.
 
+See [COMPLETION_CHECKLIST.md](COMPLETION_CHECKLIST.md) for the explicit closure criteria and prioritized queue for turning primitive-covered sketches into designer-recreatable compiler references.
+
+See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) and [COMPILER_GAP_REGISTER.md](COMPILER_GAP_REGISTER.md) for the full 125-sketch audit of current compiler compatibility and the grouped backlog of missing canonical compiler contracts.
+
 ## Sketches
 
 ### Abilities

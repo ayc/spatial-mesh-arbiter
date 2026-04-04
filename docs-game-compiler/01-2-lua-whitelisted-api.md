@@ -83,6 +83,9 @@ Symbols marked as **[Guard-Eligible]** can be extracted by the compiler from Lua
 | `is_in_zone` | `PURE` | `is_in_zone(target: id, zone_type: string) -> bool` | `arbiter` | **[Guard-Eligible]** Bounds-checked zone presence. |
 | `facing_toward` | `PURE` | `facing_toward(viewer: id, target: id, dot_threshold: fixed) -> bool` | `arbiter` | **[Guard-Eligible]** Vector dot-product check. |
 | `stack_count` | `PURE` | `stack_count(target: id, pool_id: string) -> int` | `edge`, `arbiter` | **[Guard-Eligible]** when used with comparison ops. |
+| `state_present` | `PURE` | `state_present(actor: id, state_id: string) -> bool` | `arbiter` | **[Guard-Eligible]** O(1) runtime-state presence lookup only. |
+| `sequence_step` | `PURE` | `sequence_step(actor: id, state_id: string) -> int` | `arbiter` | **[Guard-Eligible]** O(1) sequence-window step read only. |
+| `charge_count` | `PURE` | `charge_count(actor: id, state_id: string) -> int` | `arbiter` | **[Guard-Eligible]** O(1) charge-pool count read only. |
 | `is_npc` | `PURE` | `is_npc(entity: id) -> bool` | `edge`, `arbiter` | O(1) type-tag lookup only. |
 | `is_monster` | `PURE` | `is_monster(entity: id) -> bool` | `edge`, `arbiter` | O(1) type-tag lookup only. |
 | `is_named_unit` | `PURE` | `is_named_unit(entity: id) -> bool` | `edge`, `arbiter` | O(1) identity-tag lookup only. |
@@ -122,7 +125,13 @@ Symbols marked as **[Guard-Eligible]** can be extracted by the compiler from Lua
 | `remove_status` | `MUT` | `remove_status(target: id, status_id: string)` | `arbiter` | One mutation record per call. |
 | `apply_damage` | `MUT` | `apply_damage(source: id, target: id, amount: fixed, damage_type: string)` | `arbiter` | One mutation record per call. |
 | `apply_heal` | `MUT` | `apply_heal(source: id, target: id, amount: fixed)` | `arbiter` | One mutation record per call. |
-| `apply_cc` | `MUT` | `apply_cc(target: id, cc_type: string, duration_ticks: int)` | `arbiter` | CC type must be valid enum (stun, root, silence, etc). |
+| `apply_cc` | `MUT` | `apply_cc(target: id, cc_type: string, duration_ticks: int, is_cleansable: bool)` | `arbiter` | CC type must be a valid canonical profile (`stun`, `root`, `silence`, `sleep`, `disarm`, `blind`, `fear`, `charm`, `taunt`, `berserk`, `mute`). Higher-level authoring sugar supplies category pairing, duration-scaling policy, DR metadata, and optional expiry follow-ups; the compiler lowers those into generated status metadata. |
+| `cleanse` | `MUT` | `cleanse(target: id, polarity: string, require_cleansable: bool)` | `arbiter` | `polarity` must be `negative`, `positive`, or `all`. Matching is against canonical status metadata, not string tags. |
+| `write_state` | `MUT` | `write_state(actor: id, state_id: string, spec: record)` | `arbiter` | `spec.capture` must be `position` or `entity_ref`; referenced runtime state must accept that payload. |
+| `clear_state` | `MUT` | `clear_state(actor: id, state_id: string)` | `arbiter` | One runtime-state clear per call. |
+| `restore_from_state` | `MUT` | `restore_from_state(target: id, state_id: string, spec: record)` | `arbiter` | `spec` may request `apply_position` and/or `apply_hp`; relocation follows the canonical teleport/handoff validation path. |
+| `advance_sequence` | `MUT` | `advance_sequence(actor: id, state_id: string, action: string)` | `arbiter` | `action` must be `advance` or `reset`; referenced runtime state must be `sequence_window`. |
+| `modify_charge_pool` | `MUT` | `modify_charge_pool(actor: id, state_id: string, spec: record)` | `arbiter` | `spec.action` must be `add`, `consume`, or `reset`; referenced runtime state must be `charge_pool`. |
 | `apply_shield` | `MUT` | `apply_shield(target: id, shield_type: string, amount: fixed, charges: int, duration_ticks: int)` | `arbiter` | Shield type must be absorption or instance. |
 | `displace` | `MUT` | `displace(target: id, destination: record, arc: bool, duration_ticks: int)` | `arbiter` | Destination must be resolvable fixed-point vector. |
 | `steer_trajectory` | `MUT` | `steer_trajectory(target: id, mode: string, duration_ticks: int)` | `arbiter` | Mode must be toward_source, away_from_source, or toward_target. |

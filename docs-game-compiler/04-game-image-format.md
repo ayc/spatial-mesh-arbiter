@@ -193,40 +193,85 @@ AbilityIREntry {
     self_cc_immunity_during_cast: u8,   // CcImmunityTier enum (0 = none)
     flags:                  u8,         // Bitfield: bit 0 = can_counter_vulnerability_window, bit 1 = can_be_counterspelled, bit 2 = requires_concentration, bits 3-7 reserved (zero)
     combo_finisher:         u8,         // ComboFinisherType enum (0 = none)
-    _padding:               [u8; 4],    // Alignment padding
+    _padding:               [u8; 3],    // Alignment padding
+    input_mode:             InputMode_Wire, // Inline fixed-size subrecord
 
     // Variable-length sections (offsets relative to entry start)
     // Note: stagger_damage is NOT a block-level field. It is a parameter on
     // individual damage instructions within the ability's instruction list,
     // consistent with 03-1-compiler-ir-specification.md and 02-schema-and-validation.md §5.1.
+    activation_mode_count:  u16,
     instruction_count:      u16,
     directive_count:        u16,
     binding_count:          u16,
     param_data_size:        u16,        // Total bytes for all param blocks
 
     // Inline arrays follow in order:
-    // 1. IRInstruction[instruction_count]
-    // 2. IRDirective[directive_count]
-    // 3. BindingSlot[binding_count]
-    // 4. ParamData[param_data_size] (variable-length parameter payloads)
+    // 1. ActivationMode_Wire[activation_mode_count]
+    // 2. IRInstruction[instruction_count]
+    // 3. IRDirective[directive_count]
+    // 4. BindingSlot[binding_count]
+    // 5. ParamData[param_data_size] (variable-length parameter payloads)
 }
 ```
 
-### 3.3 Serialized IRInstruction
+`ActivationModes` redirect the public/root ability entry to hidden compiler-generated variant
+entries. Hidden variants are serialized as ordinary `AbilityIREntry` records and count toward the
+same table/index limits as public abilities.
+
+```
+InputMode_Wire {
+    mode_type:       u8,         // 0 = instant, 1 = hold_release
+    flags:           u8,         // bit 0 = blocks_other_abilities, bit 1 = retains_max_charge_until_release
+    _reserved:       [u8; 2],
+    min_charge_ticks: u32,
+    max_charge_ticks: u32,
+    move_speed_multiplier_while_holding: i64, // I32F32; 1.0 for instant abilities
+}
+// Fixed size: 20 bytes
+```
+
+### 3.3 Serialized ActivationMode
+
+```
+ActivationMode_Wire {
+    predicate_kind:   u8,        // 0=state_present, 1=state_absent, 2=sequence_step, 3=charge_count
+    predicate_op:     u8,        // 0=none, 1=eq, 2=gte, 3=lte
+    compare_value:    u16,       // sequence step or charge-count threshold; 0 when unused
+    runtime_state_id: u32,       // Pre-hashed RuntimeStateDefinition.state_id
+    variant_ability_id: u32,     // Hidden AbilityIREntry selected when predicate matches
+}
+// Fixed size: 12 bytes
+```
+
+### 3.4 Serialized IRInstruction
 
 ```
 IRInstruction_Wire {
-    primitive_id:   u8,         // P-01 through P-65
+    op_kind:        u8,         // 0 = primitive, 1 = runtime_state
+    op_id:          u8,         // PrimitiveId or RuntimeStateOp enum
     stage:          u8,         // PipelineStage enum
+    _reserved:      u8,
     guard_offset:   u16,        // Offset into ParamData (0xFFFF = no guard)
     param_offset:   u16,        // Offset into ParamData
     param_size:     u16,        // Size of param block in bytes
     output_binding: u16,        // Binding slot index (0xFFFF = no output)
 }
-// Fixed size: 10 bytes
+// Fixed size: 12 bytes
 ```
 
-### 3.4 Serialized IRDirective
+`runtime_state` op IDs are:
+
+- `0 = WriteState`
+- `1 = ClearState`
+- `2 = AdvanceSequence`
+- `3 = ModifyChargePool`
+
+Runtime-state references and state-backed payload selectors inside `ParamData` serialize as
+pre-hashed `u32` `state_id` values plus compact selector enums, matching the `RuntimeStateTable`
+defined in §7.4.
+
+### 3.5 Serialized IRDirective
 
 ```
 IRDirective_Wire {
@@ -239,15 +284,16 @@ IRDirective_Wire {
 // Fixed size: 8 bytes
 ```
 
-### 3.5 Bounds
+### 3.6 Bounds
 
 | Constraint | Limit | Source |
 |-----------|-------|--------|
 | Instructions per ability | `<= MAX_INSTRUCTIONS_PER_ABILITY` (default: 32) | `03-1-compiler-ir-specification.md` §7 |
 | Directives per ability | `<= 16` | Cross-cutting primitive count |
 | Bindings per ability | `<= MAX_BINDINGS_PER_ABILITY` (default: 16) | `03-1-compiler-ir-specification.md` §7 |
+| Activation modes per public ability | `<= 8` | Ordered hidden-variant redirect cap |
 | Param data per ability | `<= 4096 bytes` | Prevents unbounded ability payloads |
-| Total abilities per image | `<= 65536` | u16 index space |
+| Total abilities per image | `<= 65536` | u16 index space, including hidden variants |
 
 ---
 
@@ -377,17 +423,63 @@ Serialized buff/debuff/CC definitions from `02-schema-and-validation.md` §9.
 StatusEffectDef_Wire {
     status_id:          u32,        // Numeric status ID
     max_stacks:         u8,
-    flags:              u8,         // Bitfield: bit 0 = is_passive, bit 1 = is_cleansable, bits 2-7 reserved (zero)
+    flags:              u8,         // Bitfield: bit 0 = is_passive, bit 1 = is_cleansable, bit 2 = has_periodic_effects, bit 3 = has_on_expire_effects, bit 4 = has_consumption_window, bits 5-7 reserved (zero)
+    polarity:           u8,         // StatusPolarity enum: 0=neutral, 1=positive, 2=negative
+    status_application_immunity: u8, // StatusApplicationImmunity enum: 0=none, 1=negative, 2=positive, 3=all
     cc_category:        u8,         // CcCategory enum: 0=none, 1=displacement, 2=hard_disable, 3=soft_disable, 4=forced_movement, 5=target_override, 6=mute
-    _reserved:          u8,
+    duration_scaling:   u8,         // StatusDurationScaling enum: 0=fixed, 1=status_resistance
+    cc_behavior_profile: u8,        // CcBehaviorProfile enum: 0=none, 1=stun, 2=root, 3=silence, 4=sleep, 5=disarm, 6=blind, 7=fear, 8=charm, 9=taunt, 10=berserk, 11=mute
+    cc_immunity_mask:   u8,         // Bitmask over CcCategory values; 0 = none
     duration_ticks:     u32,
     modifier_count:     u16,        // Stat modifiers
     capability_flags:   u16,        // P-26 capability bitmask: bit 0=CAN_MOVE, bit 1=CAN_CAST, bit 2=CAN_ATTACK, bit 3=CAN_USE_ITEMS, bit 4=PASSIVES_ACTIVE, bits 5-15 reserved
+    snapshot_recorder_state_id: u32, // 0 = none; references RuntimeStateTable entry of kind snapshot_buffer
 
     // Variable-length inline data:
     // 1. StatModifier[modifier_count]  — { stat_id: u16, op: u8, value: i64 }
-    // 2. Optional: PeriodicBlock       — if has periodic effects
-    // 3. Optional: OnExpireEffects     — effect list for expiry
+    // 2. Optional: PeriodicBlock_Wire          — if has_periodic_effects flag
+    // 3. Optional: ConsumptionWindowBlock_Wire — if has_consumption_window flag
+    // 4. Optional: OnExpireEffects             — if has_on_expire_effects flag
+}
+```
+
+Compiler-generated `apply_cc` statuses serialize using the same wire format. They MUST carry
+`polarity = negative`, inherit their authored `is_cleansable` value, serialize their selected
+`duration_scaling`, and set a non-zero `cc_behavior_profile` matching the canonical `cc_type`
+table. Ordinary authored buffs/debuffs SHOULD use `cc_behavior_profile = none`, but they MAY still
+set `cc_category` and `cc_immunity_mask` for CC-admission and immunity-window purposes.
+
+`snapshot_recorder_state_id`, when non-zero, requests the engine's canonical `P-05 Historical
+State Buffer` behavior for the referenced runtime-state slot. This is a status-owned recorder flag,
+not a separate timer callback.
+
+```
+ConsumptionWindowBlock_Wire {
+    consume_on:              u8,    // 0=cast_ability, 1=damage_received, 2=on_hit
+    flags:                   u8,    // bit 0 = consume_only_on_success
+    max_consumptions:        u8,
+    override_count:          u8,
+    allowed_ability_count:   u16,
+    on_consume_effect_count: u16,
+    // Inline variable data:
+    // 1. allowed_ability_ids[u32; allowed_ability_count]
+    // 2. AbilityOverride_Wire[override_count]
+    // 3. Effect_Wire[on_consume_effect_count]
+}
+```
+
+```
+AbilityOverride_Wire {
+    ability_id:             u32,
+    flags:                  u8,     // bit 0 = has_damage_multiplier, bit 1 = has_radius_multiplier, bit 2 = has_add_effects, bit 3 = has_replace_effects
+    add_effect_count:       u8,
+    replace_effect_count:   u8,
+    _reserved:              u8,
+    damage_multiplier:      i64,    // I32F32; ignored unless corresponding flag is set
+    radius_multiplier:      i64,    // I32F32; ignored unless corresponding flag is set
+    // Inline variable data:
+    // 1. add_effects[add_effect_count]
+    // 2. replace_effects[replace_effect_count]
 }
 ```
 
@@ -467,6 +559,61 @@ ConstantEntry {
 }
 ```
 
+### 7.4 Runtime State Table
+
+Serialized from `02-schema-and-validation.md` §10. These are the bounded per-entity state-slot
+definitions used by activation modes, bookmark/rewind mechanics, combo windows, and charge pools.
+
+```
+RuntimeStateTable {
+    entry_count:    u16,
+    entries:        [RuntimeStateEntry_Wire; entry_count],
+}
+
+RuntimeStateEntry_Wire {
+    state_id:       u32,        // Pre-hashed RuntimeStateDefinition.state_id
+    kind:           u8,         // 0=bookmark, 1=snapshot_buffer, 2=sequence_window, 3=charge_pool
+    flags:          u8,         // Kind-specific flags (defined below)
+    charge_type_count: u16,     // Only used by charge_pool entries
+    arg0:           u32,        // Kind-specific scalar
+    arg1:           u32,        // Kind-specific scalar
+    arg2:           u32,        // Kind-specific scalar
+    // Optional inline data:
+    // 1. Optional min_use_interval_ticks[u32; 1] — only for charge_pool when flags bit 4 is set
+    // 2. charge_type_ids[u32; charge_type_count] — only for typed charge_pool entries
+}
+```
+
+`RuntimeStateEntry_Wire` interpretation by `kind`:
+
+- `bookmark`
+  - `arg0 = expires_after_ticks`
+  - `arg1 = payload_kind` (`0 = position`, `1 = entity_ref`)
+  - `flags bit 0 = capture_topology_epoch`
+  - `flags bit 1 = clear_on_owner_death`
+- `snapshot_buffer`
+  - `arg0 = window_ticks`
+  - `arg1 = sample_interval_ticks`
+  - `flags bit 0 = clear_on_read`
+  - `flags bit 4 = record_position`
+  - `flags bit 5 = record_hp`
+- `sequence_window`
+  - `arg0 = max_step`
+  - `arg1 = window_ticks`
+  - `arg2 = reset_to_step`
+- `charge_pool`
+  - `arg0 = capacity`
+  - `arg1 = recharge_interval_ticks`
+  - `arg2 = decay_ticks`
+  - `flags bits 0-1 = recharge_mode` (`0 = none`, `1 = independent`, `2 = all_at_once`)
+  - `flags bits 2-3 = decay_mode` (`0 = none`, `1 = all_at_once`, `2 = oldest_first`)
+  - `flags bit 4 = has_min_use_interval`
+  - if `flags bit 4` is set, one inline `u32 min_use_interval_ticks` follows the header before any
+    `charge_type_ids`
+
+All runtime-state references embedded elsewhere in the image use the same pre-hashed `state_id`
+space and resolve through this table plus the lookup index in §8.5.
+
 ---
 
 ## 8. Section: Lookup Indexes (0x20)
@@ -500,6 +647,11 @@ Maps `status_id` → byte offset within Status Effect Definitions section. Same 
 ### 8.4 Formula Index
 
 Maps `formula_id` → byte offset within Formula Registry section. Same structure.
+
+### 8.5 Runtime State Index
+
+Maps `state_id` → byte offset within the Runtime State Table subsection of `StaticDataTables`.
+Same structure as the other indexes.
 
 ---
 

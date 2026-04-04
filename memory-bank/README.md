@@ -2,6 +2,8 @@
 
 Project-level coordination layer. Tracks meta-progress, decisions, and session context across the three workstreams (spec completion, layer extraction, engine implementation). These are **not** spec documents — they describe *where the project stands*, not *what the project is*.
 
+Agents should use `memory-bank/` for orientation, then read the relevant authoritative spec documents before making code, design, or architecture changes.
+
 ## Files
 
 | File | Purpose | Update Frequency |
@@ -15,5 +17,6 @@ Project-level coordination layer. Tracks meta-progress, decisions, and session c
 ## Rules
 
 - **Reference, don't duplicate.** Link to `GAPS_CHECKLIST.md`, `06-architecture-section-mapping.md`, etc. — don't copy their content here.
+- **Orientation, not authority.** `memory-bank/` is a status layer, not an implementation contract. Before proposing behavior changes or writing code, read the relevant spec docs in `docs-core/`, `docs-game-compiler/`, and/or `docs/`.
 - **Keep it current.** Stale tracking is worse than no tracking. If you change project state, update the relevant file.
 - **Keep it brief.** `ACTIVE_WORK.md` should stay under ~40 lines. `SESSION_HANDOFF.md` entries should be pruned once their context is reflected in `SUMMARY.md` or `DECISIONS.md`.

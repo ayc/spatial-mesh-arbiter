@@ -6,7 +6,7 @@ I target an ally and instantly remove all negative status effects (debuffs, DoTs
 
 ## Primitive Composition
 
-P-15 (Value Modification)
+P-66 (Status Effect Filter Mutation)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -26,22 +26,61 @@ P-15 (Value Modification)
 
 ## Engine Primitives Required
 
-TODO: The Arbiter needs to iterate the target's `active_effects` list, classify each as positive or negative, and remove all negatives. How is "negative" defined — a flag on the effect definition? A compiler-assigned classification? After removal, a special immunity effect is applied that intercepts future debuff applications. How does the immunity intercept work — a check during apply_status_effect that looks for an active immunity buff?
+Purify resolves against the target's **authoritative active status registry** on the target's owning Arbiter.
+
+The canonical rule is:
+
+1. Each runtime status entry carries compiled metadata: `polarity`, `is_cleansable`, and optional `status_application_immunity`.
+2. Purify emits a `cleanse` filter with `polarity = negative` and `require_cleansable = true`.
+3. The target Arbiter evaluates `SoftState.active_status_effects` against that filter and removes all matching entries in one atomic mutation batch.
+4. Crowd control entries participate automatically because `apply_cc` compiles to generated negative status entries in the same registry.
+5. After the cleanse, the ability applies a positive `Purified` status with `status_application_immunity = negative` and duration `90` ticks (1.5 seconds at 60Hz).
+6. While `Purified` is active, any new negative status application is rejected before insertion. Existing positive or neutral statuses are unaffected.
+
+This gives Purify one canonical behavior for DoTs, CC, anti-heal, slows, and other harmful status entries without special-casing each mechanic.
 
 ## Cross-Boundary Concerns
 
-TODO: If caster and target are on different Arbiters, the cleanse is a cross-boundary action. The caster's Arbiter sends a "cleanse" command to the target's Arbiter. The target's Arbiter performs the actual effect removal (it owns the target's SoftState). What if a debuff is applied to the target between the cleanse being sent and arriving? Race condition.
+If the target ally is a Ghost, the caster's Arbiter relays the cleanse action to the target's owning Arbiter. The owning Arbiter performs the actual registry mutation because it owns the target's `SoftState.active_status_effects`.
+
+There is no shared-state race condition:
+
+1. Each entity has exactly one authoritative Arbiter per tick.
+2. The owning Arbiter executes the cleanse in its deterministic single-threaded stage order.
+3. Effects already admitted before the cleanse executes are visible to the cleanse and can be removed if they match the filter.
+4. Effects that attempt to apply after the cleanse executes in the same tick see the newly-added `Purified` immunity status and are rejected if they are negative.
+
+The cleanse therefore behaves as an atomic target-side mutation, not as a best-effort message racing with independent debuff writers.
 
 ## Compiler Requirements
 
-TODO: The compiler needs to tag every status effect definition as cleansable/uncleansable and positive/negative. Designer specifies per-effect: "this DoT is a debuff and is cleansable." How does the compiler validate that the cleanse ability correctly references the classification system? Does the compiler produce a cleanse "filter" that the Arbiter evaluates?
+Designer specifies:
 
-## Open Questions
+- On each status definition: `polarity`, `is_cleansable`, and optional `status_application_immunity`
+- On the Purify ability: ally target, range, cooldown, `cleanse { polarity = negative, require_cleansable = true }`
+- A follow-up positive status definition (`purified`) with duration `90` ticks and `status_application_immunity = negative`
 
-- Are all debuffs cleansable, or can some be marked "uncleansable" (e.g., ultimate ability debuffs)?
-- Does cleansing a DoT (SK-02 Poison) also remove the caster's stacking damage buff, or do those persist independently?
-- Does cleansing a displacement mid-flight (SK-01 Toss) drop the entity at its current airborne position?
-- Can Purify remove the "Purified" immunity buff from an enemy (double-cleanse interaction)?
-- Does the immunity window block ALL debuffs or just new applications? (What about DoT reapplication from SK-02?)
-- How does Purify interact with SK-04 Tether — does cleansing one partner break the tether?
-- If the target has 15 active debuffs, is there a performance concern with bulk removal in a single tick?
+Compiler emits:
+
+- A P-66 `cleanse` instruction/filter targeting the ally
+- A positive status definition for `purified`
+- A follow-up status application for `purified` after the cleanse
+- Generated negative runtime status entries for any `apply_cc` effects that Purify should be able to remove
+
+Compiler validates:
+
+1. `apply_buff` references only `positive` statuses.
+2. `apply_debuff` references only `negative` statuses.
+3. `apply_cc` declares whether its generated status is cleansable.
+4. `cleanse` filters operate only on canonical status metadata (`polarity`, `is_cleansable`), not arbitrary string tags.
+5. Statuses granting `status_application_immunity` use a valid polarity domain (`negative`, `positive`, `all`).
+
+## Resolved Interaction Notes
+
+- Debuffs can be marked uncleanseable. `is_cleansable = false` prevents removal by generic Purify-style cleanse.
+- Cleansing a DoT removes the target-side negative status entry only. Independent caster-side buffs or stacks persist unless they are separately authored as removable statuses on the caster.
+- Purify does not rewind or cancel already-committed kinematic mutations. If a displacement has already entered movement resolution, removing a related status does not retroactively reposition the entity.
+- Purify does not remove the `Purified` immunity status because the cleanse filter targets `negative` statuses only and `Purified` is `positive`.
+- The immunity window blocks **new** negative status admissions, including DoT reapplications. It does not retroactively touch uncleanseable negatives that survived the initial cleanse.
+- Linked mechanics such as Tether depend on how they are authored. If a harmful link is represented as a negative cleansable status on the target, Purify removes it. If the mechanic is modeled as a neutral/system binding, generic Purify does not remove it.
+- Bulk removal is a linear scan over the target's bounded active-status list on the authoritative Arbiter. This is acceptable for the expected active-effect counts and remains deterministic.

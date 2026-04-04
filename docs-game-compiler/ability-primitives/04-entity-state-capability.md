@@ -127,3 +127,17 @@
 **Dependencies:** None.
 
 **Key constraints:** Each binding has a type, two entity IDs, and an optional max-distance. Bindings are stored as SoftState on both entities and replicated during handoff. When one entity hands off to a new Arbiter, the binding is maintained via cross-Arbiter relay. When either entity dies, all its bindings are cleaned up. The binding count per entity is bounded.
+
+---
+
+### P-66: Status Effect Filter Mutation
+
+**Description:** Filtering and mutating an entity's active status registry by compiled metadata, enabling cleanse, dispel, and status-application immunity checks.
+
+**Sketches:** SK-15 (Purify)
+
+**Engine layer:** `game-adapter`
+
+**Dependencies:** P-16 (Stat Layering), P-26 (Capability Bitmask), P-44 (Pulse Timer) — the registry entries being filtered may carry stat modifiers, capability flags, and periodic payloads.
+
+**Key constraints:** Matching is driven by compiled status metadata (`polarity`, `is_cleansable`, and optional explicit status ID filters), never by ad hoc runtime string tags. Bulk removal is atomic on the target's authoritative Arbiter: compute the match set from the current `active_status_effects`, remove all matches, then apply any follow-up status additions from the same ability. Crowd control effects emitted via `apply_cc` participate by compiling to generated negative status entries with their own `is_cleansable` flag. Admission-time immunity is represented as an active status with `status_application_immunity`; before any new status is inserted, the runtime checks active immunities and rejects blocked matches deterministically. Neutral/system statuses are ignored by polarity-targeted cleanse unless the compiler explicitly emits `polarity = all`.

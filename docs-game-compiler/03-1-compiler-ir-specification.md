@@ -3,7 +3,7 @@
 Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
 **Status:** DRAFT
-**Purpose:** Define the Intermediate Representation (IR) that the Game Compiler emits when lowering designer-authored Lua ability definitions into engine-executable primitive chains. This IR is the compilation target — the contract between the compiler and the engine runtime.
+**Purpose:** Define the Intermediate Representation (IR) that the Game Compiler emits when lowering designer-authored Lua ability definitions into engine-executable primitive chains plus bounded runtime-state operations. This IR is the compilation target — the contract between the compiler and the engine runtime.
 
 **Relationship to docs-core/:** This specification proposes the canonical pipeline stages that the engine MUST support for ability resolution. It serves as the compiler team's concrete answer to `docs-core/PRIMITIVE_IMPACT_ASSESSMENT.md` Amendment B (Adapter Hook Taxonomy). The engine team should validate and adopt these stages into `04-1-game-adapter-contract.md`.
 
@@ -14,7 +14,7 @@ Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 The compiler transforms a designer's Lua ability definition into an **Ability IR Block** — a static, deterministic data structure that the engine evaluates at runtime. The IR Block is stored in the compiled game image's Ability IR Table section (`04-game-image-format.md` §3, section type 0x10).
 
 An Ability IR Block consists of:
-1. **Metadata** — ability ID, cooldown, resource cost, targeting type, cast time
+1. **Metadata** — ability ID, cooldown, resource cost, targeting type, cast time, input mode, activation redirects
 2. **Instruction list** — an ordered sequence of IR Instructions
 3. **Directive list** — cross-cutting primitive declarations not bound to one pipeline stage
 4. **Binding table** — named intermediate values passed between instructions/directives
@@ -32,23 +32,63 @@ AbilityIRBlock {
     can_be_counterspelled: bool,        // P-40: this ability can be counterspelled mid-cast
     combo_finisher:   Option<ComboFinisherType>,  // P-64: finisher classification
     requires_concentration: bool,       // P-55: maintained effect
+    input_mode:       InputModeIR,      // Instant or hold-release admission contract
+    activation_modes: Vec<ActivationModeIR>,  // Ordered state-based redirects to hidden variants
     instructions:     Vec<IRInstruction>,
     directives:       Vec<IRDirective>,
     bindings:         Vec<BindingSlot>,
 }
 ```
 
+```
+enum InputModeIR {
+    Instant,
+    HoldRelease {
+        min_charge_ticks: u32,
+        max_charge_ticks: u32,
+        move_speed_multiplier_while_holding: SimFixed,
+        blocks_other_abilities: bool,
+        retains_max_charge_until_release: bool,
+    }
+}
+
+ActivationModeIR {
+    predicate: StatePredicateIR,
+    variant_ability_id: AbilityId,   // Compiler-generated hidden variant block
+}
+
+enum StatePredicateIR {
+    StatePresent(RuntimeStateId),
+    StateAbsent(RuntimeStateId),
+    SequenceStep(RuntimeStateId, u8),
+    ChargeCount(RuntimeStateId, CompareOp, u8),
+}
+```
+
 ## 2. IR Instructions
 
-Each instruction invokes exactly one primitive at a specific pipeline stage.
+Each instruction invokes exactly one engine primitive or one compiler-owned bounded runtime-state op
+at a specific pipeline stage.
 
 ```
 IRInstruction {
-    primitive:   PrimitiveId,    // P-01 through P-65
+    op:          InstructionOp,  // Primitive(P-01..P-66) or RuntimeState(...)
     stage:       PipelineStage,  // Which tick-loop phase this executes in
-    params:      ParamBlock,     // Primitive-specific parameters (compile-time constants + binding refs)
+    params:      ParamBlock,     // Op-specific parameters (compile-time constants + binding refs)
     output:      Option<BindingRef>,  // Named output for downstream instructions
     guard:       Option<GuardExpr>,   // Conditional: only execute if guard evaluates true
+}
+
+enum InstructionOp {
+    Primitive(PrimitiveId),
+    RuntimeState(RuntimeStateOp),
+}
+
+enum RuntimeStateOp {
+    WriteState,
+    ClearState,
+    AdvanceSequence,
+    ModifyChargePool,
 }
 ```
 
@@ -57,6 +97,8 @@ IRInstruction {
 Parameters are either **compile-time constants** (embedded in the IR) or **binding references** (resolved at runtime from a previous instruction's output).
 
 ```
+type RuntimeStateId = u32
+
 enum ParamValue {
     Const(SimFixed),
     ConstInt(i32),
@@ -64,6 +106,18 @@ enum ParamValue {
     ConstEnum(u16),            // Index into a compile-time enum table
     Binding(BindingRef),       // Runtime value from a prior instruction
     EntityField(FieldPath),    // Read from caster/target entity state
+    RuntimeState(RuntimeStateId),  // Referenced runtime state slot
+    StatePayload(RuntimeStateId, StatePayloadSelector),  // Stored position/entity/snapshot reads
+}
+
+enum StatePayloadSelector {
+    StoredPosition,
+    StoredEntityId,
+    StoredEntityPosition,
+    SnapshotPosition,
+    SnapshotHp,
+    SequenceStep,
+    ChargeCount,
 }
 ```
 
@@ -94,7 +148,7 @@ Instructions communicate via named bindings. The binding table has a fixed, boun
 ```
 BindingSlot {
     name:  &str,        // e.g., "targets_0", "damage_amount", "nearest_corpse"
-    type:  BindingType, // EntitySet | SimFixed | EntityId | Bool | Vec2F
+    type:  BindingType, // EntitySet | SimFixed | EntityId | Bool | Vec2F | U32
 }
 ```
 
@@ -116,6 +170,14 @@ IRDirective {
 ```
 
 Directives have no `stage` field. Their evaluation points are defined by the primitive's cross-cutting contract in §4 rather than by the stage scheduler used for `IRInstruction`.
+
+### 2.5 Hidden Variant Blocks
+
+`ActivationModes` do NOT patch one `AbilityIRBlock` in place. Each authored activation mode compiles
+to a hidden ordinary `AbilityIRBlock` with its own metadata, instructions, directives, and
+bindings. The public/root ability block keeps the player-facing `ability_id` plus an ordered
+`activation_modes` redirect table. During Stage 2, the engine selects at most one hidden variant;
+that selected variant becomes the active block for the remainder of the pipeline.
 
 ## 3. Canonical Pipeline Stages
 
@@ -157,9 +219,10 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 │  Floor clamping, bypass, phase transitions, on-death     │
 │  Primitives: P-23, P-24, P-25, P-39                     │
 ├──── 11. StateUpdate ────────────────────────────────────┤
-│  Counters, charges, loadout swaps, stagger, DR, timers   │
+│  Counters, charges, loadout swaps, status registry,      │
+│  stagger, DR, timers                                     │
 │  Primitives: P-31, P-41, P-42, P-44, P-45, P-46,        │
-│              P-48, P-50                                   │
+│              P-48, P-50, P-66                             │
 ├──── 12. ObserverScopedPayloadEmission ─────────────────┤
 │  Downstream payloads, asymmetric rendering, group UI     │
 │  Primitives: P-52, P-53, P-54                            │
@@ -195,6 +258,12 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 | P-51 (Desperation Cost) | Compute escalated cost, validate affordability |
 
 **Engine contract:** The engine MUST invoke intent validation hooks in registration order. A rejected intent MUST NOT proceed to later stages. On-Cast Intercept MUST fire after the caster's own validation succeeds but before resolution begins.
+
+Activation-mode evaluation also lives in Stage 2. After base capability and legality checks pass,
+the engine MUST evaluate `activation_modes` in authored order and select the first matching hidden
+variant. The selected variant's targeting, costs, and instructions replace the root block for the
+rest of the resolution path. `consume_on = cast_ability` windows are checked after variant
+selection but before resource/cooldown commit for the selected block.
 
 #### Stage 3: TargetResolution
 
@@ -318,7 +387,7 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 #### Stage 11: StateUpdate
 
 **Executes:** After death checks.
-**Purpose:** Update accumulators, timers, and persistent state.
+**Purpose:** Update accumulators, timers, status registry state, and persistent state.
 
 | Primitive | Role |
 |-----------|------|
@@ -330,8 +399,9 @@ The engine evaluates one authoritative tick as an ordered sequence of **12 pipel
 | P-46 (Global Event Scheduler) | Process controller-escalated global events |
 | P-48 (Secondary Stagger Bar) | Update stagger bar, check depletion |
 | P-50 (Typed Multi-Charge Pool) | Update charge pool composition |
+| P-66 (Status Effect Filter Mutation) | Remove matching statuses / apply status-admission filters |
 
-**Engine contract:** Non-timer primitives evaluate in-place. Pulse (P-44) and Delay (P-45) timers that fire in this stage MUST NOT execute their payloads in the current tick. Instead, they MUST emit deferred events queued for the NEXT tick. The re-entry stage depends on the event class (defined in §6.1). Global events (P-46) are routed to the Mesh Controller for deterministic future-tick injection.
+**Engine contract:** Non-timer primitives evaluate in-place. P-66 cleanse/registry mutations MUST execute before P-44 and P-45 timer firings in the same stage, so a same-tick cleanse suppresses later timer emissions from statuses it removed. Pulse (P-44) and Delay (P-45) timers that fire in this stage MUST NOT execute their payloads in the current tick. Instead, they MUST emit deferred events queued for the NEXT tick. The re-entry stage depends on the event class (defined in §6.1). Global events (P-46) are routed to the Mesh Controller for deterministic future-tick injection.
 
 #### Stage 12: ObserverScopedPayloadEmission
 
@@ -352,9 +422,10 @@ Some primitives are not bound to a single pipeline stage. They are emitted as `I
 
 | Primitive | Emission Form | Checked At |
 |-----------|---------------|-----------|
-| P-26 (Capability Bitmask) | `IRDirective` / metadata | IntentValidation (CAN_CAST), PreKinematic (CAN_MOVE), TargetResolution (filtering) |
+| P-26 (Capability Bitmask) | `IRDirective` / metadata | IntentValidation (CAN_CAST / CAN_ATTACK), PreKinematic (CAN_MOVE), passive evaluation (PASSIVES_ACTIVE), TargetResolution (filtering) |
 | P-27 (Targetability Overrides) | `IRDirective` / metadata | TargetResolution (excluded from queries), ObserverScopedPayloadEmission (excluded from payloads) |
-| P-28 (Hostility Inversion) | `IRDirective` / metadata | TargetResolution (inverted team filter) |
+| P-28 (Hostility Inversion) | `IRDirective` / metadata | TargetResolution (inverted team filter / nearest-ally selection for berserk-style control) |
+| P-62 (Categorized CC Immunity) | status metadata | CC admission before any new status is inserted |
 | P-32 (Actor Spawning) | `IRDirective` | Any stage may request actor creation; spawned actors begin evaluation on the NEXT tick |
 | P-33 (Entity Dormancy) | `IRDirective` / metadata | All stages — dormant entities are skipped entirely |
 | P-34 (Persistent Linkage) | `IRDirective` / metadata | Cross-cutting — bindings are checked wherever the linked primitives operate |
@@ -362,6 +433,93 @@ Some primitives are not bound to a single pipeline stage. They are emitted as `I
 | P-56 (Spatial Instance Forking) | `IRDirective` / metadata | Cross-cutting — instance enter/exit occurs outside normal per-stage instruction scheduling |
 
 The compiler MUST NOT emit these as stage-specific `IRInstruction` entries. They are emitted as `IRDirective` entries or ability metadata and interpreted by the engine at the points listed above.
+
+### 4.1 Crowd-Control Admission and Enforcement
+
+Crowd control authored through `apply_cc` compiles to a generated negative status entry that carries
+the selected `cc_category`, an internal `cc_behavior_profile`, duration-scaling policy, ordinary
+status-cleanse metadata, and any authored expiry follow-up effects.
+
+The engine MUST enforce crowd control in the following deterministic order:
+
+1. **Admission check:** Before inserting a new status, evaluate `P-62` by scanning active statuses
+   for `cc_immunity_categories`, plus any temporary immunity granted by
+   `self_cc_immunity_during_cast`. If the category is blocked, reject the CC component only;
+   sibling damage/heal effects from the same ability continue.
+2. **Effective duration:** Start from authored `duration_ticks`. If the status uses
+   `duration_scaling = status_resistance`, apply the source's status-duration modifier and the
+   target's `status_effect_resistance` modifier multiplicatively, then apply DR for the authored
+   `dr_category`. Clamp admitted duration to at least one tick.
+3. **Status insert:** Insert the generated status into the target's authoritative status registry.
+   From this point forward, `cleanse`, `status_application_immunity`, and generic status queries
+   treat CC and non-CC statuses identically.
+4. **Immediate interruption:** The `stun`, `silence`, and `sleep` behavior profiles terminate the
+   target's current cast/channel immediately on admission. Detailed teardown of maintained effects
+   still follows the channel lifecycle contract.
+5. **Offense-side miss policy:** The `blind` profile is checked on the attacker before
+   `CombatContext` generation for the engine-owned auto-attack action. A blinded auto-attack
+   becomes `Miss` and MUST NOT generate damage, on-hit hooks, or relay payloads.
+6. **Target-control policy:** The `taunt` and `berserk` profiles mutate the engine-owned
+   auto-attack action before target resolution. `taunt` rewrites target selection to the status
+   source while that source is alive. `berserk` rewrites target selection to the nearest ally and
+   authorizes ally damage for that auto-attack only. Neither profile retargets ordinary authored
+   ability casts.
+7. **Forced-movement policy:** The `fear` and `charm` profiles emit deterministic `P-03`
+   steering directives each tick while suppressing voluntary attacks and casts. `fear` steers away
+   from the source; `charm` steers toward the source.
+8. **Profile-defined breaks:** `sleep` breaks after any non-zero committed damage instance. `taunt`
+   breaks when the source entity dies. A break removes the status before later same-stage timer
+   firings; the hit that broke `sleep` still resolves normally.
+9. **Passive suppression:** The `mute` profile clears `PASSIVES_ACTIVE` while the status is
+   present. Passive statuses, aura pulses, passive item effects, and passive proc registrations are
+   suspended, not removed, and resume when the status ends.
+
+### 4.2 Activation Modes, Runtime States, and Consumption Windows
+
+The `CG-07` stateful authoring surface lowers into four canonical runtime constructs:
+
+1. ordered activation-mode redirects (`ActivationModeIR`)
+2. bounded per-entity runtime states keyed by `RuntimeStateId`
+3. status-owned snapshot recorders backed by engine `P-05`
+4. status-owned consumption windows that modify the next matching cast/hit/damage event
+
+The engine/runtime MUST enforce the following rules:
+
+1. **Hold-release ingress stays inside the existing intent taxonomy.** The hold START uses the
+   ordinary discrete cast intent for the ability's targeting shape (`TargetedAbility`,
+   `GroundTargetedAbility`, or `SpawnProjectile`). Release is derived from the authoritative
+   held-button transition in continuous `SimulationInput`; the compiler/runtime MUST NOT require a
+   new external intent variant. The Arbiter owns `hold_start_tick` and transfers it during handoff.
+2. **Release-time targeting uses current authoritative input state.** When a hold-release ability
+   resolves, the engine uses the latest accepted aim/cursor state for final direction/placement and
+   clamps duration into `[min_charge_ticks, max_charge_ticks]` before feeding it to `P-43`.
+3. **Runtime states are authoritative SoftState, not ad hoc effect-local blobs.** `bookmark`,
+   `snapshot_buffer`, `sequence_window`, and `charge_pool` entries live in bounded per-entity
+   runtime state keyed by compiled `RuntimeStateId`. They survive handoff and are validated by the
+   compiled `RuntimeStateDefinition` table.
+4. **Absolute-position semantics follow the core spatial contract.** `bookmark(position)` and
+   `snapshot_buffer.position` store absolute world coordinates. If a later `P-01` relocation uses a
+   stored coordinate that now belongs to a different Arbiter, owner resolution uses the CURRENT
+   topology and the move follows the normal cross-boundary teleport/handoff rule from
+   `docs-core/01-1-spatial-primitive-catalog.md`.
+5. **Entity-reference bookmarks resolve late.** `bookmark(entity_ref)` stores an authoritative
+   entity/actor ID. When a later read asks for `StoredEntityPosition`, the runtime resolves that
+   entity's current local-or-Ghost position at execution time rather than preserving a stale
+   coordinate snapshot.
+6. **Compiler-owned runtime-state ops use the same stage scheduler as primitive instructions.**
+   `WriteState`, `ClearState`, `AdvanceSequence`, and `ModifyChargePool` are not new engine
+   primitives, but they execute in the same ordered instruction stream and obey the same
+   intra-stage ordering rules. A `WriteState` that captures a pre-teleport origin MUST execute
+   earlier in the same stage than the `P-01`/`P-02` relocation it feeds.
+7. **Snapshot recorder states reuse core `P-05` semantics.** A status carrying
+   `snapshot_recorder_state` requests the engine's canonical `P-05 Historical State Buffer`
+   behavior. Recording timing, rewind semantics, and handoff preservation are exactly those defined
+   in `docs-core/01-1-spatial-primitive-catalog.md` §3.5.
+8. **Consumption windows are deterministic status metadata.** `consume_on = cast_ability` is
+   checked in Stage 2 after activation-mode selection. `damage_received` and `on_hit` windows are
+   checked in Stage 9. Matching windows apply their compiled `AbilityOverride` data to the active
+   cast/event, increment consumption count, run any `on_consume_effects`, and then remove the
+   status if its maximum consumption count is reached.
 
 ## 5. Complete Primitive → Stage Mapping
 
@@ -432,6 +590,12 @@ The compiler MUST NOT emit these as stage-specific `IRInstruction` entries. They
 | P-63 Movement-Damage Scalar | PostKinematic | Systemic |
 | P-64 Combo Field × Finisher Matrix | PostKinematic | Systemic |
 | P-65 Vulnerability Window Broadcast | PreMitigation | Systemic |
+| P-66 Status Effect Filter Mutation | StateUpdate | State |
+
+Compiler-owned runtime-state ops (`WriteState`, `ClearState`, `AdvanceSequence`,
+`ModifyChargePool`) are intentionally omitted from the primitive table above. They are IR-level
+state mutations, not additions to the engine primitive catalog, but they still use the same stage
+scheduler and deterministic ordering rules.
 
 ## 6. Cascade and Re-entrancy Rules
 
@@ -446,7 +610,7 @@ Any combat event generated by a PostDamage hook (P-35, P-36, P-37, P-38, P-60) M
 
 **StateUpdate Timers (Stage 11):**
 Stage 11 operations are classified into three behaviors:
-1. **`in_place_state_update`**: Primitives like DR Tracker (P-41), Stacking Counters (P-42), and Charge Pools (P-50) mutate state directly during Stage 11. They emit no deferred events.
+1. **`in_place_state_update`**: Primitives like DR Tracker (P-41), Stacking Counters (P-42), Charge Pools (P-50), and Status Effect Filter Mutation (P-66), plus compiler-owned runtime-state ops scheduled for the same stage, mutate state directly during Stage 11. They emit no deferred events.
 2. **`deferred_spatial_event`**: Timers (P-44, P-45) whose payloads contain spatial queries (e.g., a delayed bomb explosion, a pulsing Blizzard zone). These MUST be queued for the NEXT tick and re-enter at **Stage 3 (TargetResolution)** so the engine can query the R-Tree for affected entities.
 3. **`deferred_combat_event`**: Timers whose payloads target a known, specific entity without needing a spatial query (e.g., a DoT pulse applied directly to a victim). These MUST be queued for the NEXT tick and re-enter at **Stage 7 (PreMitigation)**.
 
@@ -491,6 +655,15 @@ The compiler MUST enforce these rules when emitting IR:
 
 7. **Binding count per ability is bounded.** A single ability IR Block MUST NOT contain more than `MAX_BINDINGS_PER_ABILITY` binding slots (configurable, default: 16).
 
+8. **Activation modes compile to hidden variants.** Each authored activation mode MUST lower to a
+   compiler-generated hidden `AbilityIRBlock` plus one `ActivationModeIR` redirect entry on the
+   public/root ability. The runtime MUST never evaluate more than one activation mode for a single
+   cast.
+
+9. **Hold-release abilities use existing input lanes.** The compiler MAY require a matching ability
+   slot/button binding, but it MUST lower hold-release abilities onto the existing discrete-cast +
+   continuous-button-state ingress model rather than inventing a new client intent shape.
+
 ## 8. Example: SK-01 (Toss) Compiled IR
 
 ```
@@ -506,17 +679,19 @@ AbilityIRBlock {
     can_be_counterspelled: true,
     combo_finisher: None,
     requires_concentration: false,
+    input_mode: Instant,
+    activation_modes: [],
     instructions: [
         // 1. Target: is target valid?
         IRInstruction {
-            primitive: P-13,
+            op: Primitive(P-13),
             stage: TargetResolution,
             params: { filter: Enemy | Alive, entity: Target },
             guard: None,
         },
         // 2. Kinematic: displace target along arc to landing position
         IRInstruction {
-            primitive: P-02,
+            op: Primitive(P-02),
             stage: KinematicResolution,
             params: {
                 entity: Target,
@@ -532,7 +707,7 @@ AbilityIRBlock {
         // not the raw requested target input. This matters if the requested
         // position is beyond max throw distance and the toss is clamped.
         IRInstruction {
-            primitive: P-09,
+            op: Primitive(P-09),
             stage: PostKinematic,
             params: {
                 shape: Circle,
@@ -545,14 +720,14 @@ AbilityIRBlock {
         },
         // 4. Damage: impact damage to primary target
         IRInstruction {
-            primitive: P-15,
+            op: Primitive(P-15),
             stage: DamageResolution,
             params: { target: Target, amount: 150, type: Physical },
             guard: None,
         },
         // 5. Damage: AoE damage to nearby enemies
         IRInstruction {
-            primitive: P-15,
+            op: Primitive(P-15),
             stage: DamageResolution,
             params: { targets: Binding("aoe_targets"), amount: 100, type: Physical },
             guard: None,
@@ -577,7 +752,7 @@ AbilityIRBlock {
 
 | Document | Relationship |
 |----------|-------------|
-| `ability-primitives/` | Defines the 65 primitives this IR targets. Each IR instruction or IR directive invokes exactly one primitive. |
+| `ability-primitives/` | Defines the 66 engine primitives this IR targets. Primitive instructions/directives use that catalog, while compiler-owned runtime-state ops remain an IR-layer construct. |
 | `03-compiler-pipeline.md` | Describes the compilation phases that produce IR Blocks. This document defines the IR output format. |
 | `04-game-image-format.md` | IR Blocks are stored in the game image's Ability IR Table section (§3, type 0x10). |
 | `docs-core/04-1-game-adapter-contract.md` | The 12 pipeline stages defined here are the proposed expansion of the adapter hook taxonomy (Amendment B). |

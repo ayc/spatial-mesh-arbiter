@@ -61,6 +61,8 @@ Attacker and defender may exist on different physical Arbiters, so combat is asy
 
 **`memory-bank/`** contains project-level coordination files — progress status, architecture decisions, implementation roadmap, and session handoff context. Start with `memory-bank/SUMMARY.md` for a quick orientation on where the project stands. See `memory-bank/README.md` for file descriptions and update guidelines.
 
+**`memory-bank/` is not implementation authority.** Agents must still read the relevant spec documents before proposing architecture, explaining contracts, or writing code. Use `docs-core/` first, then `docs-game-compiler/` or `docs/` as applicable to the task.
+
 **Keep `memory-bank/` current.** At the end of each turn, if your work changed project state (resolved a gap, wrote code, made a decision, shifted priorities), update the relevant `memory-bank/` file. At minimum: `ACTIVE_WORK.md` for progress changes, `DECISIONS.md` for architectural choices, `SESSION_HANDOFF.md` at the end of significant sessions.
 
 ## Branches

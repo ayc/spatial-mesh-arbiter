@@ -1,14 +1,14 @@
 # Ability Primitive Taxonomy
 
 **Status:** Canonical
-**Origin:** Adapted from `GEMINI_PRIMITIVES_PROPOSAL.md` (62 primitives derived from SK-01 through SK-107), extended with 3 primitives covering SK-108 through SK-125.
-**Purpose:** Define the atomic "Virtual Instruction Set for Spatial Logic." The Game Compiler lowers designer-authored abilities into chains of these 65 primitives. The engine exposes them; it never hardcodes individual abilities.
+**Origin:** Adapted from `GEMINI_PRIMITIVES_PROPOSAL.md` (62 primitives derived from SK-01 through SK-107), extended with 3 primitives covering SK-108 through SK-125, plus P-66 to close status-effect cleanse/dispel semantics.
+**Purpose:** Define the atomic "Virtual Instruction Set for Spatial Logic." The Game Compiler lowers designer-authored abilities into chains of these 66 primitives. The engine exposes them; it never hardcodes individual abilities.
 
 ---
 
 ## Numbering Scheme
 
-Primitives are numbered **P-01** through **P-65** and grouped into 11 categories. Numbers are stable — retired primitives leave a gap rather than renumbering.
+Primitives are numbered **P-01** through **P-66** and grouped into 11 categories. Numbers are stable — retired primitives leave a gap rather than renumbering.
 
 ## Category Index
 
@@ -17,7 +17,7 @@ Primitives are numbered **P-01** through **P-65** and grouped into 11 categories
 | [01-spatial-kinematic.md](01-spatial-kinematic.md) | Spatial & Kinematic | P-01 through P-08 |
 | [02-targeting-query.md](02-targeting-query.md) | Targeting & Query | P-09 through P-14 |
 | [03-combat-resolution.md](03-combat-resolution.md) | Combat Resolution | P-15 through P-25 |
-| [04-entity-state-capability.md](04-entity-state-capability.md) | Entity State & Capability | P-26 through P-34 |
+| [04-entity-state-capability.md](04-entity-state-capability.md) | Entity State & Capability | P-26 through P-34, P-66 |
 | [05-hooks-reactive-triggers.md](05-hooks-reactive-triggers.md) | Hooks & Reactive Triggers | P-35 through P-40 |
 | [06-temporal-accumulator.md](06-temporal-accumulator.md) | Temporal & Accumulator | P-41 through P-46 |
 | [07-resource-economy.md](07-resource-economy.md) | Resource & Economy | P-47 through P-51 |
@@ -54,7 +54,7 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 | SK-12 | Spell Echo | P-40 (On-Cast Intercept) → P-45 (Delay Timer) |
 | SK-13 | Counter Strike | P-12 (Facing/Dot-Product Check) → P-38 (On-Block/Defend Hook) |
 | SK-14 | Execute Threshold | P-17 (Conditional Thresholds) |
-| SK-15 | Purify | P-15 (Value Modification) |
+| SK-15 | Purify | P-66 (Status Effect Filter Mutation) |
 | SK-16 | Holy Ground | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-44 (Pulse Timer) → P-15 (Value Modification) |
 | SK-17 | Sacrifice Shield | P-18 (Absorption Barrier) → P-21 (Value Conversion) |
 | SK-18 | Resurrect | P-43 (Charge-Up State) → P-39 (On-Death Hook) |
@@ -168,7 +168,7 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 
 ## Primitive Coverage Summary
 
-Every primitive (P-01 through P-65) is used by at least one sketch. The most-referenced primitives:
+Every primitive (P-01 through P-66) is used by at least one sketch. The most-referenced primitives:
 
 | Primitive | Count | Role |
 |-----------|-------|------|
@@ -181,7 +181,7 @@ Every primitive (P-01 through P-65) is used by at least one sketch. The most-ref
 | P-16 (Stat Layering) | 11 | Buff/debuff modifiers |
 | P-44 (Pulse Timer) | 11 | DoTs and periodic zone ticks |
 
-Least-referenced (1 sketch each): P-19, P-22, P-24, P-25, P-28, P-46, P-48, P-49, P-51, P-55, P-57, P-63, P-65. These are specialized primitives — high-value for the sketches that need them, but narrow in applicability.
+Least-referenced (1 sketch each): P-19, P-22, P-24, P-25, P-28, P-46, P-48, P-49, P-51, P-55, P-57, P-63, P-65, P-66. These are specialized primitives — high-value for the sketches that need them, but narrow in applicability.
 
 ---
 

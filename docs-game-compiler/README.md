@@ -36,4 +36,4 @@ If this directory conflicts with `docs-core/`, `docs-core/` wins.
 
 ## Ability Primitives
 
-14. [ability-primitives/](ability-primitives/README.md) — Canonical taxonomy of 65 atomic engine primitives derived from 125 ability sketches. Defines the "Virtual Instruction Set for Spatial Logic" that the compiler targets.
+14. [ability-primitives/](ability-primitives/README.md) — Canonical taxonomy of 66 atomic engine primitives derived from 125 ability sketches. Defines the "Virtual Instruction Set for Spatial Logic" that the compiler targets.
