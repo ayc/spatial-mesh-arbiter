@@ -10,11 +10,28 @@ The hard-state publisher is an asynchronous worker that emits finalized Hard Eve
 type TeamID = u16;     // Faction or team affiliation (e.g., 0 = Red, 1 = Blue)
 type RegionID = u16;   // Named objective zone (e.g., 1 = Point A, 2 = Point B)
 
+enum RespawnOverride {
+    RespawnAnchor {
+        anchor_entity_id: EntityID,
+        position: Vec2F,
+        respawn_delay_ticks: u32,
+    },
+}
+
 // Irreversible/Economic events
 enum HardEvent {
     // Killer is an Option to support PvE / Environmental deaths
-    PlayerDied { killer: Option<EntityID>, victim: EntityID },
+    PlayerDied {
+        killer: Option<EntityID>,
+        victim: EntityID,
+        respawn_delay_credit_ticks: u32, // Meta subtracts this from the resolved base respawn delay; 0 for ordinary deaths
+        respawn_override: Option<RespawnOverride>, // Bounded post-terminal route override (for example a revocable respawn anchor)
+    },
     PlayerResurrected { healer: EntityID, victim: EntityID }, // Cancels the Meta respawn timer
+    RespawnOverrideRevoked {
+        victim: EntityID,
+        source_entity_id: EntityID, // The anchor or other override source that was removed before spawn commit
+    },
     // Canonical loot spawn event. Created by the Loot Service after drop table evaluation.
     // The Arbiter renders the item in-world; eligible_entity_ids controls who can interact.
     LootSpawned {

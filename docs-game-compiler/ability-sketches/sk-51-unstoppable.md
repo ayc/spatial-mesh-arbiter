@@ -2,105 +2,102 @@
 
 ## Designer Intent
 
-I activate a defensive ability that grants me Unstoppable status for 2 seconds and a shield. While Unstoppable, I am completely immune to all crowd control effects. I can still take damage, be targeted by abilities, and interact normally — I just can't be CC'd.
+I activate a short defensive window that strips active crowd control, grants a shield, and then
+prevents new crowd control from landing while the window lasts. I am still targetable and still
+take damage normally.
 
 ## Primitive Composition
 
-P-62 (Categorized CC Immunity)
+P-66 (Status Effect Filter Mutation) → P-62 (Categorized CC Immunity) → P-18 (Absorption Barrier)
 
 *See `ability-primitives/` for canonical definitions.*
 
 ## Inputs
 
 - Caster entity
-- No target (self-only)
+- Self-cast only
 
 ## Observable Behavior
 
-1. Activate — gain Unstoppable status for 2 seconds + shield
-2. While Unstoppable: all incoming CC is negated (stuns, roots, silences, slows, blinds, sleep, displacement, pulls)
-3. CC abilities still deal their damage (if any) — only the CC component is stripped
-4. While Unstoppable: I can still take damage normally (NOT invulnerable)
-5. While Unstoppable: I can still be targeted by abilities (NOT untargetable)
-6. Existing CC is removed on activation (acts as a self-cleanse)
-7. Shield provides additional survivability during the Unstoppable window
-8. Visual: glowing golden outline, "Unstoppable" text indicator
+1. Activate — immediately remove active CC from self, gain a shield, and gain `unstoppable` for 2
+   seconds.
+2. While `unstoppable` is active, incoming CC is rejected before admission.
+3. Damage portions of mixed damage+CC abilities still apply normally; only the CC component is
+   stripped.
+4. The status does not grant invulnerability, untargetability, or stealth.
+5. Friendly, hostile, and self-inflicted CC are all blocked equally in this reference because the
+   immunity check is relation-agnostic.
+6. Forced movement, pulls, taunts, blinds, silences, stuns, roots, charms, fears, berserk, mute,
+   and other authored CC categories are all blocked during the window.
+7. Visual: shield impact on cast plus a clear `Unstoppable` buff presentation while active.
 
 ## Engine Primitives Required
 
-### New Entity State: Unstoppable
+The canonical version is one positive status plus one category-scoped self-cleanse:
 
-A third defensive state alongside invulnerable (SK-44) and untargetable (SK-44):
+1. On activation, the ability emits `cleanse(target = caster, polarity = negative,
+   require_cleansable = false, cc_categories = [displacement, hard_disable, soft_disable,
+   forced_movement, target_override, mute])`.
+2. After that cleanse batch, the ability applies a positive `unstoppable` status whose
+   `cc_immunity_categories` list uses the same full category set.
+3. The ability also applies an ordinary shield through `apply_shield`.
+4. While `unstoppable` is active, incoming CC attempts whose compiled `cc_category` matches one of
+   those categories are rejected before they enter the target's active status registry.
 
-| State | Takes damage? | Targetable? | Affected by CC? |
-|---|---|---|---|
-| Normal | Yes | Yes | Yes |
-| Unstoppable (SK-51) | Yes | Yes | **No** |
-| Invulnerable (SK-44) | **No** | Depends | Depends |
-| Untargetable (SK-44) | Depends | **No** | Depends |
+This keeps Unstoppable narrow:
 
-`is_unstoppable` is a flag on the entity's capability state. When true:
-- All incoming CC applications are negated (status effect application is rejected)
-- Damage components of CC abilities still apply (SK-24 Stun deals damage AND stuns — Unstoppable blocks the stun but not the damage)
-- Forced movement is prevented (SK-01 Toss, SK-31 Vortex pull, SK-43 Drag — none move the entity)
-- Existing CC is purged on activation (self-cleanse)
-
-### CC Application Check
-
-Every CC application in the engine must check `is_unstoppable` before applying:
-```
-fn try_apply_cc(target: &Entity, cc_effect: StatusEffect) -> bool {
-    if target.is_unstoppable { return false; }
-    if target.is_cc_immune_window { return false; }  // Post-CC immunity (SK-24)
-    // Apply DR (SK-28), tenacity, etc.
-    apply_status_effect(target, cc_effect);
-    return true;
-}
-```
-
-This check must be in the CC application path, AFTER the damage portion of the ability has resolved. The ability's damage goes through normally — only the CC component is stripped.
-
-### Splitting Damage From CC
-
-Many abilities deal damage AND apply CC in a single action (SK-24 Stun deals damage + stuns, SK-49 Cone Strike deals damage + slows). Against an Unstoppable target, the engine must:
-1. Apply damage normally (full pipeline)
-2. Attempt to apply CC → rejected by Unstoppable check
-3. Result: target takes damage but is not CC'd
-
-This means abilities must have separable damage and CC components — the engine can't treat "stun + damage" as an atomic unit. The compiler must decompose abilities into independent effects that can be partially applied.
-
-### Self-Cleanse on Activation
-
-When Unstoppable is activated, all existing CC effects on the entity are removed:
-- All active stuns, roots, silences, slows, blinds, sleep — all removed
-- Similar to SK-15 Purify but self-targeted and immediate
+- it removes active crowd control
+- it blocks new crowd control
+- it does not purge arbitrary non-CC negative statuses
+- it does not interfere with ordinary damage resolution
 
 ## Cross-Boundary Concerns
 
-TODO: Minimal cross-boundary complexity. Unstoppable is a local state on the entity's Arbiter. When CC arrives via relay (cross-boundary stun), the entity's Arbiter checks `is_unstoppable` and rejects the CC component while applying the damage component. The attacker's Arbiter doesn't need to know the target is Unstoppable — the CC rejection is handled locally.
+Unstoppable is enforced entirely on the target's authoritative Arbiter:
 
-One consideration: if the attacker's Arbiter pre-rolls a CombatContext that assumes the target will be stunned (for follow-up abilities), the stun not applying might cause unexpected behavior. But the engine doesn't pre-assume CC success — it's always evaluated on the defender's Arbiter.
+1. If a cross-boundary prepared hit carries both damage and CC, the target owner still applies the
+   damage portion normally.
+2. The same target owner then evaluates the CC component against active `cc_immunity_categories`.
+3. If the target is currently `unstoppable`, the CC component is rejected locally and never creates
+   a new status entry.
+4. Because the activation cleanse is also target-side `P-66`, there is no race with foreign writers
+   beyond the normal deterministic stage order on the target owner.
+
+The attacker's Arbiter never needs an out-of-band "target is unstoppable" hint.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: self-cast, duration (2s), Unstoppable (immune to all CC), self-cleanse on activation, shield amount, does NOT prevent damage or targeting. Compiler produces:
-- Status effect with `is_unstoppable: true` flag
-- On-apply hook: remove all active CC effects from the entity (self-cleanse)
-- Shield instance (same as SK-17)
-- Duration expiry removes Unstoppable flag
+Designer specifies:
 
-The compiler needs to ensure that ALL CC application paths check `is_unstoppable`. This is a system-wide invariant — any new CC type added in the future must also check this flag. The compiler should validate this statically: every status effect tagged as CC must go through the `try_apply_cc` function.
+- self-cast activation
+- duration of the Unstoppable window
+- shield amount / duration
+- which CC categories the window blocks (all canonical categories in this reference)
 
-## Open Questions
+Compiler emits:
 
-- Does Unstoppable prevent friendly CC (ally roots you for protection)?
-- Does Unstoppable prevent self-inflicted CC (abilities that stun yourself as a drawback)?
-- Does Unstoppable block displacement from allies (SK-01 Toss by an ally to reposition you)?
-- Does Unstoppable block SK-40 Mind Control? Mind Control is CC — should be blocked.
-- Does Unstoppable prevent the slow component of SK-29 Blizzard while still taking the damage?
-- Can Unstoppable be purged by enemies (removing the Unstoppable buff)?
-- Does Unstoppable interact with Diminishing Returns — does time spent Unstoppable count toward the DR window?
-- If an Unstoppable entity enters SK-31 Vortex, are they immune to the pull force? (Pull is forced movement = CC)
-- Does Unstoppable prevent the "pinning" from SK-34 Charge?
-- Can Unstoppable be stacked with SK-44 Burrow (Unstoppable + Invulnerable)?
-- How does Unstoppable interact with SK-27 Sleep's break-on-damage — if Unstoppable prevents Sleep from being applied, there's nothing to break.
+- one category-scoped `cleanse` against self that removes active CC without broad negative purge
+- one positive `unstoppable` status definition with the matching `cc_immunity_categories` set
+- one shield application
+
+Compiler validates:
+
+1. the `cleanse.cc_categories` list uses only canonical CC category names and has no duplicates
+2. the `unstoppable` status is `positive`, not `negative`
+3. the `unstoppable` status does not silently widen into damage immunity or targetability changes
+4. the shield uses ordinary shield validation and remains independent of the CC-immunity window
+
+## Resolved Interaction Notes
+
+- Because immunity is category-based, Unstoppable blocks friendly and self-inflicted CC as well as
+  hostile CC in this reference.
+- Existing non-CC negatives such as anti-heal or DoTs are not removed by the activation cleanse
+  unless the game separately authors that broader behavior.
+- Time spent Unstoppable does not advance DR tiers, because blocked CC never admits and therefore
+  never records a DR application.
+- Enemy buff-strip mechanics may remove the positive `unstoppable` status if the game authors them
+  to remove positive statuses.
+- Unstoppable can coexist with other positive defensive states such as shields or even Burrow-style
+  untargetability/invulnerability if the game separately allows those statuses to overlap.
+- Entering a Vortex, being targeted by Charge pinning, or being hit by Mind Control all fail at the
+  CC admission step while Unstoppable is active, but any paired damage still resolves normally.

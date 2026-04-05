@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I channel on an enemy for 2 seconds. When the channel completes, our HP percentages are swapped. If I'm at 20% HP and they're at 80% HP, after the swap I'm at 80% and they're at 20%. This lets me dive in, take damage, then swap to steal the enemy's health advantage.
+I channel on an enemy and, if the channel completes, our current HP percentages are swapped in one
+instant overwrite. It is a dramatic reversal tool, not a damage or healing spell.
 
 ## Primitive Composition
 
@@ -13,84 +14,71 @@ P-17 (Conditional Thresholds) → P-15 (Value Modification)
 ## Inputs
 
 - Caster entity
-- Target enemy entity (must be in range)
+- Enemy target
+- Interruptible 2-second channel
 
 ## Observable Behavior
 
-1. Channel on an enemy for 2 seconds (can be interrupted)
-2. During channel: both entities can take damage normally (percentages keep changing)
-3. On channel complete: read both entities' current HP as a percentage of their max HP
-4. Caster's HP is set to (target's percentage × caster's max HP)
-5. Target's HP is set to (caster's percentage × target's max HP)
-6. The swap is instantaneous — happens in a single tick
-7. Neither entity can die from the swap (minimum 1 HP after swap)
-8. Visual: dark energy connecting both entities during channel, dramatic HP bar swap on completion
+1. Start channel on an enemy target for 2 seconds.
+2. During the channel, both entities keep taking normal damage/healing; the swap uses whatever HP
+   percentages exist at completion time, not at channel start.
+3. On successful completion, the engine captures both current HP percentages before either write.
+4. The caster's HP becomes `(target_pct * caster_max_hp)` and the target's HP becomes
+   `(caster_pct * target_max_hp)`.
+5. In this reference, both entities are clamped to a minimum of 1 HP after the overwrite.
+6. The overwrite is instantaneous and does not count as damage, healing, lifesteal, or shield
+   interaction.
+7. Shields are untouched; only base HP is swapped.
 
 ## Engine Primitives Required
 
-### Bidirectional HP Percentage Swap
+This is already the canonical `channel -> swap_hp_percent` path.
 
-This is the first ability that **reads AND writes HP on two entities simultaneously** in a single atomic operation. The swap must be atomic — you can't set the caster's HP first (based on target's percentage) and then set the target's HP (based on caster's old percentage that was already overwritten).
-
-```
-fn resolve_hp_swap(caster: &mut Entity, target: &mut Entity) {
-    let caster_pct = caster.hp / caster.max_hp;  // Fixed-point division
-    let target_pct = target.hp / target.max_hp;
-
-    caster.hp = max(1, target_pct * caster.max_hp);  // Minimum 1 HP
-    target.hp = max(1, caster_pct * target.max_hp);
-}
-```
-
-Both reads must happen BEFORE either write. This is trivially safe when both entities are on the same Arbiter (local variables). But cross-boundary...
-
-### HP Overwrite (Not Damage or Heal)
-
-Like SK-37 Time Rewind, the HP change is a **state overwrite**, not a damage or heal event:
-- No on-hit procs trigger
-- No on-heal procs trigger
-- No damage numbers display
-- Shields (SK-17) are NOT affected (only base HP swaps)
-- SK-46 Adaptation's damage accumulator does NOT count the HP loss as "damage taken"
-- SK-22 Damage Reflection does NOT fire (no incoming damage event)
-
-The HP overwrite bypasses the entire combat pipeline. It's a direct SoftState mutation.
+1. The ability uses an interruptible `ChannelBlock` with `execution_mode = complete_only`.
+2. On successful completion, it emits `swap_hp_percent(target = target, min_hp = 1,
+   same_arbiter_only = true)`.
+3. `swap_hp_percent` captures both percentages before either write and then performs the paired
+   overwrite atomically.
+4. Because the overwrite is not damage or healing, it bypasses damage/heal hooks, mitigation,
+   lifesteal, shields, reflection, and damage-accumulator mechanics.
 
 ## Cross-Boundary Concerns
 
-TODO: This is the hardest cross-boundary problem in the sketch set. If caster and target are on different Arbiters:
+The current canonical profile keeps HP swap same-Arbiter only:
 
-1. **Channel phase:** Caster channels on their Arbiter. Target is a Ghost. Channel break conditions (interrupt, range) are checked locally.
-
-2. **Swap resolution:** On channel complete, the caster's Arbiter needs the target's CURRENT HP percentage. But the target is a Ghost — Ghosts don't carry HP data (only position, velocity, movement_class).
-
-Options:
-- **Query the target's Arbiter:** Send a "what is your HP percentage right now?" request. But this adds a round-trip at the critical moment. During the round-trip, both entities' HP can change.
-- **Relay the swap to the target's Arbiter:** Caster's Arbiter sends "set your entity to X% HP, and tell me what their percentage was." Target's Arbiter responds with the old percentage. Caster's Arbiter sets caster HP. Problem: two-message round-trip, non-atomic.
-- **Optimistic swap:** Caster's Arbiter uses the last known Ghost HP approximation (if Ghosts carried HP). Not accurate for a critical ability.
-- **Require same Arbiter:** Only allow the ability on non-Ghost targets. Limits usability near boundaries.
-
-This ability may fundamentally require both entities to be on the same Arbiter for correct resolution. That's a unique constraint.
+1. The target must be authoritative locally at resolution time. Remote/Ghost targets are rejected
+   by `swap_hp_percent(same_arbiter_only = true)`.
+2. If the target handoffs away, becomes remote, dies, or otherwise becomes invalid before channel
+   completion, the channel fails instead of attempting a cross-Arbiter paired write.
+3. This keeps the paired read/write atomic without introducing a new multi-owner transactional
+   protocol for one sketch.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: channel (2s), on-complete (swap HP percentages), minimum 1 HP, not damage/heal (bypasses combat pipeline), interruptible. Compiler produces:
-- Channel definition with target reference
-- On-complete hook: atomic HP percentage swap
-- HP overwrite (not damage/heal event)
-- Same-Arbiter requirement or cross-boundary resolution strategy
+Designer specifies:
 
-The compiler needs to flag this ability as requiring **simultaneous read/write access to two entities' state** — a constraint no other ability has. This may need a new resolution category beyond "external action" and "internal relay."
+- target filter (enemy in this reference)
+- channel duration
+- minimum post-swap HP clamp
 
-## Open Questions
+Compiler emits:
 
-- Can the swap kill either entity? (Minimum 1 HP prevents this, but should it?)
-- Does the swap account for shields — swap total effective HP (HP + shield) or just base HP?
-- If the target gains or loses HP between channel start and channel end, the swap uses END values — is this correct?
-- Can the swap be used on allies (heal swap — give your high HP to a low-HP ally)?
-- Does Unstoppable (SK-51) prevent the HP swap? It's not CC — it's a state mutation.
-- Does invulnerability (SK-44 Burrow) prevent the HP swap? Burrow prevents damage, but the swap isn't damage.
-- If the caster is at 1% HP and the target has SK-19 Guardian Angel active, does the swap interact with the redirect?
-- What happens if the target dies during the channel (before swap completes)?
-- Can the swap target entities with different max HP pools (caster has 5000 max HP, target has 2000)?
-- How does the swap interact with SK-46 Adaptation — if the caster takes 3000 damage then swaps to 80% HP, does Adaptation heal for the 3000 damage taken before the swap?
+- one interruptible complete-on-finish channel
+- one `swap_hp_percent` completion effect with `same_arbiter_only = true`
+
+Compiler validates:
+
+1. the target is not a Ghost/remote entity at completion time
+2. `min_hp >= 0`
+3. the channel still satisfies normal target-validity checks at completion
+
+## Resolved Interaction Notes
+
+- Different max HP pools are fine. The mechanic swaps percentages, then rescales to each entity's
+  local max HP.
+- If either side dies before completion, there is nothing to swap and the channel fails.
+- Unstoppable does not block the swap because this is not crowd control.
+- Invulnerability does not by itself block the swap because the overwrite is not damage; becoming
+  untargetable or otherwise invalid during the channel still breaks the cast normally.
+- Adaptation-style damage tracking only counts real damage taken before the swap. The overwrite
+  itself does not feed those accumulators.

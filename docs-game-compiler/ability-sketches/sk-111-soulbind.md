@@ -30,93 +30,88 @@ P-34 (Persistent Linkage) → P-60 (Event Cloning)
 
 ## Engine Primitives Required
 
-### Targeted Ability Duplication
+Soulbind is now a canonical target-to-target `link` pattern with event cloning.
 
-After a single-target ability resolves on entity A (who has a Soulbind link to entity B), the engine must:
-1. Detect: entity A just had a single-target ability resolved on them
-2. Check: does entity A have a Soulbind link?
-3. If yes: REPLAY the same ability resolution on entity B
-4. The replay uses the SAME parameters (same CombatContext, same CC duration, same effect)
+The recommended lowering is:
 
-```
-status_effect: SoulbindLink {
-    linked_entity_id: EntityID,
-    expires_at_tick: u64,
-}
-```
+1. admit the first target as an ordinary hostile `single_target`
+2. run one bounded nearest-neighbor helper query around that first target to resolve
+   `second_target`
+3. emit one generated symmetric link:
+   - `link(source_entity = target, target = { binding: second_target }, duration_ticks = 480,`
+     `symmetric = true, is_cleansable = true,`
+     `event_clone = {`
+     `scope = single_target_only,`
+     `clone_damage = true,`
+     `clone_healing = true,`
+     `clone_status = true,`
+     `prevent_reclone = true`
+     `})`
 
-### Ability Resolution Replay
+The important point is that Soulbind is not a special replay subsystem. It is an ordinary symmetric
+`P-34` binding between two resolved non-caster endpoints, and the replay behavior comes from the
+already-canonical `event_clone` policy on that binding.
 
-The engine needs to capture the "input" of a single-target ability resolution and replay it on a second entity. This is NOT "deal the same damage" — it's "resolve the same ability":
-- If the ability was a stun + damage: both entities get stunned + damaged
-- If the ability was a heal reduction: both entities get heal reduction
-- The damage on B uses B's OWN defensive stats (not A's mitigation result)
-
-The replay is a NEW resolution of the same ability against a different target:
-```
-fn on_ability_resolved(target: &Entity, ability: &ResolvedAbility) {
-    if let Some(link) = target.find_effect::<SoulbindLink>() {
-        let linked = get_entity(link.linked_entity_id);
-        resolve_ability_on_target(linked, ability.original_params);
-    }
-}
-```
-
-### Single-Target vs AoE Classification
-
-The duplication only applies to SINGLE-TARGET abilities. AoE abilities are not duplicated (they already hit both if both are in the area). The engine must classify each ability resolution:
-- **Single-target**: one specific entity was targeted. Duplicated by Soulbind.
-- **AoE**: area-based, hits all entities in area. NOT duplicated.
-
-The compiler must tag abilities as `targeting_type: SingleTarget | AoE | Self` so the Soulbind check knows whether to duplicate.
-
-### Loop Prevention
-
-If both A and B have Soulbind links to each other (symmetrical), an ability on A duplicates to B, which would duplicate back to A → infinite loop. The engine must prevent this:
-- Flag the replayed resolution as "soulbind-replayed"
-- Soulbind duplication only fires on ORIGINAL resolutions, not on replays
-
-```
-fn on_ability_resolved(target: &Entity, ability: &ResolvedAbility, is_soulbind_replay: bool) {
-    if is_soulbind_replay { return; }  // Don't re-duplicate
-    if let Some(link) = target.find_effect::<SoulbindLink>() {
-        resolve_ability_on_target(linked, ability.original_params, is_soulbind_replay: true);
-    }
-}
-```
+When a qualifying single-target event later resolves on either endpoint, the struck endpoint's
+owner clones the ORIGINAL event envelope onto the partner. The cloned branch is a NEW resolution
+against the partner's own state, so damage, CC, healing, cleanse admission, and other downstream
+checks all run on the partner normally.
 
 ## Cross-Boundary Concerns
 
-TODO: Entity A on Arbiter X, entity B on Arbiter Y. A single-target ability hits A on Arbiter X.
+Soulbind follows the ordinary cross-Arbiter binding / event-clone contract.
 
-1. Arbiter X resolves the ability on A
-2. Arbiter X checks: A has Soulbind → linked to B
-3. Arbiter X must relay "replay this ability on entity B" to Arbiter Y
-4. Arbiter Y resolves the ability on B using B's defensive stats
-
-The relay carries the ability's original parameters (not A's resolution result). B gets an independent resolution.
-
-This is one relay per single-target ability hit on either linked entity — bounded by ability cast rate.
+1. The initial second-target helper query may resolve through local-or-Ghost data, but the final
+   binding is committed only on the authoritative owners of the two resolved targets.
+2. Once the symmetric binding exists, each endpoint's owner carries the local half of the binding
+   as ordinary SoftState. Handoffs move that state like any other authoritative entity state.
+3. If a qualifying single-target event resolves on endpoint A while endpoint B is remote, A's owner
+   emits the cloned original event envelope toward B's owner.
+4. B's owner resolves that cloned branch against B's own defenses, immunities, and later hooks.
+5. The cloned branch carries the binding's anti-recursion tag, so it cannot bounce back through the
+   same Soulbind pair and create a replay loop.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: link two enemies (8s), single-target abilities on one hit both, AoE not duplicated, no infinite loop, link persists through distance/LOS. Compiler produces:
-- SoulbindLink status effect on both entities (symmetrical)
-- Post-resolution hook: check for link → replay on linked entity
-- Single-target vs AoE classification on all abilities
-- Loop prevention flag on replayed resolutions
-- Cross-boundary replay relay
+Designer specifies:
 
-The compiler adds `targeting_type` to all ability definitions and adds a post-resolution duplication hook to the ability pipeline.
+- first hostile target
+- partner-search radius / filter for the second target
+- link duration
+- whether the binding is cleansable
+- which event classes clone (for this reference: damage, healing, and status)
 
-## Open Questions
+Compiler emits:
 
-- Does the duplicated ability use the original caster's offensive stats or re-roll with the original caster's stats?
-- Does the duplicated ability trigger on-hit procs (SK-09 Chain Lightning on B's hit)?
-- Can Soulbind duplicate Soulbind application (applying Soulbind on A duplicates to B → B also gets Soulbound to... who?)
-- Does the duplication work with SK-14 Execute Threshold (execute on A duplicates to B)?
-- Does SK-51 Unstoppable on entity B prevent the duplicated CC?
-- Can SK-15 Purify cleanse the Soulbind link?
-- If the linked entity dies, does the link transfer to another nearby enemy?
-- Does the link duplicate beneficial effects (ally heals one → the other is also healed)?
-- How does the link interact with SK-104 Zone-Conditional Invulnerability (ability from outside the zone hits A inside, duplicates to B outside)?
+- one root single-target admit
+- one deterministic nearest-neighbor helper query around the first target to produce
+  `second_target`
+- one symmetric `link` between the two resolved enemy targets using
+  `source_entity = target`
+- one `event_clone` payload restricted to `single_target_only`
+- anti-recursion tagging on cloned branches through `prevent_reclone = true`
+
+Compiler validates:
+
+1. the second target exists and is distinct from the first target, otherwise the cast fails
+   cleanly with no binding committed
+2. `event_clone.prevent_reclone = true`
+3. the link is expressed through canonical `link` / `event_clone` authoring rather than a bespoke
+   "replay last ability" subsystem
+4. the duplication scope remains `single_target_only`; AoE and self-targeted effects are not
+   replayed by this sketch
+
+## Resolved Interaction Notes
+
+- The cloned branch uses the original event envelope from the original caster / source branch; it
+  does not re-roll offense. The partner still resolves that branch against the partner's OWN
+  defenses, immunities, and damage-prevention rules.
+- Beneficial single-target effects clone too in this reference, because `event_clone` is authored
+  for damage, healing, and status without a hostility restriction.
+- The replayed branch may trigger ordinary downstream hooks on the partner, but it cannot clone
+  again through the same Soulbind binding because the originating `binding_id` and anti-recursion
+  flag are part of the canonical event-clone contract.
+- The link is cleansable. Cleanse, expiry, or removal of either endpoint removes both directions
+  atomically because the binding is one logical symmetric pair.
+- Soulbind does not retarget when one endpoint dies. The binding simply breaks; it does not hop to
+  a new nearby enemy.

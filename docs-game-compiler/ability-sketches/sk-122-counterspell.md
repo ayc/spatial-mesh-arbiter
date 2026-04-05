@@ -29,115 +29,68 @@ P-40 (On-Cast Intercept)
 
 ## Engine Primitives Required
 
-### Cast-State Detection
+Counterspell is already the canonical `P-40` mid-cast intercept path.
 
-For counterspell to work, the engine must expose an entity's CASTING STATE to other entities:
+The runtime contract is:
 
-```
-struct CastingState {
-    is_casting: bool,
-    ability_being_cast: AbilityId,
-    cast_start_tick: u64,
-    cast_end_tick: u64,       // When the ability would resolve
-    can_be_counterspelled: bool,   // Some abilities are uncounterspellable
-}
-```
+1. Any admitted ability with `cast_time > 0` publishes visible cast state.
+2. That cast-state record includes the public `ability_id`, scheduled completion tick, and
+   `can_be_counterspelled`.
+3. A successful `P-40` intercept marks the cast cancelled before completion effects fire.
+4. The target's already-committed resource cost is preserved and the ability remains on full
+   cooldown.
+5. If the cancelled cast owns active channel outputs, Stage 11 teardown removes them in the same
+   tick.
 
-The casting state must be visible to nearby entities (and their Edge Nodes for UI). When an entity begins casting an ability with a cast time > 0, `is_casting = true` and the casting info is populated.
+So the mechanic is not a bespoke "delete the spell" exception. It is the standard cast-state plus
+intercept contract: cancel before completion, preserve committed cost, prevent root effects from
+resolving.
 
-### Mid-Cast Ability Cancellation
-
-When counterspell hits a casting entity:
-1. Check: `target.casting_state.is_casting == true`
-2. Check: `target.casting_state.can_be_counterspelled == true`
-3. If both: CANCEL the cast
-   - Set `target.casting_state.is_casting = false`
-   - Do NOT resolve the ability (no damage, no effects, no projectile spawning)
-   - Consume the ability's resource cost (mana/resource already committed)
-   - Put the ability on full cooldown
-   - Emit "ability countered" event (for visual feedback, metrics)
-4. If the target isn't casting or ability is uncounterable: counterspell fizzles (wasted)
-
-```
-fn resolve_counterspell(caster: &Entity, target: &mut Entity) -> bool {
-    if target.casting_state.is_casting && target.casting_state.can_be_counterspelled {
-        target.casting_state.is_casting = false;
-        // Ability's resource was already deducted at cast start — leave it consumed
-        // Ability goes on cooldown as if it was cast
-        set_cooldown(target, target.casting_state.ability_being_cast, full_cooldown);
-        emit_event(AbilityCountered { target_id, ability_id });
-        return true;
-    }
-    false
-}
-```
-
-### Timing Window
-
-Counterspell can only be used during the target's cast time — the window between cast start and cast resolution. For abilities with:
-- **Long cast time (2+ seconds)**: large counter window, easy to react to
-- **Short cast time (0.5 seconds)**: small counter window, requires fast reaction
-- **Instant cast (0 seconds)**: NO counter window, cannot be countered
-
-The counterspell must HIT the target before `cast_end_tick`. If the counterspell's own travel time (if it's a projectile) means it arrives after the cast resolves, the counter fails.
-
-### Counterable Classification
-
-Not all abilities should be counterable. The compiler must tag abilities:
-- `can_be_counterspelled: true` — standard abilities with cast times
-- `can_be_counterspelled: false` — instant abilities, auto-attacks, passive procs, and specific "uncounterspellable" abilities
-
-The `can_be_counterspelled` flag is part of the ability definition in SpellData.
-
-### Reaction System (Optional)
-
-In D&D, counterspell uses your REACTION — a limited resource (one per round). In a real-time engine, this could be:
-- A separate ability with its own cooldown (simplest)
-- A "reaction" resource: one reaction per N seconds, counterspell consumes it
-- No special resource — just cooldown-gated
-
-The simplest approach: counterspell is an ability with a cooldown. No special reaction system needed.
-
-### Cast Bar Visibility
-
-For counterplay to work, the enemy's cast bar must be visible:
-- The casting entity's Arbiter includes casting state in downstream payloads
-- Edge Nodes render the cast bar for enemies in view
-- The cast bar shows which ability is being cast (so the counterspeller can decide if it's worth countering)
+Instant abilities have no cast-state window and therefore cannot be counterspelled. The reaction
+resource question is orthogonal to the compiler contract; this sketch works as an ordinary ability
+with its own cooldown.
 
 ## Cross-Boundary Concerns
 
-TODO: The caster (counterspeller) and target (casting enemy) may be on different Arbiters:
+Counterspell uses the same visible cast-state and relay model as the rest of the channel/cast
+contract.
 
-1. **Same Arbiter**: Counterspell checks the target's casting state locally. If casting → cancel. Simple.
+1. Same-Arbiter targets are checked locally against their current published cast-state entry.
+2. Remote/Ghost targets are only counterable if the counterspell reaches the authoritative owner
+   before the cast completes.
+3. If the authoritative owner receives the intercept after completion, the counter fails cleanly
+   because there is no longer an active cast to cancel.
 
-2. **Target is a Ghost**: The counterspeller's Arbiter sees the target as a Ghost. Does the Ghost carry casting state? Currently GhostUpdate has position, velocity, movement_class — no casting state.
-   - **Option A**: Add casting state to Ghost updates. Adds bandwidth but enables cross-boundary countering.
-   - **Option B**: Counterspell only works on same-Arbiter targets. Simpler but limits range.
-   - **Option C**: Counterspell relays to the target's Arbiter: "cancel if still casting." The relay might arrive after the cast resolves (latency).
-
-3. **Latency concern**: If the counterspell relay arrives AFTER the cast resolved (ability already fired), the counter fails. The target already dealt damage. This creates a timing unfairness for cross-boundary countering. For PvE (boss on same Arbiter as players), this isn't an issue.
+So cross-boundary countering is not a separate capability. It is the ordinary timing race against
+the authoritative cast completion tick.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: targeted ability, must be used during target's cast time, cancels the ability (no resolution), resource still consumed by target, target ability goes on cooldown, counterspell has its own cooldown, some abilities marked uncounterable. Compiler produces:
-- Counterspell ability definition
-- Per-ability `can_be_counterspelled: bool` flag in SpellData
-- CastingState tracking on entities (start tick, end tick, ability ID)
-- Mid-cast cancellation hook
-- Casting state in downstream payloads (for cast bar rendering)
+Designer specifies:
 
-The compiler adds casting state visibility and mid-cast cancellation as engine capabilities.
+- a targeted hostile interrupt ability
+- normal cooldown/cost for the counterspell itself
+- which abilities in the game are or are not `can_be_counterspelled`
 
-## Open Questions
+Compiler emits:
 
-- Can counterspell be counterspelled (counter the counter)?
-- Does counterspell work on channeled abilities (cancel mid-channel)?
-- If the countered ability was SK-83 empowered, is the empowerment consumed or preserved?
-- Does counterspell consume the target's SK-42 charges (charge-based ability countered)?
-- Can counterspell cancel SK-05 Global Strike's channel?
-- Does the counterspell need to deal damage to cancel, or is it a pure cancel effect?
-- Can the enemy fake a cast to bait the counterspell (start casting, cancel own cast)?
-- Does SK-51 Unstoppable prevent counterspell (the cast can't be interrupted)?
-- Can counterspell cancel SK-119 Counter Window boss attacks (counter the boss's counterable attack with counterspell instead of a counter ability)?
-- Should counterspell have a success check (D&D: roll to counter higher-level spells) or be guaranteed?
+- the counterspell ability definition
+- per-ability `can_be_counterspelled` flags on target abilities
+- the standard visible cast-state publication for non-zero cast times
+- the `P-40` intercept path that cancels the cast before completion effects fire
+
+Compiler validates:
+
+1. only abilities with `cast_time > 0` produce a counter window
+2. `can_be_counterspelled = false` cleanly opts a casted ability out of interception
+3. cancelled casts preserve already-committed cost/cooldown rather than refunding them
+
+## Resolved Interaction Notes
+
+- Counterspell cancels channels too, because active cast-state and channel lifecycle are one shared
+  contract; cancelling the cast/channel prevents future completion or tick outputs and tears down
+  maintained outputs in Stage 11.
+- Counterspell is a pure intercept effect. It does not need to deal damage to succeed.
+- Any cast with `cast_time = 0` has no counter window and cannot be counterspelled.
+- Whether a specific boss spell, empowerment, or special cast is counterable is controlled by the
+  authored `can_be_counterspelled` flag, not by sketch-local exception logic.

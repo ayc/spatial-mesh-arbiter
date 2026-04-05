@@ -29,79 +29,99 @@ P-02 (Forced Displacement) → P-34 (Persistent Linkage)
 
 ## Engine Primitives Required
 
-### Skillshot (First-Hit Line Collision)
-This is the first sketch testing a **non-targeted, non-pass-through projectile**. The tongue projectile:
-- Travels in a straight line from the caster in the cast direction
-- Checks for collision with enemy entity hitboxes along its path each tick
-- Detonates on the FIRST entity hit (not pass-through like SK-41, not targeted like SK-02)
-- If no entity is hit by max range, the projectile expires (miss)
+Drag is now a canonical first-hit projectile plus cleansable drag-debuff pattern.
 
-This is the classic "skillshot" pattern. The engine's ProjectileActor needs a collision mode:
-```
-enum ProjectileCollisionMode {
-    Targeted { target_id: EntityID },     // Homes toward target (SK-02)
-    PassThrough,                          // No entity collision (SK-39, SK-41)
-    FirstHit,                             // Detonates on first entity in path (SK-43)
-    Pierce { max_hits: u8 },              // Hits multiple entities along path
-}
-```
+The recommended lowering is:
 
-`FirstHit` uses the same raycast/capsule sweep as normal collision detection but returns only the first intersection.
+1. one tongue projectile `spawn_actor` with:
+   - authored speed / max range
+   - `detonation_policy = { entity_impact = detonate, world_impact = stop, expiry = despawn }`
+   - no homing and no pierce
+2. on the first admitted enemy impact:
+   - apply one cleansable `tongue_latch` link between caster and struck target for the drag window
+   - apply one negative `dragged` status to the target for 105 ticks
+   - use the bounded Lua helper `set_cooldown` to move the caster from the short miss cooldown to
+     the full hit cooldown
+3. `dragged` status authors:
+   - capability suppression for voluntary movement / attacks / casts
+   - `periodic_effects = {`
+     `interval_ticks = 1,`
+     `effects = [displacement(target = target, destination = caster_position, max_distance = pull_step)]`
+     `}`
+   - `duration_scaling = fixed`
+   - `is_cleansable = true`
+4. `tongue_latch` link authors:
+   - `duration_ticks = 105`
+   - `break_on_source_removed = true`
+   - `break_on_target_removed = true`
+   - optional `origin_override = { observer_anchor = true }` if the design wants the tongue visuals
+     and observer payloads anchored to the current partner pair
 
-### Pull Toward Moving Entity
-On hit, the target enters a forced-movement state where each tick:
-1. Calculate direction vector from target toward caster's CURRENT position
-2. Move target along that vector at pull speed
-3. Caster can move freely during this time — pull destination updates every tick
+This keeps Drag inside existing canonical surfaces:
 
-This is different from:
-- SK-31 Vortex (pull toward a FIXED point)
-- SK-01 Toss (one-time displacement along a predetermined arc)
-- SK-34 Charge (caster moves, carries pinned entity)
-
-In Drag, the target moves independently toward the caster — they're not pinned to the caster's position. If the caster moves away, the target follows at pull speed. If the caster moves toward the target, they close distance faster.
-
-```
-status_effect: DragLatch {
-    puller_id: EntityID,      // The caster — pull destination updates from their position
-    pull_speed: SimFixed,
-    remaining_ticks: u64,
-}
-```
-
-Each tick during the drag, the target's Arbiter must:
-1. Look up the puller's position (might be local entity or Ghost)
-2. Calculate pull vector
-3. Override the target's movement with the pull vector
+- the tongue is just a first-hit projectile
+- the reel-in is a status-owned per-tick `displacement` toward `caster_position`
+- the latch itself is a normal cleansable `link`
+- miss-versus-hit cooldown branching uses the existing bounded `set_cooldown` fallback rather than
+  inventing a dedicated dual-cooldown primitive
 
 ## Cross-Boundary Concerns
 
-TODO: The pull destination is the caster's position, which the target's Arbiter needs each tick. Scenarios:
+Drag follows the canonical target-owner pull model.
 
-1. **Both on same Arbiter:** Simple — puller's position is local.
-2. **Target on Arbiter A, caster on Arbiter B:** The target's Arbiter sees the caster as a Ghost. It pulls the target toward the Ghost's position. Ghost position updates are UDP/dead-reckoned — some position lag. The pull direction might be slightly stale.
-3. **Target is pulled across a boundary toward the caster:** Entity handoff mid-drag. The drag effect must survive the handoff. After handoff, the target is on the caster's Arbiter — now both are local.
-4. **Caster moves away across a boundary during drag:** Caster hands off to a new Arbiter. Now the caster is a Ghost from the target's perspective. Pull continues using Ghost position.
-
-The cross-boundary pull is a per-tick dependency on another entity's position — similar to SK-04 Tether's distance check but more critical (it drives movement, not just a break condition).
+1. The projectile's first-hit admission follows the ordinary hostile projectile contract. If the
+   tongue hits a Ghost/remote target, the impact payload is relayed to the target's owner before the
+   latch/status commit.
+2. Once `dragged` is active, the target's CURRENT owner runs the per-tick `displacement` locally.
+   `caster_position` resolves from the source entity's current local-or-Ghost pose, so the pull
+   destination keeps following the dragger even when the dragger is remote.
+3. If the dragged target crosses a boundary mid-reel, the `dragged` status and `tongue_latch`
+   binding survive handoff as ordinary SoftState. The new owner continues the same per-tick pull.
+4. If the dragger crosses a boundary first, the target owner keeps reading the dragger through the
+   same current local-or-Ghost partner-pose rule used by `link` break-distance and origin-anchor
+   consumers.
+5. If either endpoint is removed, the latch is cleaned up through the ordinary binding-removal
+   rules and the drag debuff expires or is cleansed independently on the target's owner.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: skillshot projectile (direction, speed, max range, FirstHit collision), on-hit effect (apply DragLatch to target), drag parameters (pull speed, duration 1.75s, target fully disabled), miss behavior (short cooldown). Compiler produces:
-- ProjectileActor with `CollisionMode::FirstHit`
-- On-hit: apply DragLatch status effect to the hit target
-- DragLatch: per-tick pull toward `puller_id`'s position + hard CC
-- Two cooldown paths: hit (full cooldown) vs miss (short cooldown)
+Designer specifies:
 
-## Open Questions
+- skillshot projectile speed / range
+- drag duration and pull step per tick
+- full cooldown on hit and short cooldown on miss
+- whether the latch is cleansable
+- whether observer payloads anchor to the latch pair
 
-- Does the drag respect static geometry — can you pull an enemy through a wall?
-- If you pull an enemy through SK-29 Blizzard, do they take damage from the zone?
-- Can the drag be cleansed by SK-15 Purify (ally cleanses the target mid-drag)?
-- Does Tenacity reduce the drag duration?
-- What happens if two Drag abilities latch the same target simultaneously?
-- If the caster is stunned during the drag, does the drag continue (target keeps being pulled)?
-- Can the dragged entity be hit by other abilities mid-drag, or are they untargetable during displacement?
-- Does the drag trigger Diminishing Returns (SK-28) as a hard CC?
-- If the tongue hits a Ghost, is the latch relayed to the Ghost's owning Arbiter? Does the drag begin on the target's Arbiter or the caster's?
-- Can the tongue hit non-hero entities (minions, summons from SK-06)?
+Compiler emits:
+
+- one first-hit projectile spawn
+- one cleansable `tongue_latch` binding on hit
+- one negative `dragged` status with per-tick `displacement(target = target, destination = caster_position)`
+- one hit-only `set_cooldown` mutation to replace the short miss cooldown with the full cooldown
+
+Compiler validates:
+
+1. the projectile uses first-hit collision semantics (`entity_impact = detonate`, no pierce)
+2. `duration_ticks > 0`
+3. `pull_step > 0`
+4. the drag movement is expressed through canonical per-tick `displacement` toward
+   `caster_position`, not through a bespoke per-ability tether physics loop
+5. the hit-only cooldown branch stays inside the bounded `set_cooldown` helper rather than a hidden
+   second public skill
+
+## Resolved Interaction Notes
+
+- The drag uses ordinary movement resolution, so blocking geometry / pathing clamps still apply. The
+  target is reeled through legal committed movement, not tunneled through walls.
+- The target remains targetable during the drag unless some other status changes that, so zones and
+  other overlapping effects such as Blizzard continue to affect it normally.
+- Purify or other ordinary cleanse effects can break the drag by removing the cleansable `dragged`
+  status and the cleansable `tongue_latch` binding.
+- This reference uses `duration_scaling = fixed`, so Tenacity / status-effect-resistance does not
+  shorten the reel-in window.
+- If the dragger is stunned after a successful latch, the reel-in still continues in this reference
+  because the target's pull loop reads `caster_position`; it does not require the dragger to keep
+  channeling or recasting.
+- The projectile may hit any entity admitted by its authored hostile filter, including minions and
+  summons if the designer leaves the targeting filter broad enough.

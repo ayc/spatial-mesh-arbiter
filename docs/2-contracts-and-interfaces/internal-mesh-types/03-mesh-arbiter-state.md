@@ -722,7 +722,12 @@ impl<G: GameAdapter> SpatialActor<G> {
 
         // 5. Hard State Trigger
         if victim.hp <= 0 {
-            self.emit_hard_state(HardEvent::PlayerDied { killer: attacker_id, victim: target_id });
+            self.emit_hard_state(HardEvent::PlayerDied {
+                killer: attacker_id,
+                victim: target_id,
+                respawn_delay_credit_ticks: 0,
+                respawn_override: None,
+            });
         }
         
         // 6. Reactive Procs (Lifesteal / Thorns)
@@ -1008,6 +1013,7 @@ struct ProjectileActor {
     arming_remaining_ticks: u32,
     pierce_remaining: u8,
     hit_exclusion_list: BTreeSet<EntityID>,
+    carried_entities: Vec<EntityID>,   // Ordered currently carried targets; the entities themselves remain authoritative state
     data_epoch: u32,
     damage_origin: DamageOrigin, // Inherited from the launch context
     proc_depth: u8,              // Propagated for deterministic proc recursion limits

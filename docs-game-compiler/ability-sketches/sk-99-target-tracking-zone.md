@@ -19,8 +19,8 @@ P-32 (Actor Spawning) → P-06 (Attached Kinematics) → P-09 (Shape Overlap Que
 
 1. Cast on enemy hero — beam locks onto them
 2. The beam follows the target's position every tick
-3. The target takes X damage per second while the beam is on them
-4. All enemies within AoE radius of the target ALSO take damage (collateral)
+3. The target takes X damage per second while the beam catches and stays on them
+4. All enemies within AoE radius of the beam's current position ALSO take damage (collateral)
 5. The beam moves at a speed slightly slower than normal movement (target can kite it)
 6. If the target moves fast enough, the beam falls behind — dealing damage at the beam's position, not the target's
 7. The beam persists for 8 seconds regardless of line of sight or distance
@@ -30,89 +30,74 @@ P-32 (Actor Spawning) → P-06 (Attached Kinematics) → P-09 (Shape Overlap Que
 
 ## Engine Primitives Required
 
-### Target-Following Zone
+Target-Tracking Zone is now a canonical `zone.mobility(mode = tracking_entity)` reference.
 
-All existing zone mobility modes:
-- **Stationary** (SK-29 Blizzard): fixed position, never moves
-- **Caster-attached** (SK-08 Aura): follows the caster's position
-- **Self-propelled** (SK-33 Shifting Sands): moves along a vector independently
-- **Target-tracking** (SK-99): follows a specific ENEMY entity's position
+The recommended lowering is:
 
-```
-struct TargetTrackingZone {
-    zone_id: EntityID,
-    tracked_entity_id: EntityID,
-    tracking_speed: SimFixed,      // Max movement speed of the zone per tick
-    aoe_radius: SimFixed,
-    damage_per_tick: SimFixed,
-    combat_context: CombatContext,  // Pre-rolled at cast time
-    expires_at_tick: u64,
-}
-```
+1. spawn one damaging zone actor with:
+   - `duration_ticks = 480`
+   - `pulse_interval_ticks` matching the desired DPS cadence
+   - `pulse_effects = [ aoe_damage(center = zone_self, shape = circle, radius = aoe_radius, ...) ]`
+   - `mobility = {`
+     `mode = tracking_entity,`
+     `target = targeted enemy,`
+     `speed = tracking_speed,`
+     `on_target_removed = dissipate`
+     `}`
+2. let the zone move toward the tracked target's current position at capped speed each tick
+3. resolve damage from the zone's committed current position, not the target's position, so the
+   target may kite the beam and cause collateral hits around the trailing zone center
 
-Each tick:
-1. Read the tracked entity's current position
-2. Calculate direction from zone's current position toward the tracked entity
-3. Move the zone toward the target at `tracking_speed` (may not reach the target if target moves fast)
-4. Spatial query: all enemies within `aoe_radius` of the zone's CURRENT position
-5. Apply damage to all results (including the tracked target if the zone caught up)
+This keeps the mechanic inside existing surfaces:
 
-### Tracking vs Locking
-
-Two design options:
-- **Locked on target (always on top):** The zone's position = target's position. No escape. This makes it a glorified DoT with collateral AoE.
-- **Tracking with speed limit (can be kited):** The zone chases the target but has a max speed. If the target runs faster than the tracking speed, the zone falls behind. The target can outrun it but the beam still deals damage at its current position.
-
-Option 2 is more interesting gameplay — the target can kite the beam and the beam's AoE damages the path, not just the target. This creates a "leaving a trail of destruction" effect as the beam chases.
-
-### Zone Position vs Target Position
-
-With speed-limited tracking, the zone has its OWN position that's distinct from the target's:
-- `zone.position` moves toward `target.position` each tick, capped by tracking_speed
-- Damage is dealt at `zone.position`, not `target.position`
-- If the target stands still, the zone catches up and stays on top of them
-- If the target runs, the zone trails behind
-
-This means the zone is effectively a self-propelled zone (like SK-33) whose velocity is recalculated each tick to aim at the target.
-
-### Target Death Handling
-
-If the tracked target dies:
-- The zone loses its tracking target
-- Options: dissipate immediately, or continue moving in the last known direction for remaining duration
-- Design choice: dissipate is simplest and prevents "orphan beam" edge cases
+- the moving beam is an ordinary spawned zone actor
+- target-following is the canonical `tracking_entity` mobility mode
+- collateral damage is ordinary zone pulse damage from the zone's current center
+- early end on target death is the canonical `on_target_removed = dissipate` rule
 
 ## Cross-Boundary Concerns
 
-TODO: The zone tracks an enemy that can cross Arbiter boundaries:
+Target-Tracking Zone uses the canonical moving-zone authority story.
 
-1. **Target on same Arbiter as zone:** Zone tracks the target's position directly. Simple.
-2. **Target crosses to different Arbiter:** Target becomes a Ghost. The zone tracks the Ghost's position (approximate, dead-reckoned). Zone stays on the original Arbiter.
-3. **Zone chasing target toward boundary:** If the zone itself crosses a boundary (following the target), it needs a handoff. The zone is an entity that moves — standard entity handoff applies.
-4. **Both cross boundary:** The zone follows the target. Both may end up on the same new Arbiter, or the zone might lag behind (on the old Arbiter) tracking a Ghost.
-
-The key question: does the zone stay on one Arbiter and track via Ghost position, or does it hand off to follow the target? For an 8-second zone, staying put and using Ghost positions is simpler. The tracking speed limit means the zone moves slowly — it might not even reach the boundary.
+1. The zone actor stays authoritative on its own current owner and samples the tracked target's
+   current local-or-Ghost position there.
+2. If the target crosses a seam first, the zone may continue tracking the Ghost and visibly lag
+   behind because `tracking_entity` uses capped-speed pursuit instead of teleporting to the target.
+3. If the zone itself crosses a seam while chasing, it hands off through the ordinary spawned-actor
+   moving-zone path and resumes tracking from the new owner.
+4. Pulse damage still resolves through the ordinary target-owner relay path for any admitted remote
+   targets caught near the zone center.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (enemy hero), tracking speed (slightly less than normal move speed), AoE radius, DPS, duration (8s), fire-and-forget (caster is free), dissipate on target death. Compiler produces:
-- TargetTrackingZone entity with tracked_entity_id
-- Per-tick tracking: move toward target's position at capped speed
-- Per-tick AoE damage at zone's current position
-- Target death hook: dissipate zone
-- CombatContext pre-rolled at cast time
+Designer specifies:
 
-The compiler adds a fourth zone mobility mode: `Tracking { target_id, speed }` alongside Stationary, CasterAttached, and SelfPropelled.
+- hostile tracked target
+- tracking speed
+- zone radius
+- pulse cadence and damage
+- lifetime
+- target-loss behavior
 
-## Open Questions
+Compiler emits:
 
-- Does the tracking zone follow the target through SK-44 Burrow (target is untargetable but has a position)?
-- If the target enters SK-91 Stasis, does the zone catch up and sit on them (they can't move)?
-- Can the tracking zone be blocked by SK-03 Terrain Wall (zone stops at the wall)?
-- Does the AoE damage hit allies of the caster who are near the target (friendly fire)?
-- Can the tracking zone be dispelled/destroyed?
-- Does the tracking zone trigger on-hit procs for the caster per tick per enemy?
-- If the target uses SK-35 Blink Strike (instant teleport), does the zone snap to the new position or smoothly track toward it?
-- Can the caster redirect the zone to a different target mid-duration?
-- Does the zone's tracking speed scale with Kinematic Dilation?
-- Performance: per-tick tracking calculation + AoE spatial query for 8 seconds — bounded?
+- one spawned zone actor
+- one canonical `ZoneMobilityBlock(mode = tracking_entity)`
+- one pulse-damage payload centered on the zone's committed current position
+
+Compiler validates:
+
+1. `speed > 0`
+2. `on_target_removed = dissipate` for this reference
+3. the mechanic uses canonical moving-zone mobility rather than a bespoke target-following actor
+
+## Resolved Interaction Notes
+
+- If the tracked target blinks or otherwise jumps ahead, the zone does not snap; it continues
+  pursuing the target's new position at the authored capped speed.
+- If the target becomes stationary or enters stasis, the zone can catch up and continue pulsing at
+  its own center.
+- The base reference assumes no friendly fire; collateral damage applies only to admitted hostile
+  occupants near the zone center.
+- Fire-and-forget means the caster is free after spawn commit; later beam motion is entirely zone
+  actor-owned.

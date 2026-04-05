@@ -177,7 +177,7 @@ CREATE TABLE identity.entity_id_pool (
 
 **Spawn Handshake** (§9.5): The 5-step protocol is fully specified:
 1. Client → Meta (auth via Edge Node)
-2. Meta resolves `last_save_zone` or defaults to `NEWBIE_ZONE`
+2. Meta resolves the current lifecycle route: normally `last_save_zone` / `NEWBIE_ZONE`, but an active bounded respawn override MAY replace that destination
 3. Meta queries Mesh Controller for target Arbiter at coordinates
 4. Meta sends `MetaCommand::SpawnEntity` to target Arbiter via Event Bus
 5. Meta replies to Edge Node with Arbiter address
@@ -187,8 +187,9 @@ The `SpawnEntity` command is defined in [Core Primitives §5](../2-contracts-and
 MetaCommand::SpawnEntity {
     entity_id: EntityID,
     character_id: UUID,
-    compiled_state: SoftState,        // Base stats, save zone coordinates
+    compiled_state: SoftState,        // Base stats and persistent spawn defaults
     compiled_offense: OffensiveStats, // Gear-compiled offensive attributes
+    respawn_context: Option<RespawnSpawnContext>,
 }
 ```
 
@@ -197,9 +198,22 @@ MetaCommand::SpawnEntity {
 - Wilderness: `logout_fuse_ticks` = 60 seconds (set on `SoftState`)
 
 **Death & Respawn** (§9.6):
-- Meta subscribes to `HardEvent::PlayerDied` → starts respawn timer
+- Meta subscribes to `HardEvent::PlayerDied` → resolves the base respawn delay from config,
+  subtracts `respawn_delay_credit_ticks` (clamped at zero), and records the ordinary save-zone
+  respawn schedule
+- If `PlayerDied.respawn_override = Some(RespawnAnchor { ... })`, Meta also records the override
+  schedule plus the anchor source/coordinates for that same death
+- Meta subscribes to `HardEvent::RespawnOverrideRevoked` → clears any matching pending override. If
+  the stored base respawn deadline is already in the past, Meta immediately executes the ordinary
+  save-zone spawn handshake; otherwise it continues waiting on the base schedule
 - Meta subscribes to `HardEvent::PlayerResurrected` → cancels timer
-- On timer expiry → executes Spawn Handshake at last save zone
+- On override expiry → executes Spawn Handshake at the override coordinates with
+  `respawn_context = Some(RespawnSpawnContext::RespawnAnchor { anchor_entity_id })`
+- The target Arbiter validates the anchor still exists, consumes it atomically, and materializes
+  the player at the anchor position. If validation fails, it emits
+  `HardEvent::RespawnOverrideRevoked` and does not spawn the player there
+- On base timer expiry (or after any override revocation) → executes Spawn Handshake at last save
+  zone
 
 **Crash Recovery** (§9.7):
 - Meta subscribes to `ArbiterCrashedEvent` → clears stale session mappings
@@ -244,7 +258,13 @@ MetaCommand::SpawnEntity {
 CREATE TABLE lifecycle.respawn_timers (
     character_id    UUID PRIMARY KEY,
     died_at         TIMESTAMPTZ NOT NULL,
-    respawn_at      TIMESTAMPTZ NOT NULL,
+    base_respawn_at TIMESTAMPTZ NOT NULL,
+    override_respawn_at TIMESTAMPTZ,
+    override_kind   TEXT,                  -- NULL for ordinary deaths, e.g. "respawn_anchor"
+    override_source_entity_id BIGINT,      -- Anchor entity ID when override_kind is present
+    override_x      BIGINT,                -- SimFixed as i64 bits; NULL when no override
+    override_y      BIGINT,
+    override_active BOOLEAN NOT NULL DEFAULT false,
     cause_event_id  UUID,                  -- Links to the HardEvent::PlayerDied
     cancelled       BOOLEAN NOT NULL DEFAULT false
 );
@@ -1464,7 +1484,7 @@ CREATE INDEX idx_inbox_character ON transactions.recovery_inbox (character_id, c
 From §9.7.4: *"Level, XP, quest progress — Updated by Meta when it consumes `HardEvent` from the Event Bus."*
 
 Events consumed:
-- `HardEvent::PlayerDied { killer, victim }` — PvP kill credit XP for the killer
+- `HardEvent::PlayerDied { killer, victim, respawn_delay_credit_ticks, respawn_override }` — PvP kill credit XP for the killer
 - `HardEvent::MonsterDied { killer, monster_type_id, participating_entities }` — PvE XP for participants
 - `HardEvent::ObjectiveCaptured { team, zone }` — objective XP for team members
 

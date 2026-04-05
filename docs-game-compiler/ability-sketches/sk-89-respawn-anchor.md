@@ -2,11 +2,15 @@
 
 ## Designer Intent
 
-I place a hidden egg at a location. When I die, instead of the normal long respawn timer (30+ seconds), I respawn at the egg's location after only 5 seconds. The egg is invisible to enemies but can be found and destroyed — if destroyed, I respawn normally. I can reposition the egg by placing a new one (old one despawns).
+I place a hidden egg at a location. If I later die while the egg still exists, my next respawn is
+routed through that egg instead of the normal long respawn flow: I come back there after 5 seconds,
+then the egg is consumed because I have "hatched." If enemies find and destroy the egg first, or
+destroy it during the 5-second rebirth window, the override is lost and I fall back to my normal
+respawn.
 
 ## Primitive Composition
 
-P-32 (Actor Spawning) → P-39 (On-Death Hook) → P-01 (Instant Translation)
+P-32 (Actor Spawning) → P-39 (On-Death Hook) → P-52 (Asymmetric Team-Rendering)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -17,103 +21,114 @@ P-32 (Actor Spawning) → P-39 (On-Death Hook) → P-01 (Instant Translation)
 
 ## Observable Behavior
 
-1. Place egg at target position — egg is hidden from enemies, visible to allies
-2. Only one egg can exist at a time (placing a new one despawns the old)
-3. When the caster dies: respawn at egg position after 5 seconds (instead of normal 30+ seconds)
-4. On respawn: egg is consumed (must place a new one)
-5. If the egg is destroyed by enemies before death: normal respawn applies
-6. Enemies can find the egg by walking near it (revealed within close proximity?)
-7. Egg has low HP (1-2 hits to destroy)
-8. Visual: small egg (allies see it clearly, enemies can't see it unless very close)
+1. Place one egg at the target position
+2. The egg is visible to self/allies and hidden from enemies until ordinary reveal/detection rules expose it
+3. The egg is stationary, low-HP, and destructible
+4. Only one egg may exist at a time; placing a new egg despawns the old one
+5. If the caster reaches terminal death while the egg still exists, the next respawn is rerouted to
+   the egg's position after 5 seconds instead of using the normal long respawn timer
+6. The egg remains vulnerable during that 5-second rebirth window
+7. If enemies destroy the egg before the respawn actually commits, the rebirth is canceled and the
+   normal respawn schedule resumes
+8. On successful respawn at the egg, the egg is consumed
+9. Respawn state is the ordinary Meta spawn state, not a corpse revive or preserved in-combat body state
 
 ## Engine Primitives Required
 
-### Death Lifecycle Override
+Respawn Anchor is now a canonical `spawn_actor` rebirth pattern.
 
-This is the first ability that **modifies the death/respawn lifecycle**. The current death flow:
-1. Entity HP reaches 0 → death declared
-2. Entity removed from Arbiter
-3. Meta Services handles respawn (timer, spawn position = last save zone)
-4. Player reconnects at respawn position
+The compiler lowers it to one `spawn_actor` effect with:
 
-With the egg:
-1. Entity HP reaches 0 → death declared
-2. Check: does this entity have an active respawn anchor?
-3. If yes: respawn at egg position with reduced timer (5 seconds)
-4. If no: normal respawn flow
+1. `count = 1`
+2. `position = target position`
+3. a static egg archetype with low HP, no movement, and authored observer/targetability policy
+4. `instance_limit = { scope = owner_by_ability, max_live = 1, overflow_policy = despawn_oldest }`
+5. `respawn_anchor = { respawn_delay_ticks = 300 }`
+6. ordinary `observer_presentation` / `targetability_policy` authoring for ally visibility and enemy discovery / destruction
 
-The death lifecycle must support a **respawn override hook** — the game adapter can intercept the death event and specify an alternate respawn position and timer.
+The egg is still an ordinary spawned actor. `respawn_anchor` does not invent a second stealth,
+revive, or container system. It only gives that actor one extra role: if its resolved `owner`
+commits terminal death while the anchor is still alive, Stage 10 may attach a bounded respawn
+override to `PlayerDied`.
 
-### Hidden Placed Entity
+## Post-Terminal Respawn Route
 
-The egg is a placed entity with stealth properties (same as SK-32 Minefield):
-- Invisible to enemies (excluded from enemy downstream payloads)
-- Visible to allies (included in ally downstream payloads)
-- Low HP (destructible)
-- Static position (doesn't move)
-- One per caster (placing a new one despawns the old)
+When the owner reaches terminal death and the egg is still alive, the runtime emits:
 
-### Respawn Position Override
+- ordinary `PlayerDied` kill credit / death signaling
+- `respawn_override = Some(RespawnAnchor { anchor_entity_id, position, respawn_delay_ticks = 300 })`
 
-When the caster dies, the spawn handshake normally uses `last_save_zone` from Meta's database. The egg overrides this:
+Meta stores both:
 
-```
-fn determine_respawn(entity: &Entity, meta: &MetaService) -> RespawnParameters {
-    if let Some(egg) = entity.active_respawn_anchor {
-        if egg.is_alive {
-            return RespawnParameters {
-                position: egg.position,
-                timer: 5_seconds,
-                consume_anchor: true,  // Egg is used up
-            };
-        }
-    }
-    // Fallback: normal respawn
-    meta.get_last_save_zone(entity.character_id)
-}
-```
+- the ordinary base respawn schedule for that death
+- the shorter anchor override schedule
 
-### Egg Persistence Across Death
+If the egg is removed before the rebirth commits, the anchor owner emits
+`RespawnOverrideRevoked { victim, source_entity_id }`. Meta clears the override and falls back to
+the stored base respawn schedule measured from the original death time.
 
-The egg entity must survive the caster's death. Normally, some effects/summons are cleaned up when their owner dies. The egg must persist:
-- Caster dies → egg still exists on the Arbiter
-- Egg is used for respawn → THEN egg is consumed
-- If the caster had SK-06 summoned minions, those die. But the egg survives.
+When the 5-second anchor schedule expires, Meta executes the normal spawn handshake at the egg's
+position and includes `respawn_context = Some(RespawnSpawnContext::RespawnAnchor { anchor_entity_id })`.
+The target Arbiter validates that the egg still exists, consumes it atomically, and materializes
+the player at the egg's authoritative position. If validation fails, the Arbiter emits the same
+revocation event and does not spawn the player there.
 
-The egg needs a **persistence flag**: "this entity survives its owner's death."
+This keeps the override revocable until the actual spawn commit, which is required because enemies
+are allowed to destroy the egg during the 5-second window.
+
+## Hidden Placement and Enemy Counterplay
+
+The egg reuses the ordinary observer/targetability surfaces.
+
+- Allies and self can see the egg normally
+- Enemies do not receive it in downstream payloads until the game's reveal/detection policy exposes it
+- Once revealed, it is just an ordinary low-HP hostile target and can be attacked normally
+
+So "hidden egg that enemies can still stumble across and destroy" is downstream observer filtering
+plus ordinary destructible-actor rules, not a bespoke hidden-entity mechanic.
 
 ## Cross-Boundary Concerns
 
-TODO: The egg is a stationary entity on one Arbiter. The caster might die on a completely different Arbiter (across the map from the egg).
+The death Arbiter and the egg Arbiter may be different.
 
-1. **Death → respawn at egg:** The caster dies on Arbiter A. The egg is on Arbiter B. The respawn must create the entity on Arbiter B (where the egg is), not on Arbiter A (where they died). This requires the spawn handshake to route to the egg's Arbiter.
-
-2. **Egg on a different Arbiter than Meta's expected spawn:** Meta normally queries the Controller for "which Arbiter owns this save zone?" For the egg, Meta must query "which Arbiter owns the egg's position?" The egg's position must be accessible to Meta (stored in the entity's persistent data? Or queried from the Arbiter?).
-
-3. **Egg destroyed cross-boundary:** If the egg is destroyed while the caster is alive on another Arbiter, the caster must be notified (so the UI updates). On death, the caster's death flow checks the egg's status — if destroyed, normal respawn.
-
-4. **Topology change:** If the egg's Arbiter splits, the egg transfers to the child that inherits its position. The respawn override must still find the egg.
+1. Stage 10 on the death Arbiter resolves whether a live rebirth anchor exists for the owner and
+   snapshots its current authoritative position / anchor ID into `PlayerDied`
+2. Meta does not query live egg state directly; it consumes the death-time snapshot plus later
+   `RespawnOverrideRevoked` events
+3. If the egg hands off because of topology changes, it remains the same authoritative live actor;
+   the override still points at that actor ID and current position
+4. Final validation happens on the target Arbiter during the respawn commit, so late destruction
+   still cancels the rebirth cleanly
 
 ## Compiler Requirements
 
-TODO: Designer specifies: place hidden egg (one at a time), egg HP, egg stealthed to enemies, on caster death → respawn at egg with reduced timer, egg consumed on use, if egg destroyed → normal respawn. Compiler produces:
-- Egg entity definition (stealth, low HP, persistence-on-owner-death flag)
-- Death lifecycle hook: check for active egg → override respawn parameters
-- Single-instance constraint: placing new egg despawns old
-- Egg consumption on respawn use
+Designer specifies:
 
-The compiler needs to support **death lifecycle hooks** — the game adapter can intercept the death event and provide custom respawn parameters.
+- target ground position
+- egg lifetime and HP
+- observer-presentation / reveal policy
+- one-at-a-time live limit
+- rebirth delay override
 
-## Open Questions
+Compiler emits:
 
-- Can the egg be placed inside structures or only on open ground?
-- Can allies see the egg's position on the minimap?
-- Can the egg be placed inside SK-60 Bunker for protection?
-- Does the 5-second respawn timer benefit from respawn reduction effects (if any)?
-- If the caster has SK-73 Death Immunity and it expires while at 1 HP, then they die — does the egg still work?
-- Can the respawn at egg be interrupted or prevented by enemies?
-- Does the caster respawn with full HP at the egg, or reduced HP?
-- Is the caster's respawn at the egg visible to enemies (they see where the egg was)?
-- If the egg is on a different Arbiter than the caster's death location, how does Meta coordinate the alternate respawn?
-- Can SK-54 Entity Consumption eat the egg (swallow the egg)?
-- Does the egg count toward entity_count for split triggers?
+- one `spawn_actor` effect with `respawn_anchor = { respawn_delay_ticks = 300 }`
+- one egg entity archetype with authored observer/targetability metadata
+- one owner-scoped live-anchor registration
+- HardEvent / Meta respawn-route metadata for the owner's next terminal death while the egg lives
+
+Compiler validates:
+
+1. `count = 1` when `respawn_anchor` is authored
+2. `respawn_delay_ticks > 0`
+3. the mechanic uses ordinary spawned-actor, observer, and targetability surfaces rather than
+   sketch-local revive flags
+
+## Resolved Interaction Notes
+
+- The 5-second timer replaces the normal respawn timer for that death only while the egg remains valid
+- The egg survives owner death, but only until it is destroyed or successfully consumed on respawn
+- Egg replacement is immediate: placing a second egg despawns the first one
+- The egg is soft-state only; disconnect/crash does not make it durable
+- If the owner first uses a pre-terminal phase such as `ghost_phase`, the rebirth anchor is checked
+  only when terminal death finally commits

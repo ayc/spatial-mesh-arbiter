@@ -28,41 +28,92 @@ P-44 (Pulse Timer) → P-09 (Shape Overlap Query) → P-35 (On-Hit Hook)
 
 ## Engine Primitives Required
 
-TODO: The contagion debuff is a **status effect with an autonomous timer and spatial query**. Unlike procs (which trigger in response to external events), contagion triggers on its own internal timer — no external damage or action is needed. The Arbiter must:
+Contagion is now a canonical status-owned spread pattern built from one hostile status application
+plus one `SpreadBlock`.
 
-1. Apply the initial debuff with metadata: `{ cast_id: UUID, generation: 0, spread_at_tick: current_tick + 120 }`
-2. Each tick: check if any contagion effect has reached its `spread_at_tick`
-3. On spread: perform spatial query for "enemies within spread radius of this carrier"
-4. Filter: exclude entities that already have a contagion debuff with the same `cast_id`
-5. Apply new contagion debuff to each result with `generation + 1`
-6. If `generation >= max_generations`: this instance doesn't spread (terminal)
+The recommended lowering is:
 
-The `cast_id` is critical — it prevents re-infection within the same chain but allows a second cast from the same or different caster to infect independently.
+1. The initial dagger hit resolves its ordinary damage and applies one hostile status
+   `contagion_status`.
+2. `contagion_status` carries:
+   - the authored DoT payload for the 4-second infection window
+   - `spread = {`
+     `delay_ticks = 120,`
+     `query_radius = ... ,`
+     `max_generations = 4,`
+     `max_targets_per_spread = ... ,`
+     `filter = enemy_alive,`
+     `apply_status_id = contagion_status,`
+     `dedup_scope = entity_once_per_chain,`
+     `allow_spread_from_corpse = false`
+     `}`
+3. Each admitted infection instance stores compiler-owned `chain_id`, current `generation`, and
+   next `spread_at_tick`.
+4. When `spread_at_tick` arrives and `generation < max_generations`, the carrier's current owner
+   performs the local spread query and applies child `contagion_status` instances as generation
+   `+1`.
 
-### Self-Sustaining Effect
-This is the first ability where a status effect **actively performs spatial queries and creates new effects on other entities** without any involvement from the caster. The effect is an autonomous agent. This has implications for:
-- Who "owns" the damage from spread infections? (The original caster, for kill credit?)
-- Which Arbiter runs the spread logic? (The carrier's Arbiter, not the caster's)
-- The CombatContext for spread damage — is it pre-rolled at cast time, or re-evaluated at each spread?
+This keeps the mechanic inside existing canonical surfaces:
+
+- the spreading logic lives in status metadata, not a bespoke autonomous actor
+- per-chain dedup is the built-in `dedup_scope = entity_once_per_chain` path
+- generation bounds are the ordinary `max_generations` cap
+- child infections inherit the original caster / credit owner instead of inventing a new local
+  source identity
 
 ## Cross-Boundary Concerns
 
-TODO: The spread query happens on the carrier's Arbiter. Nearby enemies might be Ghosts. Spreading to a Ghost requires a relay to the Ghost's owning Arbiter to apply the contagion debuff. If the contagion then spreads from that newly infected entity, THAT Arbiter runs the next spread. A single contagion chain could cascade across 3-4 Arbiters, with each generation running independently on whichever Arbiter hosts the carrier.
+Contagion follows the ordinary carrier-owner status relay model.
 
-The `cast_id` dedup must work cross-boundary — if Arbiter A spreads to a Ghost on Arbiter B, and Arbiter B's entity is also near a Ghost on Arbiter A, the `cast_id` check prevents re-infection back to Arbiter A's entities.
+1. The spread query always runs on the current authoritative owner of the infected carrier.
+2. Locally owned targets receive child status applications directly; Ghost/remote targets are
+   relayed to their authoritative owner with the same `chain_id` and incremented `generation`.
+3. The receiving owner inserts the child status locally, preserves the original caster / credit
+   owner, and schedules that child instance's own later spread from the new carrier.
+4. If an infected carrier hands off before its `spread_at_tick`, the status transfers with its
+   `chain_id`, `generation`, and next spread schedule as ordinary SoftState, so the next owner runs
+   the spread exactly once.
+5. Cross-Arbiter back-spread does not reopen prior targets because the visited-set semantics are
+   keyed by `chain_id`, not by local-owner identity.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: initial hit damage, DoT damage/duration, spread delay (2s), spread radius, max generations (4), infection dedup (per cast_id). Compiler produces: status effect definition with autonomous timer + spatial query + child effect spawning + generation tracking + dedup via cast_id. The compiler validates that spread is bounded (max generations finite) and that the spatial query is performed on the carrier's Arbiter.
+Designer specifies:
 
-## Open Questions
+- initial hit damage / delivery
+- infection DoT magnitude and duration
+- spread delay
+- spread radius
+- maximum generation count
+- bounded `max_targets_per_spread`
+- hostile filter for valid spread targets
 
-- Does the DoT damage from spread infections use the caster's original offensive stats or the carrier's stats?
-- Can contagion spread to stealthed/invisible entities?
-- Does SK-15 Purify remove contagion AND prevent re-infection (immunity window blocks re-spread)?
-- If a carrier dies, does the contagion still spread at the scheduled tick (spread from corpse position)?
-- Can contagion spread to allied entities (friendly fire variant)?
-- Does the spread respect line of sight, or does it jump through walls?
-- How does contagion interact with SK-17 Sacrifice Shield — does the DoT tick against the shield?
-- Performance: in a dense group, gen 0 → gen 1 could infect 20+ enemies, each of which does a spatial query 2 seconds later. What's the worst-case query count?
-- Can multiple contagion casts from different casters infect the same entity simultaneously (different cast_ids)?
+Compiler emits:
+
+- one initial hostile status application
+- one `StatusEffectDefinition` carrying the authored DoT plus canonical `spread`
+- compiler-owned `chain_id` / `generation` / `spread_at_tick` metadata on each status instance
+- target-owner relay payloads that preserve original caster / credit owner across child infections
+
+Compiler validates:
+
+1. `delay_ticks > 0`
+2. `query_radius > 0`
+3. `max_generations > 0`
+4. `max_targets_per_spread > 0` and remains bounded for the intended density envelope
+5. `apply_status_id` resolves to a valid status definition
+6. self-propagating spread remains finite through the authored generation cap
+
+## Resolved Interaction Notes
+
+- Spread infections keep the original caster / credit owner for kill credit and downstream source
+  identity. The carrier only hosts the query execution.
+- `SK-15 Purify` removes the current contagion instance, but `entity_once_per_chain` still prevents
+  the same chain from re-infecting that entity later.
+- Because this reference leaves `allow_spread_from_corpse = false`, dead carriers do not emit a
+  final spread from corpse position.
+- Separate casts mint separate `chain_id` values, so different contagion casts may infect the same
+  entity independently.
+- Hostility / visibility / line-of-sight behavior comes from the authored spread filter and
+  ordinary target admission. This reference uses an ordinary hostile spread query and does not add a
+  bespoke through-wall exception.

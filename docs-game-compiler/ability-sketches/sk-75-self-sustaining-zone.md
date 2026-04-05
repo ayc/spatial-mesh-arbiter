@@ -22,78 +22,79 @@ P-32 (Actor Spawning) → P-44 (Pulse Timer) → P-09 (Shape Overlap Query) → 
 3. If pulse hit at least 1 enemy: schedule next pulse in 1 second
 4. If pulse hit 0 enemies: zone ends immediately
 5. Each subsequent pulse follows the same rule: hit someone → continue, hit nobody → end
-6. No maximum duration (bounded only by enemy availability)
+6. In this reference, the zone still has a generous hard cap, but it ordinarily ends early the
+   first time a pulse finds no occupants
 7. Enemies can walk in and out — the zone only checks occupancy on pulse ticks
 8. Visual: dark maw chomping every second, fades when no targets remain
 
 ## Engine Primitives Required
 
-### Conditional Zone Lifecycle
+Self-Sustaining Zone is now a canonical `zone.pulse_effects` plus `persistence.mode =
+until_empty_on_pulse` reference.
 
-All existing zones have a fixed lifecycle:
-- SK-29 Blizzard: fixed 8-second duration
-- SK-08 Aura: permanent while caster is alive
-- SK-75 Self-Sustaining Zone: **dynamic duration determined by pulse results**
+The recommended lowering is:
 
-```
-struct SelfSustainingZone {
-    position: Vec2F,
-    radius: SimFixed,
-    pulse_interval_ticks: u64,
-    next_pulse_tick: u64,
-    damage_per_pulse: SimFixed,
-    combat_context: CombatContext,
-    // No expires_at_tick — zone has no fixed expiry
-}
-```
+1. spawn one stationary zone at the requested ground target
+2. author:
+   - `pulse_interval_ticks = 60`
+   - `pulse_effects = [aoe_damage(...)]`
+   - `persistence = { mode = until_empty_on_pulse, count_ghost_hits_as_occupants = true }`
+   - a generous authored `duration_ticks` hard cap
+3. let the zone end early whenever a pulse finds no admitted occupants
 
-Each pulse:
-1. Spatial query: enemies within radius
-2. If `hit_count > 0`: apply damage to all, set `next_pulse_tick = current_tick + interval`
-3. If `hit_count == 0`: despawn zone
+This keeps the mechanic inside the canonical zone surface:
 
-The zone has no `expires_at_tick` — it's purely event-driven. It ends when it fails to find targets.
-
-### Unbounded Duration Concern
-
-Without a fixed duration, the zone could persist indefinitely. This creates concerns:
-- Entity count: the zone is an actor occupying entity map space permanently
-- Memory: the zone's state persists as long as enemies keep entering
-- Gameplay: an unattended zone in a high-traffic area could last the entire game
-
-Should the compiler enforce a maximum duration as a safety bound? Or is the "pulse misses → end" rule sufficient?
-
-### Pulse Timing vs Enter/Leave
-
-The zone doesn't use enter/leave detection (unlike SK-29 Blizzard or SK-64 Mosh Pit). It only checks occupancy on pulse ticks — every 1 second. An enemy who enters between pulses takes no damage until the next pulse. An enemy who leaves between pulses avoids the next hit.
-
-This means the zone's effectiveness depends on the TIMING of enemy movement relative to pulse ticks, not continuous presence.
+- the zone still pulses on a fixed cadence
+- the occupant check happens on pulse cadence, not continuously
+- occupancy on a pulse keeps the zone alive for the next pulse
+- `duration_ticks` remains a hard safety cap, as required by the current zone contract
 
 ## Cross-Boundary Concerns
 
-TODO: Standard zone cross-boundary pattern. The zone is stationary on one Arbiter. Enemies in the zone that are Ghosts receive damage relays. The only unique concern: the zone's lifecycle depends on hit count. If all local enemies are Ghosts, the "hit count" includes Ghost hits — the zone owner's Arbiter determines "I hit N Ghosts" and keeps the zone alive, even though the actual damage resolution happens on the Ghosts' Arbiters.
+Self-Sustaining Zone follows the canonical stationary-zone authority model.
 
-Is a Ghost hit counted as a "hit" for sustain purposes? If yes, the zone persists. If the Ghost has since died or moved (stale Ghost data), the zone persists based on stale information. The zone might live one extra pulse beyond its usefulness.
+1. The zone actor stays on one Arbiter and performs its pulse query there.
+2. Remote/Ghost occupants are handled through the ordinary local-query / target-owner damage relay
+   path.
+3. `count_ghost_hits_as_occupants = true` means the zone owner counts admitted Ghost occupants when
+   deciding whether the zone persists to the next pulse.
+4. If Ghost data is slightly stale, the zone may persist one extra pulse, which is already the
+   canonical tradeoff exposed by `ZonePersistenceBlock`.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: zone shape (circle), radius, pulse interval (1s), damage per pulse, sustain condition (hit_count > 0 → continue, hit_count == 0 → end), no fixed duration. Compiler produces:
-- ZoneActor with conditional lifecycle (no fixed expiry)
-- Per-pulse hit count check → continue or despawn
-- Optional maximum duration safety bound (compiler-enforced)
-- Standard AoE damage resolution per pulse
+Designer specifies:
 
-The compiler needs to support **conditional zone lifecycle** — zones whose persistence depends on runtime conditions, not just timers.
+- zone radius
+- pulse interval
+- pulse damage
+- hard-cap duration
+- whether Ghost occupants count for sustain
+- whether source death ends the zone early
 
-## Open Questions
+Compiler emits:
 
-- Should there be a maximum duration cap (e.g., 60 seconds) for safety?
-- Does the zone count Ghosts as "hits" for sustain purposes?
-- If only one enemy is in the zone and they have SK-44 Burrow (untargetable), does the pulse hit zero and end the zone?
-- Does each pulse independently roll crit for each enemy hit?
-- Does the zone persist if it only hits SK-17 shields (damage absorbed but not "dealing HP damage")?
-- Can the zone's damage trigger on-hit procs for the caster per-pulse per-enemy?
-- If the caster dies, does the zone persist (it has no expiry — caster death is the only external termination)?
-- Does Kinematic Dilation affect the pulse interval?
-- Performance: an indefinite zone doing spatial queries every second — bounded by pulse interval but unbounded in total queries over time
-- Can multiple self-sustaining zones from the same caster overlap?
+- one stationary zone actor
+- one pulse damage payload
+- one `ZonePersistenceBlock(mode = until_empty_on_pulse, ...)`
+
+Compiler validates:
+
+1. `duration_ticks > 0`
+2. `pulse_interval_ticks > 0`
+3. `until_empty_on_pulse` is only used on a pulsing zone, per the canonical validation rule
+4. the sustain mechanic is expressed through `ZonePersistenceBlock`, not through a bespoke
+   zone-owned script loop
+
+## Resolved Interaction Notes
+
+- This reference is not truly unbounded forever. The canonical zone contract still requires an
+  authored hard cap even when the zone usually ends early on an empty pulse.
+- Untargetable or filtered-out entities do not count as occupants for sustain because they are not
+  admitted by the pulse query.
+- Shield absorption still counts as a successful occupied pulse in this reference because the sustain
+  test is occupancy/admission based, not "did someone lose HP" based.
+- If the designer does not set `end_on_source_removed`, the zone persists independently of the
+  caster until it empties or hits its hard cap.
+- Kinematic Dilation does not change the authored pulse cadence. The zone pulses every 60
+  simulation ticks in this reference.

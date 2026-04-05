@@ -31,85 +31,73 @@ P-43 (Charge-Up State) → P-32 (Actor Spawning)
 
 ## Engine Primitives Required
 
-### Hold-to-Charge Input Model
+Charge-Up Shot is now a canonical `input_mode = hold_release` reference.
 
-All existing abilities use discrete input: press button → ability fires. Charge-Up introduces **continuous input with a duration component**:
+The recommended lowering is:
 
-```
-enum AbilityInputMode {
-    Instant,              // Press → fire (all existing abilities)
-    HoldRelease {         // Hold → charge → release → fire (SK-79)
-        max_charge_ticks: u64,
-        min_charge_ticks: u64,   // Minimum hold before firing
-    },
-}
-```
+1. author the public ability with:
+   - `input_mode = {`
+     `type = hold_release,`
+     `min_charge_ticks = 0,`
+     `max_charge_ticks = 120,`
+     `move_speed_multiplier_while_holding = 0.5,`
+     `blocks_other_abilities = true,`
+     `retains_max_charge_until_release = true`
+     `}`
+2. let release fire one ordinary projectile using the authoritative held duration clamped into
+   `[min_charge_ticks, max_charge_ticks]`
+3. scale projectile damage / range from that authoritative charge duration through ordinary fixed-
+   point authored formulas
 
-The Edge Node must:
-1. Detect button-down event → start charging
-2. Track hold duration in ticks
-3. Detect button-up event → send "fire with charge_ticks=N" proposal
-4. The proposal carries the charge duration, not just "cast ability"
+This keeps the mechanic inside the canonical input-mode surface:
 
-The Arbiter validates:
-1. Was the entity in a valid charging state? (Not CC'd, not dead)
-2. Is the charge_ticks value within bounds?
-3. Calculate damage/range from charge_ticks using the ability's scaling formula
-
-### Charge State on Entity
-
-While charging, the entity is in a special state:
-
-```
-struct ChargeState {
-    ability_id: AbilityId,
-    charge_start_tick: u64,
-    max_charge_ticks: u64,
-}
-```
-
-This state:
-- Restricts movement to 50% speed (movement modifier while charging)
-- Blocks other ability usage (can't cast while charging)
-- Can be interrupted by CC (stun cancels the charge, nothing fires)
-- Is visible to enemies (the entity is "winding up")
-
-### Scaling Formula
-
-The ability's damage and range are functions of charge duration:
-```
-let charge_pct = clamp(charge_ticks / max_charge_ticks, 0.0, 1.0);
-let damage = min_damage + (max_damage - min_damage) * charge_pct;
-let range = min_range + (max_range - min_range) * charge_pct;
-```
-
-This must be deterministic (fixed-point) and the formula must be compiled into the ability definition.
+- charge start still begins from the ordinary discrete cast intent
+- release is derived from the continuous held-button state, not a new external intent type
+- the owner stamps the authoritative hold start tick and clamps the final duration
+- movement slowdown and ability lockout are already part of the compiled hold-release contract
 
 ## Cross-Boundary Concerns
 
-TODO: Minimal cross-boundary concerns. The charge state is local to the caster's Arbiter. The fire event (on release) produces a standard projectile. The charge duration is determined client-side (Edge Node) and sent in the proposal — the Arbiter validates it.
+Charge-Up Shot is caster-owner authoritative.
 
-The only concern: if the caster crosses a boundary mid-charge, the charge state must transfer with the handoff. The new Arbiter continues the charge from the transferred state.
+1. The owner records the authoritative hold start tick and current hold state.
+2. If the caster hands off mid-charge, that hold state transfers as ordinary SoftState and the new
+   owner continues the same charge window.
+3. On release, the projectile is just an ordinary spawned hostile shot. Any later cross-boundary
+   target resolution is the normal projectile story, not a special charge-up relay.
+4. Edge prediction may animate the charge bar locally, but the final damage/range always derive
+   from the authoritative held duration on the current owner.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: input mode (hold-release), max charge time (2s), min charge time (0s or 0.25s), damage scaling (min → max over charge), range scaling (min → max over charge), movement speed while charging (50%), blocks other abilities while charging, interruptible by CC. Compiler produces:
-- Ability definition with `InputMode::HoldRelease`
-- Charge state definition (start_tick, max_ticks)
-- Scaling formula (charge_pct → damage, range)
-- Movement speed modifier during charge
-- CC interrupt hook (cancel charge on stun/silence)
+Designer specifies:
 
-The compiler needs to support a new input model alongside Instant, which affects the Edge Node's input handling and the Arbiter's proposal validation.
+- min / max charge ticks
+- movement speed while holding
+- whether other abilities are blocked while holding
+- min / max damage
+- min / max range
 
-## Open Questions
+Compiler emits:
 
-- Can the charge be canceled voluntarily without firing (press escape)?
-- Does the charge persist through SK-51 Unstoppable (you become unstoppable while charging)?
-- If CC'd mid-charge, is the cooldown fully consumed or partially refunded?
-- Can SK-12 Spell Echo trigger on a charged shot — does the echo fire at the same charge level?
-- Does the charge bar progress account for Kinematic Dilation (slower charging in dilated zones)?
-- Can the entity auto-attack while charging (some games allow this)?
-- Is the charge visible to enemies (telegraphing the incoming shot)?
-- How does the Edge Node predict the charge state for client-side rendering?
-- Does the charged projectile gain any special properties beyond damage/range (e.g., pierce at max charge)?
+- one public ability using canonical `input_mode = hold_release`
+- one projectile payload whose damage / range scale from authoritative charge duration
+
+Compiler validates:
+
+1. `max_charge_ticks > 0`
+2. `min_charge_ticks <= max_charge_ticks`
+3. the charge behavior is authored through canonical `hold_release`, not through a separate
+   "start charging" / "release shot" public ability pair
+4. all scaling remains deterministic fixed-point math
+
+## Resolved Interaction Notes
+
+- Holding beyond max charge does not overcharge in this reference; the held duration clamps at the
+  authored maximum and remains there until release.
+- CC that cancels the cast window ends the held state and no projectile fires.
+- The latest accepted aim state at release time determines the final shot direction.
+- Kinematic Dilation does not change the authored charge window itself. The hold duration is measured
+  in simulation ticks, just like other time-based ability windows.
+- Replay or echo mechanics that repeat the final shot use the already-resolved release payload; they
+  do not reopen the hold window.

@@ -20,7 +20,7 @@ P-33 (Entity Dormancy) → P-27 (Targetability Overrides) → P-13 (Tag/Allegian
 1. Cast at target position — visible indicator appears (0.5s delay before activation)
 2. After delay: ALL entities in the area enter stasis (friend AND foe, including the caster if inside)
 3. Stasis: can't act, invulnerable, untargetable — effectively frozen in time
-4. Duration: 5 seconds (not reduced by Tenacity — it's stasis, not CC?)
+4. Duration: 5 seconds (fixed; not reduced by Tenacity / status resistance)
 5. When stasis ends: all affected entities resume exactly where they were
 6. Entities OUTSIDE the area when it activates are NOT affected (snapshot at activation)
 7. Entities cannot enter the stasis zone after activation (it's a one-time effect, not a persistent zone)
@@ -29,100 +29,76 @@ P-33 (Entity Dormancy) → P-27 (Targetability Overrides) → P-13 (Tag/Allegian
 
 ## Engine Primitives Required
 
-### Team-Agnostic Targeting
+Team-Agnostic Stasis is now a canonical `SuspensionBlock(mode = stasis)` reference.
 
-Every existing AoE has a targeting filter:
-- `target_filter: Enemies` (SK-29 Blizzard, SK-08 Aura)
-- `target_filter: Allies` (SK-16 Holy Ground, SK-20 Battle Cry)
+The recommended lowering is:
 
-Team-Agnostic Stasis introduces:
-- `target_filter: All` — hits EVERY entity regardless of team affiliation
+1. resolve the delayed area as one snapshot query after the 0.5s warning window
+2. use `filter = all_alive` for that activation-time query so allies, enemies, and the caster are
+   all admitted if they are inside
+3. apply one negative uncleansable stasis status to every admitted entity with:
+   - `suspension = {`
+     `mode = stasis,`
+     `invulnerable = true,`
+     `pause_status_timers = true,`
+     `pause_ability_cooldowns = true,`
+     `interrupt_active_casts = true,`
+     `interrupt_active_channels = true`
+     `}`
+   - targetability / collision overrides that make the target untargetable and non-blocking while
+     the stasis is active
+   - `is_cleansable = false`
+4. let the canonical stasis expiry-shift rule resume timers when the status ends
 
-```
-enum TargetFilter {
-    Enemies,
-    Allies,
-    AlliesExcludingSelf,
-    Self,
-    All,            // NEW: all entities, both teams
-}
-```
+This keeps the mechanic inside existing compiler surfaces:
 
-The spatial query returns all entities in the area, with no team filtering. The effect is applied to everyone.
-
-### Stasis as a Distinct State
-
-Stasis is stronger than any existing CC:
-- Not just stunned (stun still allows taking damage)
-- Not just invulnerable (invulnerable can still be CC'd in some cases)
-- Not just untargetable (untargetable can still have effects applied by area)
-
-Stasis is the combination of: **can't act + invulnerable + untargetable + all timers paused**.
-
-```
-status_effect: StasisDebuff {
-    expires_at_tick: u64,
-    uncleansable: bool,   // Cannot be removed by SK-15 Purify
-}
-```
-
-While in stasis:
-- `can_move = false, can_attack = false, can_cast = false`
-- `is_invulnerable = true`
-- `is_untargetable = true`
-- All status effect timers are PAUSED (DoTs don't tick, buffs don't expire, cooldowns don't reduce)
-- All active channels are interrupted on stasis entry
-
-### Timer Pausing
-
-The most unique aspect of stasis: **time stops for the entity**. All counters, timers, and duration-based effects freeze:
-- SK-02 Poison DoT: paused (doesn't tick during stasis, resumes after)
-- SK-73 Death Immunity: paused (4-second window doesn't count down)
-- SK-46 Adaptation: paused (damage accumulation window frozen)
-- SK-88 Positional Leash: paused (duration doesn't tick)
-- Ability cooldowns: paused (cooldowns don't reduce during stasis)
-
-This requires the engine to support **per-entity time freeze** — all tick-based timers on the entity stop advancing. When stasis ends, they resume from where they were.
-
-Implementation: rather than actually pausing every timer, the engine could track `stasis_start_tick` and on stasis end, add `stasis_duration` to all timer expiry ticks. This shifts all timers forward by the stasis duration.
-
-### Friendly Fire Implication
-
-The caster's allies can be caught. This means:
-- Team coordination matters (don't stand in the void prison area)
-- The caster can accidentally stasis their own team (misplay)
-- The caster can intentionally stasis allies to protect them (save a low-HP ally by freezing them)
-
-This dual-use (offensive + defensive depending on who's caught) is the strategic depth.
+- team-agnostic targeting is the canonical `all_alive` filter
+- full time-stop behavior is the canonical `stasis` suspension mode
+- untargetability and non-interaction are ordinary targetability overlays on the same status
 
 ## Cross-Boundary Concerns
 
-TODO: The stasis is a snapshot AoE at activation. All entities in the area at the activation tick are affected — local entities and Ghosts. For Ghosts, the stasis must be relayed to the Ghost's owning Arbiter.
+Team-Agnostic Stasis is snapshot-at-activation and target-owner authoritative.
 
-Concern: an ally Ghost is caught in the stasis. The relay reaches the ally's Arbiter and applies stasis. The ally's Arbiter must pause all their timers. Meanwhile, the ally's allies might try to interact with the stasis'd entity — they can't (untargetable).
-
-Timer pausing across boundaries: the stasis'd entity's Arbiter manages the timer pause locally. No special cross-boundary handling needed beyond the initial stasis application relay.
+1. The area owner's Arbiter runs the delayed activation query using current local and Ghost poses at
+   the activation tick.
+2. Any admitted remote/Ghost entity is relayed to its current owner, which admits the stasis status
+   locally and pauses that entity's timers there.
+3. Later movement into or out of the area is irrelevant because this reference is not a persistent
+   zone; it is one delayed snapshot application.
+4. Once admitted, all targeting, AoE admission, and timer-pause behavior are handled entirely on
+   the stasis target's owner. No cross-boundary special case exists beyond the initial relay.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: ground-targeted AoE, delay (0.5s), target filter (ALL — both teams), stasis effect (can't act + invulnerable + untargetable + timers paused), duration (5s), not cleansable, snapshot (one-time check at activation). Compiler produces:
-- Delayed snapshot AoE with `TargetFilter::All`
-- StasisDebuff status effect with timer-pause semantics
-- Uncleansable flag (cannot be removed by SK-15 Purify or any dispel)
-- Timer shift on stasis end (resume all paused timers)
-- Channel interrupt on stasis entry
+Designer specifies:
 
-The compiler adds `All` to the TargetFilter enum and adds Stasis as a distinct state type with timer-pause semantics.
+- ground-target position
+- warning delay
+- radius
+- duration
+- snapshot filter of `all_alive`
+- uncleansable stasis behavior
 
-## Open Questions
+Compiler emits:
 
-- Does the caster's own stasis apply if they're in the area? (Yes — consistent with "All" targeting)
-- Can SK-51 Unstoppable prevent stasis entry? (Design choice — stasis might be "unstoppable-proof" given its power level)
-- Does timer pausing affect SK-37 Time Rewind's rolling buffer (buffer stops recording during stasis)?
-- Do effects applied DURING the stasis delay (0.5s warning) persist into stasis?
-- Can entities at the edge of the area dodge out during the 0.5s delay?
-- If an entity has SK-71 Sticky Bomb and enters stasis, is the bomb timer paused too?
-- Does stasis prevent SK-54 Entity Consumption (can't consume a stasis'd entity)?
-- If the stasis area overlaps an Arbiter boundary, do entities on both sides get frozen?
-- Performance: pausing all timers for N entities simultaneously — is this a batch operation or per-entity?
-- Can stasis be used on objectives/structures (freeze a capture point)?
+- one delayed snapshot area query using `all_alive`
+- one negative status with canonical `suspension.mode = stasis`
+- one targetability / collision overlay that makes affected entities untargetable and non-blocking
+
+Compiler validates:
+
+1. the one-time capture is authored as a delayed snapshot effect, not a persistent zone
+2. `is_cleansable = false` for this reference
+3. timer pausing uses canonical `stasis` suspension flags rather than a bespoke per-timer script
+
+## Resolved Interaction Notes
+
+- The caster is affected too if they are still inside when the delay ends; this is a true
+  team-agnostic snapshot.
+- Entities may dodge out during the warning window because admission happens only at the activation
+  tick.
+- Stasis pauses attached status timers and ability cooldowns through the canonical expiry-shift
+  rule; it does not require one-off logic for every affected mechanic.
+- Unstoppable / Super Armor do not create a special exception here. Any immunity interaction must be
+  authored through the same canonical status-admission rules used elsewhere.

@@ -2,110 +2,133 @@
 
 ## Designer Intent
 
-I create a temporary clone of an allied hero. The clone has all of the original hero's abilities (at reduced stats — 75% damage, 75% HP). I control the clone for 20 seconds. When the clone expires or dies, I return to my body. The clone cannot use heroic (ultimate) abilities.
+I create a temporary clone of an allied hero. The clone spawns near me, I control it for 20
+seconds, it uses a reduced snapshot of the ally's loadout, and when the clone expires or dies my
+original body returns at the clone's final position. The original ally continues playing
+independently the whole time.
 
 ## Primitive Composition
 
-P-32 (Actor Spawning) → P-31 (Identity/Loadout Swap)
+P-32 (Actor Spawning) → P-31 (Identity/Loadout Swap) → P-29 (Control Authority Swap)
 
 *See `ability-primitives/` for canonical definitions.*
 
 ## Inputs
 
 - Caster entity
-- Target ally entity (must be in range)
+- Target ally entity in range
+- Clone lifetime
+- Loadout/stat scaling multipliers
+- Ability exclusions for the projected loadout
+- Restore position / HP policy for the caster's stored body
 
 ## Observable Behavior
 
-1. Cast on ally — a clone of the targeted ally spawns at the caster's position
-2. The caster's body disappears (stored, like SK-54 Entity Consumption on self)
-3. The player controls the clone as if it were their own hero
-4. Clone has 75% of the original hero's max HP and offensive stats
-5. Clone has all of the original hero's basic abilities (Q, W, E) but NOT their ultimate (R)
-6. Clone abilities use the clone's reduced stats
-7. After 20 seconds: clone despawns, caster's body reappears at the clone's position
-8. If clone dies: caster's body reappears at the clone's death position
-9. The original hero is NOT affected — they keep their abilities and continue playing normally
-10. Visual: ghostly/translucent version of the cloned hero
+1. Cast on an ally and spawn a clone shell at the caster's position
+2. The original ally is unaffected and keeps acting normally
+3. The caster's original body is suspended while control transfers to the clone
+4. The clone uses the target ally's current public loadout snapshot, but with reduced stats and HP
+5. The clone omits the authored excluded abilities, such as the ultimate
+6. The player controls the clone directly for up to 20 seconds
+7. If the clone expires or is destroyed, the caster's stored body is restored at the clone's
+   current or last position
+8. Visual: a ghostly or translucent copy of the ally hero
 
 ## Engine Primitives Required
 
-### Ability Set Copying
+Entity Clone is now the canonical spawned-shell projection pattern built from `loadout_projection`
+plus `control_projection`. It does not require a bespoke runtime "copy hero" subsystem.
 
-The clone needs the target ally's ability definitions loaded into a new entity. The engine must:
-1. Read the target's current ability set from SpellData
-2. Create a new entity with those ability definitions (minus ultimate)
-3. Apply stat reduction (75% multiplier on all offensive/defensive stats)
-4. The clone's abilities reference the SAME SpellData entries as the original
+### Canonical Clone Shape
 
-This is different from SK-57 Form Transformation (switching the CASTER's abilities to a predefined alternate set). Here, the ability set is copied from ANOTHER entity at runtime — the caster doesn't know in advance what abilities the clone will have.
+The recommended lowering is one `spawn_actor` using a shell archetype plus two ability-local spawn
+overlays:
 
-### Dynamic Entity Creation From Template
+- `loadout_projection = {`
+  `source = { entity_current_loadout: target },`
+  `max_hp_multiplier = 0.75,`
+  `stat_multiplier = 0.75,`
+  `excluded_abilities = [ally_ultimate]`
+  `}`
+- `control_projection = {`
+  `controller = caster,`
+  `owner_body_policy = suspend_owner,`
+  `control_scope = full,`
+  `on_actor_removed = restore_owner,`
+  `on_expire = restore_owner,`
+  `restore_position = projected_actor_position,`
+  `restore_hp_policy = preserve_stored_owner`
+  `}`
 
-The clone is a new entity whose properties are derived from another entity AT RUNTIME:
+The clone is therefore:
 
-```
-struct CloneEntity {
-    clone_id: EntityID,
-    source_entity_id: EntityID,
-    controller_entity_id: EntityID,  // The caster who controls the clone
-    stat_multiplier: SimFixed,       // 0.75 for 75% stats
-    excluded_abilities: Vec<AbilityId>,  // Ultimate excluded
-    expires_at_tick: u64,
-    controller_body_state: SoftStateSerialized,  // Stored for restoration
-}
-```
+1. one ordinary spawned actor
+2. initialized once from the target ally's EFFECTIVE current loadout/passive/appearance snapshot
+3. controlled by the caster through the existing Stage 1 routing contract
+4. restored back to the caster's stored body through the explicit `restore_owner` policy
 
-The Arbiter must:
-1. Read the source entity's OffensiveStats and DefensiveStats
-2. Apply the multiplier to create scaled copies
-3. Read the source entity's ability set, exclude ultimates
-4. Create the clone entity with these derived properties
-5. Remap the caster's Edge Node to control the clone
+### Snapshot Semantics
 
-### Edge Node Control Transfer
+`loadout_projection` snapshots the ally once at spawn commit. The projection does NOT live-update
+after the clone appears. If the original ally later changes gear, form, buffs, or temporary state,
+the already-spawned clone keeps the snapshot it was created with.
 
-The caster's Edge Node must switch from controlling their original entity to controlling the clone. This is similar to SK-61 Spirit Split's control swap, but:
-- The clone has a DIFFERENT ability set than the caster's original
-- The Edge Node needs to update its UI to reflect the cloned hero's abilities
-- On clone death/expiry, control returns to the original entity
+### Reduced-Stat Clone Policy
 
-### Original Hero Independence
+For this sketch:
 
-The cloned hero continues playing normally — their entity is not affected. The clone is a COPY, not a transfer. Both the original hero and the clone can exist simultaneously, potentially using the same abilities.
+- max HP is scaled by `0.75`
+- effective combat stats are scaled by `0.75`
+- the clone uses its own scaled snapshot, not the source ally's later live stats
+- ultimate/heroic abilities are excluded through `excluded_abilities`
 
 ## Cross-Boundary Concerns
 
-TODO: The caster might clone an ally on a different Arbiter:
+Entity Clone follows the canonical source-snapshot and control-projection contracts.
 
-1. **Clone creation:** Caster on Arbiter A, ally on Arbiter B. Caster needs to read the ally's stats and ability set. If the ally is a Ghost, the Ghost doesn't carry ability/stat data. Arbiter A must request the ally's profile from Arbiter B.
-
-2. **Clone entity location:** The clone spawns at the caster's position (Arbiter A). The clone's ability set is derived from the ally on Arbiter B. But the clone lives and is controlled on Arbiter A.
-
-3. **Data epoch consideration:** The clone's abilities reference SpellData entries. If the ally's abilities were compiled under the current data epoch, the clone uses the same epoch. SK-07 Ability Steal's epoch questions apply here too.
-
-4. **On expiry:** The caster's body reappears at the clone's position. If the clone walked cross-boundary, the caster materializes on a different Arbiter than where they started.
+1. If the cloned ally is remote, the ally's owner captures the immutable projected loadout snapshot
+   at spawn commit and relays it to the caster's Arbiter before the clone spawns
+2. The clone always spawns where the caster is, so the live clone actor begins under the caster's
+   current owner even if the copied ally is elsewhere
+3. Control transfer is a normal single-actor `control_projection` overlay; if the clone later hands
+   off, steering/control hand off with it through the existing `P-29` routing rules
+4. If the clone expires or is destroyed on another Arbiter, `restore_owner` uses the clone's
+   current or last authoritative position there and restores the caster body at that location
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (ally), clone duration (20s), stat multiplier (0.75), ability copying (all except ultimate), caster body stored during clone, control transfer to clone, on-expiry/death restore caster body at clone position. Compiler produces:
-- Clone creation action: read source entity stats/abilities → create scaled entity
-- Ability set copying (runtime, not compile-time — the caster can clone different heroes each game)
-- Edge Node control transfer
-- Caster body serialization/storage (like SK-54 self-consumption)
-- Restoration on clone death/expiry
+Designer specifies:
 
-The compiler can define the FRAMEWORK for cloning (stat multiplier, excluded abilities, duration), but the actual abilities are resolved at runtime based on who is cloned.
+- ally target filter and cast range
+- clone duration
+- shell archetype / clone presentation
+- projected loadout source
+- HP/stat multipliers
+- excluded abilities
+- owner-body suspend / restore policy
 
-## Open Questions
+Compiler emits:
 
-- If the original hero changes equipment/stats while the clone is active, does the clone update?
-- Can the clone use items/consumables?
-- Do the clone's abilities trigger the caster's on-hit procs or the original hero's?
-- Can the clone be cloned by another Entity Clone user (clone of a clone)?
-- Does the clone inherit the original hero's current buffs/debuffs?
-- Can the clone use SK-57 Form Transformation (transform within a clone)?
-- If the clone kills an enemy, who gets kill credit — the caster or the original hero?
-- Does the clone count toward entity_count for split triggers?
-- Can the clone enter SK-60 Bunker?
-- How does the ability set copy interact with SK-42 Withering Fire's charge state — does the clone get fresh charges?
+- one spawned shell actor
+- one `loadout_projection` snapshot from `{ entity_current_loadout: target }`
+- one `control_projection` from caster to the shell
+- ordinary restore-owner behavior on expiry or actor removal
+
+Compiler validates:
+
+1. `count = 1` because both `loadout_projection` and `control_projection` are authored
+2. `max_hp_multiplier > 0`
+3. `stat_multiplier > 0`
+4. every `excluded_abilities` entry names a valid public ability from the projected source space
+5. `owner_body_policy = suspend_owner` is used whenever expiry/removal should restore the caster
+
+## Resolved Notes
+
+- The original ally is copied, not replaced. Their body, loadout, and control routing are not
+  modified by the clone cast
+- The clone does not inherit the ally's live buffs/debuffs or other runtime status state unless a
+  separate canonical surface is authored for that on top of the projected shell
+- Cooldowns, charges, and other runtime combat state are not live-linked back to the source ally;
+  the clone uses the state of the spawned projected shell
+- Kill credit, proc attribution, and ownership follow the clone actor's ownership, which in this
+  sketch remains with the caster-side spawned shell

@@ -28,80 +28,70 @@ P-32 (Actor Spawning) → P-45 (Delay Timer) → P-05 (Historical State Buffer) 
 
 ## Engine Primitives Required
 
-### Hostile Positional Bookmark
+Temporal Trap is now a canonical hostile bookmark plus delayed `restore_from_state` reference.
 
-SK-37 Time Rewind stores the CASTER's own position for self-use. SK-84 stores the TARGET's position for hostile use:
+The recommended lowering is:
 
-```
-status_effect: TemporalTrapDebuff {
-    stored_position: Vec2F,
-    stored_arbiter_id: u32,
-    stored_topology_epoch: u32,
-    activates_at_tick: u64,
-    caster_id: EntityID,  // For CC attribution and Tenacity/DR
-}
-```
+1. on cast, write the target's current position into one `bookmark(position)` runtime state with
+   topology-epoch capture enabled
+2. apply one negative `temporal_trap` status to the target for 180 ticks
+3. that status authors:
+   - `cc_category = displacement`
+   - optional countdown/marker presentation
+   - `on_expire_effects = [restore_from_state(target = target, state_id = temporal_trap_bookmark, apply_position = true, position_validation = nearest_walkable)]`
 
-On expiry (3 seconds later):
-1. Read `stored_position`
-2. Snap the target to `stored_position` (instant teleport, like SK-35)
-3. Remove the debuff
+This keeps the mechanic inside existing canonical surfaces:
 
-### Forced Teleport as CC
+- the stored location is a normal runtime bookmark
+- the delay is just the status duration / expiry hook
+- the return snap is ordinary `restore_from_state` / `P-01` relocation using the current topology
 
-The teleport is a form of forced displacement — the target is moved against their will. This means:
-- SK-51 Unstoppable should prevent it (CC immunity blocks forced displacement)
-- Tenacity could reduce the "severity" — but teleport is binary (you go or you don't). Should Tenacity reduce the countdown timer instead?
-- DR (SK-28) applies — categorized as displacement CC
-
-### Stale Position Handling
-
-The stored position was valid 3 seconds ago. By the time the teleport fires:
-- The stored position might now be inside SK-03 Terrain Wall (wall placed since storage)
-- The stored position might be on a different Arbiter (topology changed)
-- The stored position might be inside SK-29 Blizzard (zone placed since storage)
-
-On teleport, the engine must validate the stored position:
-1. Is it still walkable? If not, find nearest valid position.
-2. Which Arbiter owns it? Might differ from when it was stored.
-3. Teleport the entity there (instant cross-boundary handoff if needed).
-
-### Countdown Visibility
-
-The enemy (and their allies) can see:
-- The countdown timer (3, 2, 1...)
-- The stored position marker (where they'll be pulled back to)
-
-This is a downstream payload to the target's Edge Node: "you have TemporalTrap, stored position is here, countdown is N ticks." The client renders the marker and countdown.
+The hostile delayed return is therefore a negative displacement-class status, not a bespoke timer
+subsystem.
 
 ## Cross-Boundary Concerns
 
-TODO: The stored position is an absolute world coordinate. In 3 seconds, the target may have moved far:
+Temporal Trap follows the canonical absolute-bookmark relocation rule.
 
-1. **Target moved within same Arbiter:** Simple snap back to stored position (local).
-2. **Target crossed a boundary:** Target is now on Arbiter B but stored position is in Arbiter A's region. The teleport requires an instant handoff from B to A.
-3. **Topology changed:** The Arbiter that owned the stored position 3 seconds ago may no longer exist (split/merged). The engine must resolve the current owner of the stored position using the Controller's R-Tree.
-4. **Stored position absorbed by different Arbiter after crash:** The stored position's region was absorbed by a neighbor. The snap targets the absorbing Arbiter.
-
-The stored `topology_epoch` helps detect staleness — if it differs from the current epoch, re-query the owner.
+1. `bookmark(position)` stores absolute world coordinates plus topology epoch when authored.
+2. When the delayed `restore_from_state` fires, the target's CURRENT owner resolves the stored
+   coordinate under the CURRENT topology.
+3. If the stored point is now in another Arbiter's region, the snap follows the ordinary
+   destination-based teleport / handoff rule.
+4. `position_validation = nearest_walkable` gives the canonical answer when later geometry makes the
+   exact stored coordinate invalid.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (enemy), store target's current position, countdown (3s), on-expiry force teleport to stored position, Unstoppable blocks it, Tenacity reduces countdown(?), visible countdown to target, no damage. Compiler produces:
-- TemporalTrapDebuff status effect with stored position + countdown
-- On-expiry hook: validate stored position → instant teleport
-- CC classification: forced displacement category
-- Downstream payload: countdown + position marker for client rendering
-- Stale position validation on teleport
+Designer specifies:
 
-## Open Questions
+- target range
+- delay duration
+- whether the debuff is cleansable
+- countdown / marker presentation
 
-- Can the debuff be cleansed by SK-15 Purify (preventing the teleport)?
-- Does Tenacity reduce the countdown timer or is the teleport binary (happens or doesn't)?
-- If the target enters SK-44 Burrow (invulnerable) when the countdown expires, does the teleport happen?
-- If the target is inside SK-54 Entity Consumption (consumed) when the countdown expires, what happens?
-- Can the caster place the trap on an ally (friendly use — save an ally by pulling them back to safety)?
-- Does the teleport trigger SK-32 Minefield at the stored position?
-- If the stored position is now inside SK-31 Vortex, does the target get pulled into the vortex?
-- Can the target use SK-35 Blink Strike to escape the teleport (does it cancel the debuff)?
-- Does the teleport count as "displacement" for SK-25 Root interaction (root prevents displacement)?
+Compiler emits:
+
+- one `bookmark(position)` runtime state
+- one hostile `write_state` on cast
+- one negative delayed-return status
+- one expiry `restore_from_state` snap
+
+Compiler validates:
+
+1. the referenced runtime state exists and is `bookmark(position)`
+2. the delayed return is expressed through a negative status plus `restore_from_state`, not a
+   bespoke hostile teleport timer
+3. the snap uses one canonical `position_validation` rule
+
+## Resolved Interaction Notes
+
+- This reference is cleansable: removing the negative status before expiry prevents the delayed
+  return because the expiry hook never fires.
+- Because the delayed return lives on a negative displacement-class status, displacement-category
+  status-immunity effects can block the trap at admission time.
+- The countdown is not shortened by status resistance in this reference unless the designer opts
+  into that by authoring the status with `duration_scaling = status_resistance`.
+- The delayed snap itself deals no damage. It is ordinary hostile repositioning only.
+- If the target later teleports or crosses multiple Arbiters before expiry, the stored absolute
+  bookmark remains the same; only the current owner/topology used to execute the return changes.

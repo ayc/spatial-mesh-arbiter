@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I shout, granting all allies within radius +20% attack speed and +15% movement speed for 8 seconds. The buff is applied at cast time — allies who enter the radius later do not receive it.
+I shout, granting all allies within radius +20% attack speed and +15% movement speed for 8
+seconds. The buff is applied at cast time; allies who enter the radius later do not receive it.
 
 ## Primitive Composition
 
@@ -17,34 +18,82 @@ P-09 (Shape Overlap Query) → P-16 (Stat Layering)
 
 ## Observable Behavior
 
-1. Cast — spatial query for all allies within radius at this instant
-2. Each ally in range receives +20% attack speed buff (8 seconds)
-3. Each ally in range receives +15% movement speed buff (8 seconds)
-4. Allies who move out of range keep the buff for its full duration
-5. Allies who enter range after the cast do NOT receive the buff
-6. The caster also receives the buff
-7. Buff has independent expiry per recipient (all expire 8 seconds after application)
-8. Visual: war cry animation, speed lines on buffed allies
+1. Cast performs one snapshot ally query around the caster at that instant.
+2. Every admitted ally, including the caster, receives an 8-second positive speed buff.
+3. That buff grants +20% attack speed and +15% movement speed.
+4. Allies who move out of range keep the buff for its full remaining duration.
+5. Allies who enter range after the cast do not receive anything from this cast.
+6. Each recipient tracks its own ordinary buff timer locally after application.
+7. Visual: war cry animation plus speed-line buff FX on affected allies.
 
 ## Engine Primitives Required
 
-TODO: Single spatial query at cast time for "allies within radius." Apply buff to each result. Unlike SK-08 Aura (continuous) or SK-16 Holy Ground (zone with enter/leave), this is a snapshot — query once, apply, done. The buff is a stat modifier on each target's SoftState (attack speed multiplier, movement speed multiplier). How are multiplicative buffs evaluated — applied to base stats? Stacked multiplicatively with other buffs? Additive within category?
+Battle Cry is now a canonical self-centered snapshot ally-buff reference.
+
+The recommended lowering is:
+
+1. resolve one instant circle query centered on the caster's committed position at cast commit
+2. filter that query to allied living entities for this reference
+3. apply one positive `battle_cry_buff` status to every admitted recipient
+4. define that status with:
+   - `duration_ticks = 480`
+   - `polarity = positive`
+   - `stat_modifiers = [`
+     `{ stat_id = attack_speed, operation = add_percent, value = 0.20 },`
+     `{ stat_id = movement_speed, operation = add_percent, value = 0.15 }`
+     `]`
+
+This keeps the mechanic inside existing compiler surfaces:
+
+- the AoE part is one ordinary snapshot `P-09` query, not a persistent zone
+- the buff payload is one ordinary positive `apply_buff`
+- the speed bonuses use canonical `P-16` stat layering through `stat_modifiers`
 
 ## Cross-Boundary Concerns
 
-TODO: Allies near the Arbiter boundary who are Ghosts — can they receive the buff? The caster's Arbiter does the spatial query and finds Ghost allies. It needs to relay "apply buff" to each Ghost's owning Arbiter. Multiple relays fan out simultaneously. If 20 allies are in range and 8 are Ghosts across 3 Arbiters, that's 8 cross-boundary buff application messages.
+Battle Cry is snapshot-at-cast and target-owner authoritative after admission.
+
+1. The caster's current owner performs the snapshot ally query using current local and Ghost poses
+   at the cast tick.
+2. Any admitted remote/Ghost ally receives the ordinary target-owner relay for positive status
+   application.
+3. Once the buff is applied, each recipient's current owner advances and eventually expires that
+   status locally like any other buff.
+4. Later movement relative to the caster is irrelevant because the mechanic is not a persistent
+   aura or zone.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target filter (allies), radius, buff effects (+20% attack speed, +15% movement speed), duration (8s), snapshot (not continuous). Compiler produces: spatial query definition + buff application payload + expiry timer. The compiler needs to distinguish "snapshot AoE" from "persistent zone" (SK-08/SK-16).
+Designer specifies:
 
-## Open Questions
+- the self-centered ally radius
+- buff duration
+- the attack-speed and movement-speed bonuses
+- whether the caster is included in the admitted recipient set
 
-- Does the buff stack with itself if two supports both cast Battle Cry?
-- Is there a buff cap (e.g., max +60% attack speed from all sources)?
-- How are percentage-based buffs evaluated — additive with other percentage buffs, or multiplicative?
-- Does the buff persist through death and revival (SK-18)?
-- Can enemies dispel the buff from affected allies?
-- Does Kinematic Dilation affect the buff duration (dilated = buff lasts longer in real time but same in game ticks)?
-- How does the 8-second expiry interact with status effect evaluation order per tick?
-- Performance: if cast in a 200-player zerg, the spatial query + 200 buff applications + N cross-boundary relays — is this bounded?
+Compiler emits:
+
+- one snapshot circle query centered on the caster
+- one positive `StatusEffectDefinition` carrying the two `stat_modifiers`
+- one `apply_buff` payload for every admitted ally recipient
+
+Compiler validates:
+
+1. query radius is positive
+2. buff duration is positive
+3. the generated status is `positive`
+4. the mechanic stays a one-time snapshot query rather than a persistent aura/zone
+
+## Resolved Interaction Notes
+
+- Later entrants do not gain the buff because the query runs only once at cast commit.
+- Recipients who leave the radius keep the buff because it is an ordinary positive status on the
+  target, not a distance-maintained tether or zone membership.
+- Multiple Battle Cry casts follow the same ordinary `StatusEffectDefinition.max_stacks` and
+  `P-16` layering rules as any other positive status. This sketch does not introduce bespoke
+  stack-capping logic.
+- Buff duration is in simulation ticks, so Kinematic Dilation does not create a second real-time
+  expiration clock.
+- Whether the buff survives death, can be dispelled, or is capped with other haste effects is
+  governed by the broader status/death rules the game authors elsewhere, not by a special Battle
+  Cry exception.

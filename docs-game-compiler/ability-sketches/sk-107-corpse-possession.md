@@ -29,118 +29,94 @@ P-47 (Spatial Corpse Registry) → P-31 (Identity/Loadout Swap) → P-45 (Delay 
 
 ## Engine Primitives Required
 
-### Dead Entity Data Persistence
+Corpse Possession is now a canonical local corpse-snapshot transformation. It does not require a new
+"dead entity persistence phase" beyond the existing corpse profile.
 
-Currently, when an entity dies, its data (abilities, stats, items) is lost — the entity is removed from the Arbiter. For Corpse Possession to work, the dead entity's data must persist for a window after death:
+### Canonical Corpse Requirements
 
-```
-struct CorpseData {
-    entity_id: EntityID,
-    character_id: UUID,
-    death_position: Vec2F,
-    death_tick: u64,
-    ability_set: AbilitySetId,        // Which abilities the dead entity had
-    offensive_stats: OffensiveStats,   // Their stats at time of death
-    defensive_stats: DefensiveStats,
-    items: Vec<ItemInstance>,          // Their equipment (affects stats)
-    corpse_ttl_tick: u64,             // How long the corpse is available
-}
-```
+The possessed target's entity type must already define:
 
-The Arbiter must retain `CorpseData` after entity removal. This is a new retention requirement — dead entities leave behind a data snapshot that can be accessed by gameplay abilities.
+- `corpse_profile.persist_ticks >= 480`
+- `corpse_profile.retain_loadout_snapshot = true`
+- `corpse_profile.retain_effective_stats = true`
 
-### Ability Set Loading From Corpse
+That yields a local corpse-registry record containing:
 
-When the caster possesses the corpse:
-1. Read the corpse's `ability_set`
-2. Load those ability definitions from SpellData
-3. Replace the caster's current ability set with the corpse's
-4. Replace the caster's stats with the corpse's offensive/defensive stats
-5. Store the caster's original state for restoration
+- death position
+- retained projected loadout / appearance snapshot
+- retained effective-stat snapshot
 
-This is like SK-67 Entity Clone (copy abilities from another entity) but:
-- Source is DEAD (not living)
-- Source is an ENEMY (not an ally)
-- The caster BECOMES the source (model swap, not new entity creation)
-- Items are included (SK-67 doesn't consider items)
+The possession cast then uses:
+
+- `swap_identity(target = caster, source = { corpse_snapshot: target }, duration_ticks = 600, hp_policy = set_to_new_max, cooldown_policy = reset_new_slots, excluded_abilities = [corpse_ultimate])`
+
+This means the caster keeps the same `entity_id`, team allegiance, and authority ownership, but
+temporarily adopts the corpse snapshot's loadout, appearance, and retained effective combat profile.
 
 ### Body Storage and Restoration
 
-Like SK-54 Entity Consumption (self-consumption) and SK-57 Form Transformation:
-1. Serialize the caster's original state (SoftState, stats, ability set, position, HP)
-2. Store it on the entity
-3. Apply the corpse's data
-4. On revert: restore original state
+`swap_identity` already stores the caster's original form and restores it on expiry or explicit
+break. For this sketch:
 
-```
-struct PossessionState {
-    original_soft_state: SoftStateSerialized,
-    original_offensive: OffensiveStats,
-    original_defensive: DefensiveStats,
-    original_ability_set: AbilitySetId,
-    original_hp: SimFixed,
-    corpse_source_id: EntityID,
-    expires_at_tick: u64,
-}
-```
+- expiry after 10 seconds restores the original form at the caster's current position
+- same-key reactivation explicitly breaks the possession early and restores the original form at the
+  current position
+- lethal damage during possession is modeled as a possession-break path, not true death of the
+  caster: the possession form ends, the caster reverts, and a brief positive untargetable status is
+  applied on return
 
-### Model/Visual Swap
+### Items, Stats, and Appearance
 
-The caster's entity visually becomes the dead enemy. The downstream payload must send the corpse's model/appearance data to all Edge Nodes. This is like SK-86 Decoy's per-team visual deception but applied to the caster's own entity — everyone sees the caster as the dead enemy.
-
-Unlike SK-86 (enemies see a fake, allies see the real thing), possession makes the caster look like the enemy to EVERYONE. Allies might need a subtle indicator to distinguish (similar to SK-86's ally indicator).
-
-### Item/Stat Integration
-
-The corpse's items affect their stats. If the game has an item system, the possessed form uses the dead enemy's items:
-- Their weapon (determines auto-attack damage)
-- Their armor (determines defensive stats)
-- Their unique item effects (passives, on-hit effects from items)
-
-This means the Arbiter must be able to load another entity's item set and resolve abilities using those items' stats.
+This sketch does not treat the corpse's items as transferred inventory objects. Instead, the
+corpse's retained loadout / passive / effective-stat snapshots carry the gameplay consequences of
+those items into the temporary possessed form. Everyone sees the caster as the possessed corpse
+appearance while the swap is active, with any ally-only marker handled through ordinary observer
+presentation if the game wants one.
 
 ## Cross-Boundary Concerns
 
-TODO: The corpse data might be on a different Arbiter than the caster:
+Corpse Possession follows the current canonical corpse rule: corpse access is local to the corpse's
+authoritative Arbiter.
 
-1. **Enemy dies on caster's Arbiter:** CorpseData is local. Possession is straightforward.
-2. **Enemy dies on a different Arbiter (Ghost dies):** The corpse data is on the enemy's Arbiter, not the caster's. The caster needs to access remote corpse data. Options:
-   - The death event includes corpse data broadcast to nearby Arbiters (large payload)
-   - The caster's Arbiter requests corpse data from the dead entity's Arbiter
-   - Possession is only available for entities that died on the caster's Arbiter
-
-3. **During possession, crossing boundaries:** The caster (in possessed form) moves normally. Handoff transfers the current entity state (possessed stats/abilities, stored original state). On the new Arbiter, the entity continues in possessed form.
-
-4. **Revert on different Arbiter:** If the caster moved cross-boundary during possession, they revert on the new Arbiter. The original body materializes at the current position, not the corpse position.
+1. The cast succeeds only when the targeted corpse record exists on the CURRENT Arbiter.
+2. Remote or Ghost-backed corpse possession is not supported in the current profile; the cast fails
+   cleanly rather than requesting remote corpse data.
+3. Once possession begins, the caster is still one ordinary live entity. Crossing boundaries during
+   possession is just normal entity handoff carrying the active identity-swap state.
+4. Expiry or reactivation revert happens on the caster's current authoritative owner and restores the
+   original form at the current position, not at the corpse's death position.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: interact with dead enemy corpse (within range, within 8s of death), become the dead enemy (model, abilities minus ultimate, stats, items), duration (10s), revert on expiry/reactivation/death, original state stored and restored, start at full HP in possessed form. Compiler produces:
-- CorpseData retention after entity death (new data lifecycle)
-- Corpse interaction definition (proximity, timer, team filter)
-- Ability set + stat loading from CorpseData
-- Body storage (serialize original state)
-- Restoration on expiry/reactivation/death
-- Model swap for downstream payloads
+Designer specifies:
 
-The compiler needs to support **dead entity data access** — a new capability where abilities can read a dead entity's stats, abilities, and items.
+- enemy corpse target filter and range
+- possession duration
+- which corpse-bearing entity types retain loadout/effective-stat snapshots
+- excluded corpse abilities such as the ultimate
+- revert behavior on expiry, reactivation, and possession-break
 
-### docs-core/ Impact
+Compiler emits:
 
-This may require a `docs-core/` change:
-- Entity lifecycle must support a "corpse data retention" phase between death and full removal
-- The durability bridge must define how long corpse data persists and what it contains
+- a corpse-targeted cast using ordinary corpse-registry admission
+- one `swap_identity` using `source = { corpse_snapshot: target }`
+- ordinary stored-form restore on expiry or explicit break
+- an optional short untargetable positive status applied after possession-break revert
 
-## Open Questions
+Compiler validates:
 
-- Does the possessed form use the caster's level or the dead enemy's level?
-- Does the possessed form have the dead enemy's cooldowns (fresh) or their pre-death cooldowns?
-- Can the caster possess the same corpse twice (if the ability comes off cooldown before the corpse despawns)?
-- Can the caster's allies heal the possessed form? Is the possessed form on the caster's team or the enemy's team?
-- Do on-hit procs from the dead enemy's items work during possession?
-- If the dead enemy had SK-46 Adaptation active at death, does the possessed form inherit it?
-- Can the possessed form use SK-69 Portal Pair (team affiliation question)?
-- Does the corpse data include the dead enemy's current buffs/debuffs at death?
-- If the caster has SK-08 Aura, does the aura persist during possession (caster's passive, not the corpse's)?
-- Can multiple casters attempt to possess the same corpse? First-come-first-served?
-- How does the corpse data interact with the data_epoch — corpse's abilities use the epoch active at their death?
+1. the target corpse's source entity type defines `corpse_profile.retain_loadout_snapshot = true`
+2. retained effective-stat usage requires `corpse_profile.retain_effective_stats = true`
+3. corpse possession targets only the CURRENT Arbiter's corpse registry
+4. excluded corpse abilities are valid public abilities in the retained corpse loadout snapshot
+
+## Resolved Notes
+
+- The possessed form keeps the caster's team/allegiance. Only appearance, loadout, and effective
+  stat profile change.
+- The possessed form starts at the new form's max HP via `hp_policy = set_to_new_max`.
+- Cooldowns for the temporary corpse-derived loadout are reset through `cooldown_policy = reset_new_slots`.
+- Current corpse buffs/debuffs are not inherited unless they were explicitly baked into the retained
+  snapshot surfaces. Ordinary live status state does not carry through corpse possession by default.
+- Corpse access is first-come-first-served through the local corpse-registry claim/admission rules;
+  a consumed or expired corpse cannot be possessed again.

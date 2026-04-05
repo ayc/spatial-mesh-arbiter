@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I activate my ultimate ability to transform into a powerful alternate form for 15 seconds. While transformed, my stats change (bonus HP, bonus damage, bonus armor), my abilities are replaced with a different set, and my model/appearance changes. When the duration expires, I revert to my original form with my original abilities.
+I transform into a stronger alternate form for a limited time. My ability bar and appearance
+change, and I gain a timed stat package for the duration, then revert automatically.
 
 ## Primitive Composition
 
@@ -13,111 +14,85 @@ P-31 (Identity/Loadout Swap) → P-16 (Stat Layering)
 ## Inputs
 
 - Caster entity
-- No target (self-only)
+- Self-cast only
 
 ## Observable Behavior
 
-1. Activate — caster transforms (instant or brief animation)
-2. Stats change: gain bonus max HP (and current HP increases proportionally), bonus damage, bonus armor
-3. Ability bar changes: 3-4 abilities are replaced with alternate-form abilities
-4. Basic attack may change (different damage, range, speed)
-5. Existing buffs/debuffs persist through transformation
-6. After 15 seconds: revert to original form, original stats, original abilities
-7. If bonus HP exceeded original max HP: current HP is capped at original max HP on revert (no over-heal)
-8. Cooldown begins after revert
-9. Visual: dramatic transformation animation, different model, visual revert
+1. Activate to enter the alternate form immediately.
+2. The entity keeps the same `entity_id`, position, and Arbiter ownership; only loadout/profile and
+   timed stats change.
+3. The alternate form uses a different loadout/profile, including any alternate basic attack or
+   alternate-form abilities.
+4. A simultaneous timed positive status grants the bonus max HP, damage, armor, and other stat
+   modifiers for the form duration.
+5. Existing buffs/debuffs persist through the transformation in this reference.
+6. The transform preserves current HP ratio on entry.
+7. When the duration ends, the entity reverts automatically to the original loadout/profile and the
+   stat-bonus status expires.
+8. As the max-HP bonus falls off on revert, current HP is naturally capped by ordinary max-HP
+   recomputation.
+9. In this reference, the cooldown begins on activation, not after revert.
 
 ## Engine Primitives Required
 
-### Stat Block Swap
+The clean canonical model is profile swap plus a timed buff overlay.
 
-The entity's OffensiveStats and DefensiveStats change during transformation. This could be implemented as:
+1. The entity definition provides one named alternate `loadout_profile`.
+2. Activation applies `swap_identity(target = caster, source = { self_profile: alternate_form },
+   duration_ticks = 900, hp_policy = preserve_ratio, cooldown_policy = store_and_restore)`.
+3. The same activation also applies one positive status carrying the alternate form's stat
+   modifiers for the same duration.
+4. When `swap_identity` expires, the runtime restores the original loadout/profile automatically.
+5. When the stat-bonus status expires, the entity loses the alternate-form stat package through the
+   ordinary status-expiry path.
 
-**Option A: Stat overlay** — Apply a "transformation buff" that modifies stats additively/multiplicatively:
-```
-status_effect: TransformationBuff {
-    bonus_max_hp: SimFixed,
-    bonus_damage_pct: SimFixed,
-    bonus_armor: SimFixed,
-    duration_ticks: u64,
-}
-```
-Simple, works with existing buff system. But doesn't support ability replacement.
+This keeps the form swap compositional:
 
-**Option B: Full stat block replacement** — Swap the entity's OffensiveStats/DefensiveStats to a pre-compiled alternate set:
-```
-status_effect: FormTransformation {
-    original_offensive: OffensiveStats,    // Stored for revert
-    original_defensive: DefensiveStats,
-    alternate_offensive: OffensiveStats,   // Loaded from SpellData
-    alternate_defensive: DefensiveStats,
-    original_ability_set: AbilitySetId,    // Stored for revert
-    alternate_ability_set: AbilitySetId,   // Loaded from SpellData
-    expires_at_tick: u64,
-}
-```
-More complex but supports full ability replacement.
-
-### Ability Set Swapping
-
-The entity's available abilities change during transformation. This means:
-1. The `validate_intent` hook must reference the CURRENT ability set (original or alternate)
-2. Abilities from the wrong set must be rejected
-3. Cooldowns for the alternate set are independent (don't share with original abilities)
-4. On revert: original ability set is restored with its own cooldown state
-
-The SpellData dictionary needs to contain BOTH ability sets for the entity. The transformation switches which set the adapter hooks reference.
-
-### HP Scaling on Transform/Revert
-
-On transformation:
-- Max HP increases (e.g., 4000 → 6000)
-- Current HP scales proportionally (if at 50% before, still at 50% after = 3000 HP)
-
-On revert:
-- Max HP decreases (6000 → 4000)
-- Current HP is capped at new max (if at 5000 during transform, reverts to 4000)
-- Or: scale proportionally again (if at 83% during transform = 5000/6000, revert to 83% = 3333/4000)
-
-The HP scaling formula must be explicit and deterministic.
-
-### Death-Triggered Variant
-
-Mekkatorque-style: when the entity's main form reaches 0 HP, instead of dying, they transform into a weaker form. This is Form Transformation triggered by a death event instead of an activation:
-- On 0 HP: don't die, instead transform to pilot form (lower stats, different abilities)
-- Pilot form has its own HP pool
-- If pilot form reaches 0 HP: actually die
-- Can earn a new mech to return to mech form
-
-This requires the death resolution pipeline to check "does this entity have a death-transformation effect?" before confirming the kill.
+- `swap_identity` handles loadout/profile/appearance routing
+- the timed status handles bonus stats
+- ordinary status persistence means existing unrelated buffs/debuffs remain unless the game authors
+  a separate cleanse on transform
 
 ## Cross-Boundary Concerns
 
-TODO: The transformation is local to the entity's Arbiter. The entity's stats change, which affects:
-1. Ghost representation — neighbors see the transformed model/stats? Or just position/velocity?
-2. If the entity is in combat cross-boundary, the CombatContext carries the CURRENT (transformed) offensive stats. After revert, new combat uses original stats. No special handling needed.
-3. If the entity crosses a boundary while transformed, the transformation state (alternate stats, ability set, remaining duration) transfers with the handoff.
+Transformation stays entirely on the transforming entity's authority:
+
+1. The entity's current owner applies `swap_identity` and the timed stat status locally.
+2. If the entity crosses an Arbiter boundary while transformed, the remaining duration plus the
+   transformed loadout/profile state transfer with the entity through ordinary handoff.
+3. Future combat uses whatever transformed offensive/defensive state is current at the moment each
+   attack resolves. There is no special cross-boundary exception for transformed combat.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: two full stat blocks (original form, alternate form), two ability sets (original, alternate), transformation trigger (activation or death), duration, HP scaling formula, revert behavior. Compiler produces:
-- Two complete entity profiles in SpellData (one per form)
-- FormTransformation status effect that stores/restores the original profile
-- Ability set routing in `validate_intent` and subsequent stage execution
-- HP scaling logic on transform and revert
-- Optional death-trigger variant (intercept death → transform instead)
+Designer specifies:
 
-The compiler needs to support **entity profiles** — named stat/ability configurations that can be swapped at runtime. Each profile is a complete set of OffensiveStats, DefensiveStats, and ability definitions.
+- alternate loadout/profile ID
+- transform duration
+- alternate-form stat modifiers
+- entry HP policy (`preserve_ratio` in this reference)
 
-## Open Questions
+Compiler emits:
 
-- Can the transformation be cleansed/purged (forced revert to original form)?
-- Do cooldowns transfer between forms (if alternate ability 1 is on cooldown, does it affect original ability 1)?
-- Can the entity transform while CC'd (stunned in original form → activate transform)?
-- Does transformation break CC (self-cleanse on transform, like SK-51 Unstoppable on activation)?
-- Does the transformation interact with SK-07 Ability Steal — can someone steal an alternate-form ability?
-- If the entity has SK-08 Aura in original form but not in alternate form, does the aura stop during transformation?
-- How does the death-triggered variant interact with SK-18 Resurrect — if the mech dies and you eject as pilot, can someone resurrect the mech?
-- Can an entity have more than two forms (triple transformation)?
-- Does the transformation's stat change affect existing buffs that reference stats (e.g., a buff that gives +10% of max HP as shield — recalculated on transform)?
-- Performance: swapping stat blocks + ability sets mid-tick — is this bounded? Does it require recompilation?
+- one named alternate `loadout_profile` in the entity definition
+- one `swap_identity` activation using `{ self_profile: alternate_form }`
+- one positive timed stat-buff status for the same duration
+
+Compiler validates:
+
+1. the referenced `self_profile` exists on the entity definition
+2. `duration_ticks > 0`
+3. any stat-bonus status used for the form is `positive`
+4. the transform does not change ownership or create a second body
+
+## Resolved Interaction Notes
+
+- Alternate-form cooldowns are separate from the original form according to
+  `cooldown_policy = store_and_restore`.
+- The reference version does not self-cleanse on transform. If a game wants that behavior, it
+  should author it explicitly as a separate cleanse or immunity effect.
+- The death-triggered "eject into a weaker form instead of dying" variant is not part of this
+  closed reference. That is a separate death-intercept design, not a requirement of the basic
+  timed transform contract.
+- Because the transform uses a named self profile, ability-steal or loadout-snapshot mechanics read
+  whichever profile is currently active at the time they snapshot/copy it.

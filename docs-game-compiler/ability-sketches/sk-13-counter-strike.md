@@ -2,48 +2,102 @@
 
 ## Designer Intent
 
-When I successfully block a melee attack, I automatically perform a counter-attack against the attacker, dealing 80% of my weapon damage. The counter-attack is instant and cannot be blocked or evaded by the attacker.
+When I successfully block a melee attack, I automatically riposte against the attacker, dealing
+80% of my weapon damage. The riposte is a guaranteed retaliatory hit in the sense that it does not
+open a second miss/block gate on the attacker.
 
 ## Primitive Composition
 
-P-12 (Facing/Dot-Product Check) → P-38 (On-Block/Defend Hook)
+P-12 (Facing/Dot-Product Check) -> P-38 (On-Block/Defend Hook)
 
 *See `ability-primitives/` for canonical definitions.*
 
 ## Inputs
 
-- Triggering block event (on-block proc)
-- The attacker entity
-- Blocker's offensive stats
+- triggering block event (`on_block`)
+- the attacker entity from the block context
+- blocker's offensive stats / weapon scaling snapshot
 
 ## Observable Behavior
 
-1. Enemy melee attack lands on me
-2. Block check succeeds during Phase 2 (defense resolution) — attack is blocked
-3. Immediately: counter-attack fires back at the attacker dealing 80% weapon damage
-4. Counter-attack bypasses the attacker's block and evasion (guaranteed hit)
-5. Counter-attack can crit (using blocker's crit chance)
-6. Counter-attack can trigger on-hit procs (e.g., SK-09 Chain Lightning)
-7. Visual: parry animation followed by an instant riposte
+1. An incoming melee/front-guard attack is successfully blocked.
+2. The block emits a retaliatory riposte targeting that same attacker.
+3. The riposte deals 80% weapon-scaled damage using the blocker's current offensive stats.
+4. The riposte does not open a second attacker-side evasion/block admission pass.
+5. The riposte may crit for damage using the blocker's ordinary crit logic.
+6. The target still gets normal later mitigation such as shields, resistances, and DR.
+7. Visual presentation may render a parry followed by a near-immediate riposte.
 
 ## Engine Primitives Required
 
-TODO: The block event fires during Phase 2 (defense resolution) on the DEFENDER's Arbiter. The counter-attack is an offensive action using the DEFENDER's offensive stats targeting the ATTACKER. This reverses the normal flow — damage came in from the attacker's Arbiter, now a new attack goes back. Does the counter-attack go through the full two-phase pipeline (Phase 1 on defender's Arbiter, Phase 2 on attacker's Arbiter)? Or is it a shortcut since we already know the attacker?
+Counter-Strike is the canonical `on_block` riposte reference.
+
+The recommended lowering is:
+
+1. one passive `on_block` trigger owned by the blocker
+2. that trigger emits one reactive retaliatory damage packet with:
+   - `target = target`, where the `on_block` trigger context resolves `target` to the triggering
+     attacker
+   - weapon/offense scaling equal to 80% of the blocker's normal weapon profile
+   - the ordinary crit rule still enabled
+3. the riposte is treated as a committed retaliatory hit from `P-38`, not as a fresh player-aimed
+   melee swing
+
+This keeps the mechanic inside existing surfaces:
+
+- block admission is still handled by the canonical defender-side block gate
+- the riposte is ordinary hostile damage sourced from blocker offense
+- no second player intent, cursor aim, or fresh target-acquisition query is introduced
+- "cannot be blocked or evaded" is modeled by not reopening a second miss/block gate for the
+  already identified attacker, not by bypassing later mitigation
 
 ## Cross-Boundary Concerns
 
-TODO: In the standard two-phase combat pipeline, the attacker's Arbiter runs Phase 1 and relays CombatContext to the defender's Arbiter for Phase 2. The counter-attack reverses this — the defender's Arbiter now runs Phase 1 (offense) and needs to relay back to the attacker's Arbiter for Phase 2 (defense). This creates a round-trip: Arbiter A → Arbiter B → Arbiter B generates counter → Arbiter B → Arbiter A. Two cross-boundary relays for a single exchange.
+Counter-Strike follows the ordinary reverse-relay story for reactive retaliatory damage.
+
+1. The original block succeeds on the defender's current owner during Stage 7 and emits `P-38`
+   during Stage 9.
+2. Because `P-38` is a reactive PostDamage hook, the riposte is queued for the NEXT tick rather
+   than resolving inline.
+3. If the attacker is remote/Ghost, the defender's owner relays the retaliatory prepared-hit packet
+   back to the attacker's owner with ordinary source/target identity plus `reactive_depth = 1`.
+4. The attacker's owner resolves the riposte locally through the ordinary later mitigation path.
+   No second target-acquisition query is needed because the blocked-event context already supplied
+   the attacker entity.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trigger (on-block), damage (80% weapon), guaranteed hit (bypass block/evasion), can crit, can proc. Compiler produces: on-block proc trigger with an embedded offensive action. The compiler needs to verify that the counter-attack's "guaranteed hit" modifier is expressible — is it a flag on the CombatContext? A bypass of specific defensive checks?
+Designer specifies:
 
-## Open Questions
+- which blocking profile qualifies for the riposte (this reference assumes the melee/front-guard
+  variant)
+- riposte damage scaling
+- damage type
+- whether the riposte may crit
 
-- Can the counter-attack be countered? (Attacker has counter-strike too → infinite loop?)
-- Does the counter-attack use the blocker's current position or the attacker's position for range checking?
-- If the original attack was ranged (not melee), does counter-strike trigger? The designer said "melee attack" but the engine needs to know how to classify attacks.
-- Does the counter-attack consume any resource or trigger any cooldown on the blocker?
-- Does the "guaranteed hit" bypass evasion only, or also damage reduction (armor, resistances)?
-- How does proc_depth interact — is the counter-attack at proc_depth=1, and its on-hit procs at depth=2?
-- Timing: does the counter-attack resolve on the same tick as the block, or the next tick?
+Compiler emits:
+
+- one passive `on_block` trigger
+- one retaliatory `damage` payload back to the triggering attacker
+- the ordinary reverse-relay packet when the attacker is remote
+
+Compiler validates:
+
+1. the mechanic is authored as reactive `on_block` damage, not as a second cast/attack intent
+2. the triggering profile is the intended melee/front-guard variant for this reference
+3. the retaliatory event inherits the canonical reactive-depth safety bound and therefore cannot
+   create unbounded counter loops
+
+## Resolved Interaction Notes
+
+- Counter-Strike resolves on the next tick, not inline on the same tick, because `P-38` is a Stage
+  9 reactive hook.
+- In this reference, "cannot be blocked or evaded" means the riposte does not perform a second
+  miss/block admission pass on the attacker. It does NOT bypass shields, resistances, armor, or
+  other later mitigation.
+- The riposte may crit for damage, but under the canonical default reactive-depth bound it does not
+  start a fresh PostDamage proc tree of its own.
+- If both combatants carry Counter-Strike, one successful block does not create infinite ping-pong
+  because the retaliatory event is already reactive.
+- Ranged-block or spell-block variants are separate game-data designs; this reference assumes the
+  triggering block is the intended melee/front-facing guard case.

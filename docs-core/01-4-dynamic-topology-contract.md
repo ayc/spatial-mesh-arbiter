@@ -93,11 +93,32 @@ SpatialInstance {
 2. The engine allocates `instance_id` and creates an empty `instance_r_tree` on the same Arbiter.
 3. The instance is NOT a separate Arbiter — it is a secondary R-Tree within the same `SpatialActor`. Authority remains with the original Arbiter.
 
+**Remote Admission (optional):**
+1. The migration set MAY include entities currently authoritative on other Arbiters.
+2. The Arbiter that emitted the fork directive is the **host Arbiter** for the instance.
+3. For every remote member, the engine/controller runs one all-or-none pre-instance transfer:
+   1. the source Arbiter validates the entity is not already in another instance and can leave its
+      current parent-world context,
+   2. records that entity's current parent-world position as its `exit_position`,
+   3. removes the entity from the source parent R-Tree, and
+   4. transfers authoritative entity state directly to the host Arbiter.
+4. A remotely admitted entity does NOT appear in the host Arbiter's parent R-Tree first; it is
+   inserted directly into `instance_r_tree` when admission commits.
+5. If any member in the requested admission set fails validation or transfer, the entire instance
+   admission MUST fail closed and already-transferred members MUST be restored to their recorded
+   parent-world positions.
+
 **Entity Migration (Enter):**
 1. The adapter emits a migration mutation listing entity IDs to move into the instance.
-2. The engine validates: each entity is on this Arbiter, the instance has capacity, and the entity is not already in another instance.
-3. For each entity: remove from the parent R-Tree, insert into `instance_r_tree`, record `exit_position` (current position).
-4. The entity's `dispatch_stage` evaluation continues normally — it is evaluated by the same Arbiter. The difference is that spatial queries (P-09, P-11, P-14) for this entity run against `instance_r_tree` instead of the parent R-Tree.
+2. The engine validates: the instance has capacity, and each entity is either already on the host
+   Arbiter or has been admitted through the remote-admission protocol above.
+3. For each local entity: remove from the parent R-Tree, insert into `instance_r_tree`, record
+   `exit_position` (current position).
+4. For each remotely admitted entity: use the `exit_position` captured on the source Arbiter and
+   insert directly into `instance_r_tree`.
+5. The entity's `dispatch_stage` evaluation continues normally — it is evaluated by the same host
+   Arbiter. The difference is that spatial queries (P-09, P-11, P-14) for this entity run against
+   `instance_r_tree` instead of the parent R-Tree.
 
 **Isolation:**
 1. Entities inside the instance are invisible to entities outside (excluded from parent R-Tree queries).
@@ -107,8 +128,11 @@ SpatialInstance {
 
 **Entity Migration (Exit):**
 1. The adapter emits an exit mutation, or the instance expires.
-2. The engine removes the entity from `instance_r_tree` and re-inserts into the parent R-Tree at the stored `exit_position` (or a designated exit point).
-3. The entity becomes visible to outside entities on the next tick.
+2. The engine removes the entity from `instance_r_tree` and re-inserts into the host Arbiter's
+   parent R-Tree at the stored `exit_position` (or a designated exit point).
+3. If the chosen exit point is no longer owned by the host Arbiter, the engine immediately begins
+   the standard handoff protocol after exit commit.
+4. The entity becomes visible to outside entities on the next tick.
 
 **Instance Expiry:**
 1. When `current_tick >= expiry_tick`, the engine forces all entities to exit.
@@ -117,7 +141,11 @@ SpatialInstance {
 
 ### 3.4 Cross-Boundary
 
-Spatial instances do NOT cross Arbiter boundaries. An instance exists entirely within one Arbiter. If the parent Arbiter undergoes a topology split, the instance and all its entities stay with whichever partition contains the instance's origin point.
+Spatial instances do NOT cross Arbiter boundaries after creation. An instance exists entirely within
+one host Arbiter. Remote members MAY be admitted at instance entry time, but once the instance is
+live, all contained entities are local to that host. If the parent Arbiter undergoes a topology
+split, the instance and all its entities stay with whichever partition contains the instance's
+origin point.
 
 Entities inside an instance do NOT participate in handoff. If an entity inside an instance needs to hand off (because the parent Arbiter is splitting), the instance MUST be closed first (all entities exit), then normal handoff proceeds.
 
@@ -207,8 +235,16 @@ ContainerState {
     container_entity_id:    EntityID,
     occupants:              Vec<EntityID>,
     max_capacity:           u32,
+    occupant_storage_mode:  OccupantStorageMode,
     occupant_can_cast:      bool,       // Whether contained entities can use abilities
     occupant_can_be_targeted: bool,     // Whether contained entities appear in spatial queries
+}
+```
+
+```
+enum OccupantStorageMode {
+    AttachedVisible,  // Occupant remains spatially present and attached to the container
+    OffWorldStored,   // Occupant is removed from the world and carried as preserved state
 }
 ```
 
@@ -217,34 +253,55 @@ ContainerState {
 **Enter Protocol:**
 1. The adapter emits an enter-container mutation (from the entering entity's stage evaluation).
 2. The engine validates: the container has capacity, the entity is not already in a container, and the container entity exists.
-3. The engine attaches the entity to the container via P-06 (Attached Kinematics) with zero offset.
-4. The engine sets the entity's `CAN_MOVE = false` (P-26 Capability Bitmask).
-5. If `occupant_can_be_targeted` is false, the engine sets `is_targetable = false` (P-27).
-6. The entity's position is now locked to the container's position.
+3. The engine records the occupant's current world position as its containment entry position.
+4. If `occupant_storage_mode = AttachedVisible`, the engine attaches the entity to the container
+   via P-06 (Attached Kinematics) with zero offset.
+5. If `occupant_storage_mode = OffWorldStored`, the engine removes the occupant from the R-Tree,
+   excludes it from tick batches and downstream payloads, and stores its preserved entity state as
+   container-owned carried state. This is NOT generic P-53 suspension; it is a bounded `P-58`
+   storage mode that is restored only by exit or container destruction.
+6. The engine sets the entity's `CAN_MOVE = false` (P-26 Capability Bitmask).
+7. If `occupant_can_be_targeted` is false, the engine sets `is_targetable = false` (P-27).
+8. In `AttachedVisible` mode, the entity's position is now locked to the container's position.
 
 **During Containment:**
-1. The entity follows the container's position (via P-06 attachment, evaluated in Stage 5).
-2. If `occupant_can_cast` is true, the entity's ability intents are validated normally in Stage 2. Abilities resolve at the container's position.
-3. If `occupant_can_cast` is false, all ability intents are rejected with `CONTAINED_ENTITY_CANNOT_CAST`.
+1. In `AttachedVisible` mode, the entity follows the container's position (via P-06 attachment,
+   evaluated in Stage 5).
+2. In `OffWorldStored` mode, the occupant has no spatial presence, receives no `dispatch_stage`
+   evaluation, appears in no spatial query results, and appears in no downstream payloads. Timers on
+   the carried occupant remain paused until exit.
+3. If `occupant_can_cast` is true, the entity's ability intents are validated normally in Stage 2.
+   Abilities resolve at the container's position. `occupant_can_cast = true` is only meaningful in
+   `AttachedVisible` mode.
+4. If `occupant_can_cast` is false, all ability intents are rejected with
+   `CONTAINED_ENTITY_CANNOT_CAST`.
 
 **Exit Protocol:**
 1. The adapter emits an exit-container mutation.
-2. The engine detaches the entity from P-06 attachment.
-3. The engine restores `CAN_MOVE = true` and `is_targetable` to its pre-containment value.
-4. The entity resumes independent kinematic resolution from the container's current position on the next tick.
+2. In `AttachedVisible` mode, the engine detaches the entity from P-06 attachment.
+3. In `OffWorldStored` mode, the engine re-materializes the preserved occupant state into the
+   parent R-Tree at the selected exit point.
+4. The engine restores `CAN_MOVE = true` and `is_targetable` to their pre-containment values.
+5. The entity resumes independent kinematic resolution from the selected exit point on the next
+   tick.
 
 **Container Destruction:**
 1. When the container entity transitions to `Removed` (death):
 2. All occupants are force-ejected at the container's last position.
-3. Attachment, capability overrides, and targetability overrides are reverted.
-4. Occupants resume independent evaluation on the next tick.
+3. In `OffWorldStored` mode, preserved occupants are re-materialized before the ejection completes.
+4. Attachment, capability overrides, and targetability overrides are reverted.
+5. Occupants resume independent evaluation on the next tick.
 
 ### 5.4 Cross-Boundary
 
 The container entity and all occupants hand off together as a group. When the container crosses an Arbiter boundary:
 1. The container entity hands off normally.
-2. All occupants hand off with it (their positions are at the container's position, which is in the new partition).
-3. P-06 attachments and container state transfer as SoftState.
+2. All occupants hand off with it.
+3. In `AttachedVisible` mode, occupant positions equal the container's position in the new
+   partition.
+4. In `OffWorldStored` mode, preserved occupant state transfers inside the container's carried-state
+   payload even though those occupants have no active R-Tree presence during transport.
+5. P-06 attachments and container state transfer as SoftState.
 
 ### 5.5 Bounds
 

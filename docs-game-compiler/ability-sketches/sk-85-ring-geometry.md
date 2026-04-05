@@ -27,71 +27,62 @@ P-09 (Shape Overlap Query) → P-45 (Delay Timer)
 
 ## Engine Primitives Required
 
-### Ring/Donut Spatial Query
+Ring Geometry is now a canonical ring-shaped delayed AoE reference.
 
-All existing spatial queries:
-- Circle (SK-29): `distance(entity, center) <= radius`
-- Cone (SK-49): `distance <= range AND angle <= half_angle`
-- Line (SK-63): `distance_to_line(entity, line) <= width`
+The recommended lowering is:
 
-Ring adds:
-```
-struct RingQuery {
-    center: Vec2F,
-    inner_radius: SimFixed,
-    outer_radius: SimFixed,
-}
-```
+1. author the ability with:
+   - `targeting = { type = area, shape = ring, range = ..., radius = outer_radius, ring_inner = inner_radius, filter = enemy_alive }`
+   - `cast_time = 0.5`
+2. on completion, resolve one ring-shaped query with:
+   - ordinary damage
+   - ordinary root application to the same matched targets
 
-Match condition: `inner_radius <= distance(entity, center) <= outer_radius`
+This keeps the mechanic inside existing canonical surfaces:
 
-Entities CLOSER than `inner_radius` are NOT hit. Entities FURTHER than `outer_radius` are NOT hit. Only entities in the band between the two radii are hit.
-
-### New Geometry Primitive
-
-The engine's geometry system needs ring/donut as a supported shape:
-
-```
-enum AoEGeometry {
-    Circle { radius: SimFixed },
-    Cone { half_angle: SimFixed, range: SimFixed },
-    Line { length: SimFixed, width: SimFixed },
-    Ring { inner_radius: SimFixed, outer_radius: SimFixed },
-}
-```
-
-The ring query is computationally cheap — two distance comparisons per entity, same cost as a circle query plus one extra comparison.
-
-### Delayed Activation
-
-The ring has a brief delay (0.5s) between cast and activation. During the delay:
-- The ring indicator is visible to all players (friend and foe)
-- Enemies can react by moving INTO the center (safe) or AWAY from the ring
-- The ring is a "scheduled event" — the Arbiter processes it at activation_tick
-
-This is a standard delayed AoE (like SK-29 Blizzard's first pulse) but with ring geometry instead of circle.
+- ring/donut is already a supported targeting geometry
+- the center-safe behavior is just `ring_inner`
+- the brief warning window is the ordinary cast / delay window, not a bespoke geometry scheduler
 
 ## Cross-Boundary Concerns
 
-TODO: Standard AoE cross-boundary pattern. The ring is centered at a position on one Arbiter. Entities on the ring that are Ghosts receive damage/root relays. The ring's band might straddle an Arbiter boundary — part of the ring is in one region, part in another. Only entities in the local portion + Ghosts in the remote portion are checked.
+Ring Geometry follows the ordinary AoE query pattern.
+
+1. The ring query is centered and evaluated on the caster's current owner.
+2. Local targets are resolved directly; admitted remote/Ghost targets receive the ordinary hostile
+   relay for damage and root admission.
+3. A ring that straddles a seam is still one local query plus Ghost-backed remote admissions, just
+   like other large AoE shapes.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: shape (ring), inner radius, outer radius, delay (0.5s), one-time activation, damage + root on entities in the ring band, center is safe. Compiler produces:
-- AoE definition with `Geometry::Ring { inner_radius, outer_radius }`
-- Delayed activation timer
-- Spatial query using ring geometry (two-distance-comparison check)
-- Damage + CC payload applied to matched entities
+Designer specifies:
 
-The compiler adds Ring to the geometry type system alongside Circle, Cone, and Line.
+- outer radius
+- inner radius
+- warning / cast delay
+- damage
+- root duration
 
-## Open Questions
+Compiler emits:
 
-- Can the ring be used as a persistent zone (like SK-29 Blizzard but ring-shaped)?
-- Can the inner and outer radii be different sizes to create thin or thick rings?
-- Does the ring's root duration vary based on position within the band (edge = longer root)?
-- Can the ring be combined with other shapes (ring + cone = arc)?
-- Does the ring check use entity center-point or hitbox edge (entity partially on the ring)?
-- Can ring geometry be used for beneficial effects (SK-16 Holy Ground as a ring — healing on the edge)?
-- How does the ring interact with forced displacement (SK-01 Toss landing on the ring)?
-- Can the ring be placed so its center is on an Arbiter boundary?
+- one ring-shaped area query
+- one ordinary damage payload
+- one ordinary root payload
+
+Compiler validates:
+
+1. `0 <= ring_inner < radius`
+2. the delayed activation is expressed through the ordinary cast window, not a bespoke ring-only
+   timer system
+3. root uses the ordinary canonical `apply_cc(cc_type = root)` path
+
+## Resolved Interaction Notes
+
+- Thin and thick rings are both legal because `ring_inner` and `radius` are independently authored
+  within the canonical validation bounds.
+- The center remains completely safe in this reference because only the ring band is queried.
+- Ring geometry is just another targeting shape and may be reused for hostile or beneficial effects
+  in later designs without adding a new geometry primitive.
+- Later movement or displacement that puts an entity into the band before cast completion makes that
+  entity eligible for the one-time hit exactly like other delayed AoE casts.

@@ -28,72 +28,73 @@ P-42 (Stacking Counters w/ Decay) → P-51 (Desperation Cost Modifiers)
 
 ## Engine Primitives Required
 
-### Self-Stacking Cost Modifier
+Escalating Cost is now a canonical `resource_cost.escalation` reference.
 
-All existing abilities have a FIXED cost (flat mana, flat HP, charges). Escalating Cost introduces a **dynamic cost that changes based on a self-applied stack counter**:
+The recommended lowering is:
 
-```
-struct EscalatingCostState {
-    current_stacks: u32,
-    cost_multiplier_per_stack: SimFixed,  // 1.5 (50% increase per stack)
-    stack_decay_interval_ticks: u64,      // 240 ticks (4 seconds)
-    last_cast_tick: u64,
-}
-```
+1. author the base resource cost normally:
+   - `resource_cost = {`
+     `pool = mana,`
+     `amount = 30,`
+     `escalation = {`
+       `multiplier_per_stack = 1.5,`
+       `decay_interval_ticks = 240,`
+       `shared_counter_id = ability_id`
+     `}`
+     `}`
+2. let Stage 2 compute
+   `effective_cost = amount * multiplier_per_stack ^ current_stacks`
+   before affordability checks
+3. increment the counter only when the cast commits successfully
+4. decay one stack at a time after each full interval with no qualifying cast on the same counter
 
-On ability cast:
-1. Calculate effective cost: `base_cost * (cost_multiplier_per_stack ^ current_stacks)`
-2. Check: does the caster have enough mana?
-3. If yes: deduct effective cost, increment stacks, set last_cast_tick
-4. If no: reject (can't afford)
+This keeps the mechanic inside existing surfaces:
 
-On tick (decay check):
-1. If `current_tick - last_cast_tick >= stack_decay_interval_ticks`: remove one stack, update last_cast_tick
-2. Repeat until stacks = 0 or within decay window
-
-### Cost Calculation in Validation
-
-The `validate_intent` hook must calculate the DYNAMIC cost before accepting the proposal. The Edge Node's prediction must also calculate the dynamic cost for client-side mana prediction. Both must agree (deterministic).
-
-The ability definition needs: `cost_type: Escalating { base: 30, multiplier_per_stack: 1.5, decay_interval: 4s }`.
-
-### Stack as Ability State (Not Status Effect?)
-
-Desperation stacks could be implemented as:
-- **Status effect**: a visible debuff with stack count. Cleansable? Probably not — it's a self-imposed resource mechanic.
-- **Ability state**: part of the ability's runtime data on the entity. Not visible as a buff/debuff.
-
-Design choice: if implemented as a status effect, enemies can see how desperate the healer is (counterplay information). If implemented as ability state, it's hidden.
-
-### Exponential Cost Growth
-
-The cost grows exponentially: `30, 45, 67, 101, 152, 228...`. By stack 5, the cost is 7.6x base. This naturally limits spam — even with a full mana pool, you can only spam 5-6 casts before going OOM.
-
-The exponential formula must use fixed-point exponentiation. For integer stack counts, this is repeated multiplication (not transcendental functions).
+- the stack counter is canonical compiler-owned escalation state, not a visible status by default
+- affordability and deduction already happen through the Stage 2 `P-51` cost policy
+- the multiplier is multiplicative per current stack, matching the authored exponential growth
 
 ## Cross-Boundary Concerns
 
-TODO: None. The escalating cost state is entirely local to the caster's entity on their Arbiter. It affects ability validation and mana deduction — both are local operations. No cross-boundary relay needed.
+Escalating Cost is entirely caster-owner local.
+
+1. The escalation counter is keyed on the casting entity and read during Stage 2 affordability on
+   that entity's current owner.
+2. If the caster hands off, the counter transfers with the entity as ordinary SoftState and the new
+   owner continues the same escalation history.
+3. Edge prediction may mirror the current displayed cost, but authoritative affordability and stack
+   mutation always happen on the caster owner.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: base cost (30 mana), cost multiplier per stack (1.5x), stack decay (one stack every 4 seconds of not casting), no max stacks. Compiler produces:
-- EscalatingCostState as ability runtime data
-- Cost calculation in validate_intent: `base * multiplier ^ stacks`
-- Stack increment on cast
-- Stack decay on timer
-- Edge Node prediction must mirror the cost calculation
+Designer specifies:
 
-The compiler adds Escalating to the cost model system alongside Flat, Percentage, and Charges (SK-42).
+- base resource pool and amount
+- escalation multiplier per stack
+- decay interval
+- optional max stacks
+- optional shared counter ID when multiple abilities should share the same desperation counter
 
-## Open Questions
+Compiler emits:
 
-- Are Desperation stacks visible to enemies (buff bar indicator)?
-- Can stacks be cleared by any ability (self-cleanse? Or only by waiting?)
-- Does SK-91 Stasis pause the stack decay timer?
-- Does Kinematic Dilation affect the stack decay interval?
-- Can multiple abilities share the same Desperation stack counter (all heals increase the same stacks)?
-- Does the Edge Node accurately predict the dynamic cost (for client-side mana bar)?
-- Is the multiplier per-stack (1.5x per stack) or cumulative (stack 1 = 1.5x, stack 2 = 2x, stack 3 = 2.5x)?
-- Can the cost exceed the caster's maximum mana pool (making the ability literally uncastable)?
-- Does SK-83 Next-Cast Empowerment interact with escalating cost (empowered cast has different cost)?
+- one ordinary `resource_cost`
+- one canonical `CostEscalationBlock`
+- one compiler-owned escalation counter keyed by `shared_counter_id`
+
+Compiler validates:
+
+1. `multiplier_per_stack > 0`
+2. `decay_interval_ticks > 0`
+3. if authored, `max_stacks > 0`
+4. escalating cost is expressed through canonical `resource_cost.escalation`, not a bespoke
+   visible status or custom validation script
+
+## Resolved Interaction Notes
+
+- The multiplier is multiplicative per current stack: `30, 45, 67.5, 101.25, ...` before ordinary
+  fixed-point rounding.
+- If the effective cost exceeds the caster's current or maximum resource pool, the cast simply
+  fails the normal affordability check.
+- By default the counter is ability-local because `shared_counter_id` falls back to the owning
+  `ability_id`.
+- The baseline reference does not expose the desperation counter as a public buff/debuff bar.

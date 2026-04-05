@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I press Q three times in quick succession to perform a three-hit combo. Each press is a different attack: the first two are quick slashes dealing damage, the third is a heavy slash that deals damage AND heals me. If I don't press Q again within 2 seconds of the previous press, the combo resets to the first hit.
+One button advances through a three-hit combo if I keep pressing it within a short window. The
+first two hits are quick slashes; the third is the payoff hit that deals extra damage and heals me.
 
 ## Primitive Composition
 
@@ -13,82 +14,89 @@ P-42 (Stacking Counters w/ Decay)
 ## Inputs
 
 - Caster entity
-- Same ability key pressed repeatedly (Q, Q, Q)
-- Combo window between presses (2 seconds)
+- Same public ability key pressed repeatedly
+- Target chosen independently for each committed hit
 
 ## Observable Behavior
 
-1. First Q press: quick slash dealing X damage to target
-2. Within 2 seconds, second Q press: quick slash dealing X damage to target
-3. Within 2 seconds, third Q press: heavy slash dealing 1.5X damage AND healing caster for Y HP
-4. After the third press: combo resets to first hit. Full cooldown begins.
-5. If 2 seconds pass between any press: combo resets to first hit. Short cooldown.
-6. Each press can target a different enemy (not locked to the first target)
-7. Visual: escalating slash animations, third hit has a pronounced wind-up and green heal effect
+1. First cast uses step 0: a quick slash dealing base damage.
+2. If I cast again within 2 seconds, step 1 fires: another quick slash.
+3. If I cast again within 2 seconds after that, step 2 fires: a heavier slash that deals bonus
+   damage and heals me.
+4. After the third hit, the combo resets to step 0.
+5. If I fail to continue the combo within the 2-second window, the combo resets to step 0.
+6. Each hit may target a different enemy; the combo tracks the caster's sequence state, not a
+   locked target chain.
+7. In this reference, the opener uses the short/base cooldown, step 1 is a mid-combo free continue,
+   and the finisher applies the full cooldown.
+8. Visual: escalating slash presentation, with the third hit clearly telegraphed as the payoff
+   strike.
 
 ## Engine Primitives Required
 
-### Combo State Machine
+Combo Strike is already the canonical `sequence_window` + `ActivationModes` pattern.
 
-The ability maintains a per-entity combo state:
+1. The owning entity carries a `sequence_window` runtime state for this ability, with
+   `max_step = 2`, `window_ticks = 120`, and `reset_to_step = 0`.
+2. The public ability uses `ActivationModes` keyed by `sequence_step`:
+   - base mode / step 0: damage + `advance_sequence(advance)`
+   - step 1 mode: damage + `advance_sequence(advance)`
+   - step 2 mode: heavier damage + self-heal + `advance_sequence(reset)`
+3. Step 1 overrides cooldown to `0` so the continue hit does not start the base cooldown.
+4. Step 2 overrides cooldown to the full finisher cooldown.
+5. If the window expires before the next input, the sequence state resets automatically and the next
+   cast uses the base mode again.
 
-```
-struct ComboState {
-    current_step: u8,        // 0 = ready for first hit, 1 = ready for second, 2 = ready for third
-    combo_window_expires: u64, // Tick at which the combo resets if not advanced
-}
-```
-
-Each press of the ability:
-1. Read `current_step`
-2. Resolve the effect for that step (step 0: damage, step 1: damage, step 2: damage + heal)
-3. Advance `current_step` to the next step
-4. Set `combo_window_expires = current_tick + window_ticks`
-5. If `current_step` wraps past the final step: reset to 0, apply full cooldown
-
-If `combo_window_expires` passes without advancement: reset `current_step` to 0, apply short cooldown.
-
-### Multi-Phase Ability (Different From SK-36)
-
-SK-36 Shadow Step has two phases (blink out, blink back) determined by whether a status effect is active. Combo Strike has N phases (3 hits) determined by an incrementing counter with a timeout. The differences:
-- SK-36: binary (phase 1 or phase 2), determined by presence of a buff
-- SK-52: sequential (step 0 → 1 → 2 → reset), determined by a counter with decay
-- Each step has different resolution logic (step 2 heals, others don't)
-- The combo can be interrupted at any step by the timeout
-
-### Validate Hook Branching
-
-The `validate_intent` hook must read the combo state to determine which validation rules apply:
-- Step 0: standard cooldown/range check
-- Step 1: no cooldown check (mid-combo), range check, combo window check
-- Step 2: no cooldown check, range check, combo window check
-
-The stage-execution path must read the combo state to determine the effect:
-- Step 0/1: damage only
-- Step 2: damage + heal
+No separate combo state machine is needed beyond the canonical sequence-window runtime state.
 
 ## Cross-Boundary Concerns
 
-TODO: Each combo press can target a different entity. If the first hit targets a local entity and the second targets a Ghost, the second hit's damage relays cross-boundary. The combo state lives on the caster's entity (SoftState), so it's always local to the caster's Arbiter. If the caster crosses a boundary mid-combo, the combo state transfers with the handoff.
+The combo state is entirely caster-owned:
+
+1. `sequence_window` lives on the caster's runtime state and transfers on ordinary handoff if the
+   caster crosses an Arbiter boundary mid-combo.
+2. Each committed hit resolves against the current target independently. A local first hit and a
+   cross-boundary second hit are fine; the combo state remains on the caster.
+3. Because each step is just an ordinary cast variant, all the usual relay rules for damage/heal
+   payloads still apply per target. The combo itself does not need a second authority channel.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: combo steps (3), per-step effects (step 0: X damage, step 1: X damage, step 2: 1.5X damage + Y heal), combo window (2s), full cooldown after complete combo, short cooldown on timeout reset. Compiler produces:
-- Ability definition with combo state machine (step count, window duration)
-- Per-step resolution logic (branching in stage execution based on `current_step`)
-- Per-step validation rules (skip cooldown check mid-combo)
-- Combo reset logic (timeout → reset, completion → reset + full cooldown)
+Designer specifies:
 
-The compiler needs to support **sequential multi-step abilities** as a first-class pattern.
+- combo window duration
+- per-step damage values
+- finisher heal amount
+- base cooldown and finisher cooldown
 
-## Open Questions
+Compiler emits:
 
-- Can on-hit procs (SK-09 Chain Lightning) trigger on each combo hit independently?
-- Does the third hit's heal benefit from healing bonuses?
-- Can the combo be interrupted by CC (stun resets combo? or pauses it?)
-- Does SK-12 Spell Echo interact with combo — if step 1 echoes, does it produce another step 1, or advance to step 2?
-- Can the combo window be affected by attack speed buffs (SK-20 Battle Cry)?
-- Does each step consume a token from the per-entity token bucket, or is the entire combo one token?
-- Can the third hit be used with SK-42 Withering Fire's auto-targeting, or must combos be manually targeted?
-- If the caster is silenced (SK-26) between step 1 and step 2, does the combo reset?
-- Can combo state be represented as a status effect (hidden buff with step counter) rather than a separate state machine?
+- one `sequence_window` runtime state for the combo
+- one public ability definition with ordered `ActivationModes` keyed by `sequence_step`
+- per-step effects:
+  - step 0: damage + `advance_sequence(advance)`
+  - step 1: damage + `advance_sequence(advance)`
+  - step 2: bonus damage + self-heal + `advance_sequence(reset)`
+- cooldown overrides so the finisher, not the mid-combo continue, applies the long reset
+
+Compiler validates:
+
+1. the referenced combo runtime state exists and is a `sequence_window`
+2. activation modes are ordered deterministically so step 2 is checked before step 1, and step 1
+   before the base mode
+3. the combo window is positive
+4. any finisher self-heal uses ordinary heal authoring, not a bespoke combo-only recovery path
+
+## Resolved Interaction Notes
+
+- On-hit procs evaluate independently on each committed hit because each step is still an ordinary
+  resolved attack.
+- The finisher's heal is ordinary healing and therefore respects healing bonuses and anti-heal.
+- Crowd control does not need bespoke combo logic. If I cannot continue the sequence before the
+  window expires, it resets naturally to step 0.
+- Propagation/replay mechanics may repeat the resolved hit payload, but the combo step itself
+  advances only once per committed cast envelope in this reference.
+- Each combo hit still spends its own ingress/token-bucket budget because each hit is a separate
+  committed cast.
+- Attack-speed buffs do not change the authored sequence-window duration unless the game explicitly
+  authors a different `window_ticks` value.

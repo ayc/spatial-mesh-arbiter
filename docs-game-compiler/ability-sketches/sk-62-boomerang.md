@@ -27,67 +27,95 @@ P-32 (Actor Spawning) → P-03 (Trajectory Steering) → P-35 (On-Hit Hook)
 
 ## Engine Primitives Required
 
-### Reversing Projectile
+Boomerang is now a canonical multi-spawn projectile-return pattern.
 
-Standard projectiles travel in one direction until they hit something or expire. Boomerang projectiles have a **two-phase trajectory**:
+The recommended lowering is:
 
-```
-enum BoomerangPhase {
-    Outbound { remaining_distance: SimFixed },
-    Returning { target_position: Vec2F },
-}
-```
+1. one `spawn_actor` effect with:
+   - `position = caster_position`
+   - `count = 8` for the reference radial pattern
+   - `placement.offsets` carrying eight explicit world-space launch headings, for example one
+     entry per compass / diagonal spoke
+   - a projectile archetype with authored speed, lifetime, and hit payload
+2. `projectile.return_policy = {`
+   `trigger = max_range,`
+   `track = source_entity_current,`
+   `despawn_radius = ... ,`
+   `allow_repeat_hits_on_return = true,`
+   `preserve_speed = true`
+   `}`
 
-Phase 1 (outbound): travel in initial direction at constant speed until max range.
-Phase 2 (returning): reverse velocity, travel toward the caster's CURRENT position (homing return).
+Each derived projectile is an ordinary live projectile actor with one outbound leg and one return
+leg. Return flight is not a second spawn. The same actor ID stays alive, flips into return mode at
+max range, and then homes toward the source entity's CURRENT position.
 
-The return is homing — the caster may have moved since the waves were cast. The return trajectory adjusts each tick to track the caster's position.
+The canonical double-hit rule is the one already attached to `allow_repeat_hits_on_return = true`:
+the runtime keeps separate outbound and return hit ledgers. A target may therefore be hit once on
+the outward leg and once on the return leg, but not repeatedly within the same leg.
 
-### Double-Hit Prevention
-
-Each wave maintains two hit lists:
-- `outbound_hits: HashSet<EntityID>` — entities hit on the way out
-- `return_hits: HashSet<EntityID>` — entities hit on the way back
-
-An entity can be in BOTH lists (hit twice — once per direction) but cannot be in the same list twice (no double-hit within a single direction).
-
-### Multi-Projectile Spawn
-
-The ability spawns multiple projectiles simultaneously (e.g., 8 waves in radial directions). Each is an independent ProjectileActor with its own trajectory and hit list. The Arbiter must handle N simultaneous projectile spawns in a single tick.
-
-### Return Homing
-
-On phase transition to `Returning`, the projectile switches to homing behavior:
-- Target: the caster's EntityID (not a position — the caster moves)
-- Each tick: recalculate velocity toward the caster's current position
-- Despawn when the projectile reaches within contact range of the caster
-
-If the caster dies or becomes untargetable (SK-44 Burrow) during the return, the waves should continue to the caster's last known position and then despawn.
+For this sketch, the radial pattern does not come from player aim. It comes from the explicit
+placement-authored heading lattice. That keeps the no-target "fire in all directions" cast fully
+deterministic without inventing a second projectile-launch subsystem.
 
 ## Cross-Boundary Concerns
 
-TODO: The waves travel outward, potentially crossing boundaries, then return. A wave that crosses a boundary on the outbound trip needs to be handed off. On the return trip, it crosses back — another handoff. A single wave could require two handoffs (out and back).
+Boomerang follows the ordinary projectile-owner / Ghost / handoff model, even though one wave may
+cross a seam twice.
 
-The return phase homes toward the caster. If the caster is on Arbiter A and the wave was handed off to Arbiter B during outbound, the return phase needs to home toward a Ghost (the caster from B's perspective). Ghost position accuracy affects return trajectory precision.
-
-Multi-projectile spawns near boundaries: 8 waves in all directions — some go into neighbor territory. Multiple simultaneous handoffs.
+1. Each wave is an independent projectile actor and hands off normally when its current position
+   crosses into a neighbor's authority.
+2. The return phase is just projectile SoftState. If a wave is currently owned by Arbiter B while
+   the caster remains on Arbiter A, the return leg tracks the source entity through B's local-or-
+   Ghost view of that source and updates cleanly as Ghost data refreshes.
+3. If the caster blinks or otherwise relocates during the return leg, the wave adjusts on the next
+   steering tick because `track = source_entity_current` samples the source entity's CURRENT
+   position rather than the original cast position.
+4. If the source entity is removed before the wave completes its return, the canonical fallback is
+   `source_entity_last_known_on_loss`; the wave finishes its return toward the last authoritative
+   known source position and then despawns there.
+5. Outbound/return hit ledgers survive ordinary projectile handoff with the rest of the actor
+   state, so a seam crossing does not reopen per-leg double-hit admission.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: radial pattern (8 directions), outbound range, damage per hit, pass-through (hits all enemies, not just first), double-hit (once per direction), return homing to caster, despawn on reaching caster. Compiler produces:
-- N ProjectileActors with radial direction vectors
-- Two-phase trajectory (outbound → return)
-- Per-direction hit list dedup
-- Return homing targeting caster EntityID
-- Despawn condition (reach caster or caster gone)
+Designer specifies:
 
-## Open Questions
+- wave count / launch lattice
+- explicit placement offsets plus explicit per-wave launch headings
+- projectile speed
+- outbound range / lifetime
+- per-hit hostile payload
+- pass-through budget (`pierce`) for the intended density envelope
+- return despawn radius
+- whether same-target repeat hits are allowed on the return leg
 
-- Can the waves be blocked by SK-03 Terrain Wall?
-- Does each wave's return damage use the same CombatContext as outbound (epoch-pinned at cast)?
-- Can each hit (outbound and return independently) trigger on-hit procs?
-- If the caster blinks (SK-35/SK-36) during return phase, do the waves adjust trajectory?
-- Can the caster be hit by their own returning waves (self-damage)?
-- Does each wave have its own collision radius, or are they zero-width lines?
-- How many total collision checks per tick: 8 waves × enemies in path × 2 directions?
-- If a wave is mid-return and crosses a boundary, does the handoff preserve the return homing target?
+Compiler emits:
+
+- one multi-spawn `spawn_actor` effect
+- one ordered `placement.offsets` lattice with per-derived heading vectors
+- one projectile archetype using canonical `return_policy`
+- one outbound/return hit-ledger contract through `allow_repeat_hits_on_return = true`
+- one source-tracking fallback policy for source removal during the return leg
+
+Compiler validates:
+
+1. `count = len(placement.offsets)`
+2. every placement-authored heading vector is non-zero
+3. placement-authored heading vectors are used only on projectile spawns
+4. `despawn_radius > 0`
+5. pass-through remains bounded through authored projectile `pierce`; the compiler/runtime do not
+   widen this into an unbounded per-wave hit list
+
+## Resolved Interaction Notes
+
+- The outward and return hits reuse the same carried offensive payload that was baked at cast time;
+  each admitted hit still resolves independently against the struck target's OWN defenses.
+- This reference assumes `detonation_policy.world_impact = ignore`, so temporary terrain blockers
+  do not stop the waves before the return leg. A wall-blocked boomerang would be a different
+  authored projectile profile.
+- Each admitted hit may trigger ordinary on-hit downstream hooks. The dedup rule only prevents
+  repeated hits within the same leg.
+- The source entity does not damage itself on return in this reference, because the hostile target
+  filter excludes the owner.
+- Collision width is the projectile archetype's ordinary collision radius. The sketch does not
+  require a special zero-width ray model.

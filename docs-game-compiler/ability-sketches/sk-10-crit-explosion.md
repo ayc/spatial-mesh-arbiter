@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-When I land a critical hit, an explosion erupts at the target's position dealing AoE damage to all enemies within radius. The explosion damage can itself critically strike, triggering another explosion at each crit target's position. Damage diminishes with each generation.
+When I land a critical hit, an explosion erupts at the target's position dealing AoE damage to all
+enemies within radius. The explosion damage can itself critically strike, triggering another
+explosion at each crit target's position. Damage diminishes with each generation.
 
 ## Primitive Composition
 
@@ -12,37 +14,96 @@ P-37 (On-Crit Hook) → P-09 (Shape Overlap Query)
 
 ## Inputs
 
-- Triggering crit event (on-crit proc)
-- Target position (where the crit landed)
+- Triggering crit event
+- Target position where the crit landed
 - Caster's offensive stats
 
 ## Observable Behavior
 
-1. Normal attack crits on target
-2. Explosion at target's position — all enemies within radius take X% of the original crit damage
-3. Each explosion hit rolls its own crit chance
-4. If an explosion hit crits, a new explosion occurs at that target's position
-5. Each generation deals diminishing damage (e.g., 50% of the previous generation)
-6. Bounded by proc_depth — maximum N generations
-7. Visual: cascading explosions rippling outward through groups of enemies
+1. A critical hit lands on the original target.
+2. An explosion is centered on that target's position and damages enemies within radius.
+3. Each explosion hit rolls its own crit chance through the ordinary damage pipeline.
+4. Any explosion hit that crits becomes the center of a child explosion.
+5. Each generation deals less damage than the previous generation.
+6. The cascade is bounded to a finite maximum generation count.
+7. Visual presentation may render simultaneous branching explosions through dense groups.
 
 ## Engine Primitives Required
 
-TODO: The on-crit proc spawns what is essentially a zone/AoE at the target's position. This AoE resolves damage against each entity in radius. Each damage resolution independently rolls crit. Crits spawn new AoEs. This is a recursive tree, not a linear chain (unlike SK-09). Each explosion is a spatial query. The proc_depth guard is critical — without it, a dense pack of enemies creates exponential explosions.
+Crit Explosion is the canonical `on_crit + propagation(mode = fanout_query)` reference.
+
+The recommended lowering is:
+
+- one passive/on-crit trigger with:
+  - `hook = on_crit`
+  - `effects = [aoe_damage(center = target_position, shape = circle, radius = ..., ...)]`
+  - `propagation = {`
+    `mode = fanout_query,`
+    `base_chance = 1.0,`
+    `max_generations = ...,`
+    `effect_multiplier_per_generation = 0.50,`
+    `query_radius = ... ,`
+    `max_targets_per_generation = ... ,`
+    `filter = enemy_alive,`
+    `dedup_scope = entity_once_per_chain`
+    `}`
+
+This keeps the mechanic inside the canonical propagation surface:
+
+- the root crit is ordinary damage
+- the explosion itself is ordinary `aoe_damage` centered on `target_position`
+- recursive child explosions are bounded by propagation `chain_id` / generation metadata
+- generation-based damage decay uses `effect_multiplier_per_generation`
 
 ## Cross-Boundary Concerns
 
-TODO: The explosion happens at the target's position, which may be on a different Arbiter than the caster. The caster's offensive stats need to be available (carried in CombatContext). Secondary explosions from Ghost targets relay to their owning Arbiters, which each spawn their own local AoEs. A single crit near a boundary could fan out across multiple Arbiters simultaneously.
+Crit Explosion follows the canonical propagation fan-out contract.
+
+1. The root `on_crit` trigger fires on the authoritative owner of the critted target.
+2. That owner resolves the first explosion locally from the target's committed position.
+3. If any child explosion centers belong to remote/Ghost endpoints, the corresponding child
+   generation is relayed with the same `chain_id` and incremented generation metadata to the
+   relevant owners.
+4. Each owner runs its own local AoE query and resolves child explosion damage only against its own
+   authoritative entities.
+5. A cascade near a seam can therefore fan out across multiple Arbiters, but every local explosion
+   still follows the single-authority rule.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trigger (on-crit), AoE radius, damage scaling per generation, crit inheritance rules. Compiler produces: proc trigger + zone spawn definition + recursive generation tracking. How does the compiler statically verify that this terminates? (proc_depth + diminishing damage, but the compiler needs to know the depth is configured)
+Designer specifies:
 
-## Open Questions
+- explosion radius
+- base explosion damage payload
+- max generations
+- per-generation damage falloff
+- target cap / filter for each child fan-out step
 
-- Does each explosion use the caster's crit chance or a reduced crit chance per generation?
-- Can explosion hits trigger other on-hit procs beyond crit explosion (SK-09 chain lightning)?
-- Is the explosion centered on the target's exact position or snapped to a grid?
-- If multiple enemies are crit in the same explosion, do all of them spawn secondary explosions simultaneously?
-- What is the worst-case entity count for proc_depth=3 in a dense area? Is the bound tight enough?
-- Does the explosion damage the original target (self-overlap)?
+Compiler emits:
+
+- one `on_crit` trigger
+- one `PropagationBlock(mode = fanout_query)`
+- one ordinary explosion `aoe_damage` payload centered on `target_position`
+- one bounded propagation chain with generation scaling and per-chain dedup
+
+Compiler validates:
+
+1. `max_generations > 0`
+2. `query_radius > 0`
+3. `max_targets_per_generation > 0`
+4. `effect_multiplier_per_generation > 0`
+5. the recursion bound is expressed through canonical propagation metadata rather than an unbounded
+   proc tree
+
+## Resolved Interaction Notes
+
+- Each explosion hit is ordinary damage and therefore rolls crit and resolves defenses normally on
+  the struck target.
+- Multiple crits from the same explosion may spawn child generations in parallel; they still share
+  the same bounded `chain_id`.
+- This reference uses `entity_once_per_chain` to stop one cascade from repeatedly revisiting the
+  same enemy.
+- The explosion is centered on `target_position` exactly as resolved by the engine plane, not on a
+  snapped grid cell.
+- Child explosion hits may still participate in unrelated downstream hooks if those mechanics are
+  otherwise legal; Crit Explosion's own recursion remains bounded by its propagation metadata.

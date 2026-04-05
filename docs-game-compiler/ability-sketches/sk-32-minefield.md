@@ -17,7 +17,7 @@ P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-52 (Asymmetr
 
 ## Observable Behavior
 
-1. 5 mines are placed in a predefined pattern (pentagon? line? random within radius?)
+1. 5 mines are placed in one deterministic authored pattern around the target point
 2. Mines are invisible to enemies (unless they have detection/true sight)
 3. Each mine arms after 1 second (cannot detonate during arming)
 4. When any enemy entity enters an armed mine's trigger radius: mine detonates
@@ -29,39 +29,96 @@ P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-52 (Asymmetr
 
 ## Engine Primitives Required
 
-TODO: Each mine is a **dormant actor** with a proximity trigger. The Arbiter needs to:
-1. Spawn 5 entity-like actors at calculated positions
-2. Each has a state machine: `ARMING (1s) → ARMED → DETONATED / EXPIRED`
-3. While ARMED: check each tick if any enemy entity is within trigger radius
-4. On trigger: perform AoE spatial query within blast radius, apply damage to all results, transition to DETONATED, despawn
+Minefield is now a canonical `spawn_actor` trap pattern.
 
-The proximity check is the performance concern — 5 mines × 60Hz × up to 60 seconds = checking proximity against all nearby enemies continuously. Is this a spatial index query or brute force? Does the Arbiter batch mine proximity checks?
+The compiler lowers it to one `spawn_actor` effect with:
+
+1. `count = 5`
+2. `placement.offsets` containing the authored deterministic mine pattern around the target point
+3. a static mine archetype
+4. `lifetime_ticks = 3600`
+5. `interaction = { arming_delay_ticks = 60, trigger_filter = enemy_alive, trigger_radius = ...,
+   resolution_mode = radius_query, effect_radius = ..., effect_filter = enemy_alive, effects = [...],
+   consume_on_trigger = true }`
+
+Each mine is an ordinary spawned actor with one bounded arming/proximity state machine supplied by
+`SpawnInteractionBlock`. The mine arms after one second, then runs the canonical `P-14` overlap
+check each tick. On the first admitted trigger, it resolves the authored AoE payload from the mine's
+current position and consumes itself.
+
+The placement pattern is not random. It is one explicit ordered offset list authored relative to the
+requested ground-target anchor, so designers can express a pentagon, line, cross, or any other
+bounded fixed layout without bespoke runtime logic.
 
 ## Stealth/Visibility
 
-TODO: Mines are invisible to enemies. The engine needs a **visibility system** — entities can have a stealth flag that makes them invisible to the opposing team. Detection abilities (true sight) can reveal stealthed entities. How is visibility implemented:
-- Arbiter-level: mines are present in the entity map but filtered from downstream payloads to enemy Edge Nodes?
-- Client-level: mines are sent to all clients but the client hides them based on visibility rules?
-- Server authoritative visibility is safer (anti-cheat) but means the Arbiter must track per-team visibility.
+Mines reuse the canonical visibility and targetability surfaces instead of inventing a trap-specific
+stealth system.
+
+The mine archetype authors:
+
+1. `observer_presentation` so allies see the mine normally while enemies do not
+2. `targetability_policy` if the design wants detected mines to become attackable or interactable
+3. optional suspension/dormancy metadata only if the mine should be excluded from specific query
+   classes beyond ordinary visibility filtering
+
+So "invisible to enemies unless revealed" is downstream observer filtering plus targetability
+policy, not a separate hidden-entity mechanic.
 
 ## Cross-Boundary Concerns
 
-TODO: If mines are placed near an Arbiter boundary, enemy entities approaching from the neighbor's side are Ghosts. The mine's Arbiter needs Ghost positions to check proximity. If the Ghost triggers a mine, the detonation damage relays to the Ghost's owning Arbiter. Long-lived mines (60 seconds) might outlast topology changes — if the Arbiter splits, do mines transfer to the child that inherits their position?
+Each mine is an ordinary spawned actor with its own authoritative owner.
+
+1. The authored placement offsets expand the target point into five deterministic spawn positions.
+2. The mine owner runs the trigger-radius overlap check locally from the mine's current position.
+3. If the first admitted trigger entity or any AoE targets are Ghosts, the mine owner emits the
+   ordinary target-owner relay payload rather than mutating Ghost state locally.
+4. Long-lived mines survive ordinary topology changes through the same spawned-actor handoff rules
+   as other `P-32` entities, including preserved owner linkage and expiry tick.
+
+So boundary handling is not bespoke to traps. The mine is just another spawned actor whose trigger
+and blast payloads already obey the standard authority model.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: mine count (5), placement pattern, arming delay (1s), trigger radius, blast radius, damage, mine lifetime (60s), visibility (invisible to enemies), detonation behavior (one-shot). Compiler produces: mine actor definitions with state machine + proximity trigger + AoE detonation + stealth flag + lifetime timer. The compiler needs to validate that the mine count is bounded and the proximity check is feasible.
+Designer specifies:
 
-## Open Questions
+- target anchor position
+- mine count
+- explicit placement offsets relative to that anchor
+- mine lifetime
+- arming delay
+- trigger radius
+- blast radius
+- hostile filter
+- detonation payload
+- observer-presentation / targetability policy for mine visibility and reveal behavior
 
-- Is the mine placement pattern deterministic (fixed pentagon) or has randomness (random within radius)?
-- Can mines be placed on top of each other?
-- Can allies trigger mines accidentally (friendly fire)?
-- Can enemies destroy mines if they have detection (attack the mine)?
-- Do mines have HP, or are they invulnerable until triggered/expired?
-- Does mine detonation trigger on-hit procs for the caster (SK-09 Chain Lightning)?
-- Can mine damage crit?
-- How do mines interact with SK-31 Vortex — can enemies be pulled onto mines?
-- Do mines count toward entity_count for split trigger purposes?
-- How does the 60-second lifetime interact with entity handoff during topology changes?
-- Performance: many casters placing mines = many dormant actors doing proximity checks every tick
+Compiler emits:
+
+- one `spawn_actor` trap effect with `count = 5`
+- one ability-local `placement` block carrying the authored offset list
+- one ability-local `interaction` block carrying arming, trigger, and detonation policy
+- one mine entity archetype with the authored observer/targetability metadata
+
+Compiler validates:
+
+1. `count <= max_spawns_per_rule`
+2. `count = len(placement.offsets)`
+3. `arming_delay_ticks >= 0`
+4. `trigger_radius > 0`
+5. `effect_radius > 0` for `radius_query`
+6. the mine payload uses ordinary spawned-actor / visibility surfaces rather than sketch-local
+   hidden-trap flags
+
+## Resolved Interaction Notes
+
+- Mine placement is deterministic. Designers author explicit offsets; the compiler does not inject
+  randomness into the pattern.
+- Friendly fire is controlled by the authored trigger/effect filters. This sketch uses enemy-only
+  admission.
+- Detection/reveal behavior is observer/targetability authoring. If the game wants revealed mines
+  to be destroyable, the mine archetype can simply expose enemy targetability once revealed.
+- Mine detonation is a normal authored AoE payload. Crit, on-hit hooks, and other combat-side
+  behavior follow the same combat contracts as any other hostile effect.
+- Mines count as ordinary spawned actors for entity-count and live-limit purposes while they exist.

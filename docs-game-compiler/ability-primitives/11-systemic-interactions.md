@@ -24,13 +24,13 @@ These three primitives emerged from the final 18 ability sketches (SK-108 throug
 
 **Description:** A game-data-defined lookup table where zone element types crossed with ability finisher types produce emergent combo effects, enabling cross-player synergies.
 
-**Sketches:** SK-120 (GW2 Combo System), SK-59 (Oil-Ignite — element combination), SK-95 (Mass Effect Detonation — primer/detonator pattern)
+**Sketches:** SK-120 (GW2 Combo System), SK-59 (Oil-Ignite — element combination)
 
 **Engine layer:** `game-adapter`
 
 **Dependencies:** P-14 (Continuous Proximity Monitor) — detecting when a finisher enters a field. P-32 (Actor Spawning) — fields are spawned zone actors. P-09 (Shape Overlap Query) — finisher position checked against field geometry.
 
-**Key constraints:** The matrix is defined entirely in game data (SpellData), not hardcoded in the engine. The engine provides the DETECTION mechanism; the game defines the CONTENT. Each zone carries an optional `combo_field_type` tag. Each ability carries an optional `combo_finisher_type` tag. When a finisher interacts with a field (projectile passes through, blast lands inside, leap traverses, whirl channels inside), the engine looks up `(field_type, finisher_type)` in the matrix and applies the result.
+**Key constraints:** The matrix is defined entirely in game data (SpellData), not hardcoded in the engine. The engine provides the DETECTION mechanism; the game defines the CONTENT. Each zone carries an optional `combo_field_type` tag. Each ability carries an optional `combo_finisher_type` tag. When a finisher interacts with a field (projectile passes through, blast lands inside, leap traverses, whirl channels inside), the engine looks up `(field_type, finisher_type)` in the matrix and applies the result. The resolved effect list executes in the finisher's local context while also exposing the interacting field actor via `combo_field_entity`, `combo_field_owner`, `combo_field_position`, and `finisher_position`, which allows deterministic oil-to-fire style replacement through ordinary authored sequencing such as `despawn_entity(combo_field_entity)` followed by a replacement field spawn.
 
 Combo detection rules:
 - **Projectile finisher:** checked per-tick during flight — first field intersection triggers.

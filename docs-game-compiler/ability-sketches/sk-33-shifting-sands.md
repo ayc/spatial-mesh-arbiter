@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-I cast a sandstorm zone that starts at a target position and slowly drifts in a direction over 6 seconds. Enemies caught inside have their movement speed reduced by 40% and take damage every second. The zone moves independently — I don't control it after casting.
+I cast a sandstorm zone that starts at a target position and slowly drifts in a direction over 6
+seconds. Enemies caught inside have their movement speed reduced by 40% and take damage every
+second. The zone moves independently after cast; I do not steer it once it is created.
 
 ## Primitive Composition
 
@@ -14,59 +16,123 @@ P-32 (Actor Spawning) → P-03 (Trajectory Steering) → P-44 (Pulse Timer)
 
 - Caster entity
 - Target position (ground-targeted, zone start position)
-- Drift direction (caster-to-target vector, or explicit angle)
+- Drift heading (commonly caster-to-target, but still lowered through the canonical self-propelled
+  heading pair)
 
 ## Observable Behavior
 
 1. Sandstorm zone appears at target position (circular, fixed radius)
 2. Zone begins drifting in the specified direction at a constant speed
-3. Every 1 second: enemies inside take X damage and are slowed by 40%
+3. Every 1 second, enemies inside take damage and receive a 40% movement slow
 4. As the zone moves, new enemies are caught and previously-inside enemies may escape
-5. Zone travels for 6 seconds then dissipates
-6. Caster is free to act — zone is autonomous after cast
+5. Zone travels for 6 seconds, then dissipates
+6. Caster is free to act; the zone is autonomous after cast
 7. Visual: moving sandstorm cloud, visibility reduction inside the zone
 
 ## Engine Primitives Required
 
-TODO: This is a **ZoneActor with velocity** — unlike SK-29 Blizzard (stationary) or SK-08 Aura (attached to entity), this zone moves independently along a vector. Each tick, the zone's position updates: `zone.position += zone.velocity * dt`. The spatial query for "who's inside" must use the zone's CURRENT position, not its spawn position.
+Shifting Sands is the canonical self-propelled `zone` pattern.
 
-The ZoneActor struct needs:
-- `position: Vec2F` (changes each tick)
-- `velocity: Vec2F` (constant drift vector)
-- `radius: SimFixed`
-- Pulse timer and damage/debuff payload
+The compiler lowers it to one spawned zone actor with:
 
-This is a new capability — existing ZoneActors are either stationary or attached to an entity. A self-propelled zone is a third mode.
+1. `position = requested ground target`
+2. `shape = circle`
+3. authored `radius`
+4. `duration_ticks = 360`
+5. `pulse_interval_ticks = 60`
+6. `pulse_effects = [damage(...), apply_debuff(shifting_sands_slow)]`
+7. `mobility = {`
+   `mode = self_propelled,`
+   `heading_from = ... ,`
+   `heading_to = ... ,`
+   `speed = ... ,`
+   `world_impact = ignore`
+   `}`
+8. ordinary `owner_entity_id` linkage back to the caster for source identity and kill credit
+
+This is not a bespoke "zone with velocity" subsystem anymore. It is the existing `ZoneMobilityBlock`
+surface with `mode = self_propelled`. The runtime advances the zone by its authored heading and
+speed every tick from the zone actor's current committed center.
+
+The slow is an ordinary negative status effect reapplied each pulse. With `max_stacks = 1`, staying
+inside the storm keeps one live 40% slow refreshed; leaving the storm keeps only the most recent
+slow instance until that short trailing duration expires naturally.
 
 ## Enter/Leave Detection
 
-TODO: Because the zone moves, entities can enter and leave without moving themselves — the zone passes over them. The enter/leave detection must account for both entity movement and zone movement. Each tick:
-1. Update zone position
-2. Query enemies within new radius
-3. Diff against previous tick's occupants
-4. Apply effects to new entrants, remove effects from those who left
+This sketch is pulse-driven, not edge-triggered.
 
-This is more expensive than a stationary zone because the occupant set changes every tick even if no entities move.
+Because it only authors `pulse_effects` and not `enter_effects`, `leave_effects`, or
+`persistence.mode = until_empty_on_pulse`, the runtime does not need a persistent occupant-set diff
+for Shifting Sands. Each pulse simply queries hostile occupants against the zone actor's current
+position for that tick.
+
+That means:
+
+1. the moving zone itself changes who is hit on the next pulse
+2. enemies entering mid-drift begin taking damage and slow on the next pulse
+3. enemies leaving keep only the most recent applied slow instance until it expires
+4. if a later design wants true enter/leave triggers, it should use the canonical occupant-set
+   path already defined for zones instead of adding Shifting-Sands-specific logic
 
 ## Cross-Boundary Concerns
 
-TODO: A moving zone can cross Arbiter boundaries during its lifetime. At spawn, it's on one Arbiter. As it drifts, it may enter a neighbor's region. Does the zone get handed off like a projectile (3-phase handoff protocol)? Or does it stay on the original Arbiter and relay effects to Ghosts? If it drifts entirely out of the original Arbiter's region, the original Arbiter can't query for local entities in the zone — they're all in the neighbor's region now.
+Shifting Sands follows the ordinary moving-zone authority model.
 
-This is architecturally similar to the projectile handoff problem but for a zone with area (not a point). The handoff protocol may need to account for zone geometry.
+1. The sandstorm is one zone actor with one authoritative owner at a time.
+2. While the zone center remains local, that owner advances the drift and runs pulse queries from
+   the zone's committed current position.
+3. If the zone center crosses a seam, the zone actor hands off like any other moving spawned actor;
+   there is no projectile-style three-phase impact protocol because the zone remains one persistent
+   actor rather than a prepare/ack/commit hit packet.
+4. Local targets resolve locally; Ghost targets use the ordinary target-owner relay path instead of
+   mutating Ghost HP or Ghost status locally.
+5. After handoff, the new owner continues the same authored drift heading, speed, and remaining
+   lifetime cap from the transferred zone state.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: zone shape (circle), radius, drift velocity (speed + direction), duration (6s), pulse interval (1s), damage per pulse, slow per pulse (40%), targeting filter (enemies). Compiler produces: ZoneActor with velocity field + per-tick position update + pulse behavior + enter/leave tracking. The compiler needs to distinguish three zone mobility modes: stationary, entity-attached, self-propelled.
+Designer specifies:
 
-## Open Questions
+- ground-targeted spawn position
+- zone radius
+- drift heading and speed
+- lifetime (`360` ticks)
+- pulse interval (`60` ticks)
+- hostile filter
+- damage payload per pulse
+- slow status payload per pulse (`40%` movement slow, short trailing duration)
+- optional persistence override if the storm should end on caster removal
 
-- Can the drift direction be curved (arc) or only linear?
-- Does the zone accelerate, decelerate, or maintain constant speed?
-- If the zone hits static geometry (wall), does it stop, pass through, or deflect?
-- Can multiple Shifting Sands zones overlap, and do their slows stack?
-- How does the zone interact with SK-31 Vortex — does the vortex pull the zone, or only entities?
-- When the zone crosses an Arbiter boundary, is this a full handoff or a relay arrangement?
-- Does the zone inherit the caster's offensive stats at cast time (epoch-pinned like projectiles)?
-- If the caster dies, does the zone persist?
-- Performance: moving zone = changing occupant set every tick = N spatial queries per second. What's the entity count bound?
-- Can enemies use SK-03 Terrain Wall to block the zone's path?
+Compiler emits:
+
+- one `zone` effect lowered to a spawned zone actor
+- `ZoneMobilityBlock { mode = self_propelled, heading_from, heading_to, speed }`
+- per-pulse hostile overlap evaluation from the zone's current position
+- one compiled slow `StatusEffectDefinition`
+- ordinary spawned-actor owner linkage back to the caster
+
+Compiler validates:
+
+1. `radius > 0`
+2. `duration_ticks > 0`
+3. `pulse_interval_ticks > 0`
+4. `speed > 0`
+5. the self-propelled heading pair is non-degenerate
+6. the slow is authored as an ordinary negative status, not as a custom moving-zone-only flag
+7. any source-death or world-impact behavior uses canonical `ZonePersistenceBlock` /
+   `ZoneMobilityBlock` fields instead of sketch-local booleans
+
+## Resolved Interaction Notes
+
+- This sketch uses constant-speed linear drift only. Curved or accelerating storm paths would need a
+  different authored mobility profile.
+- `world_impact = ignore` is the intended default here, so walls do not stop or deflect the storm.
+- Caster death does not automatically remove the zone; authored persistence decides that, and the
+  default remains `end_on_source_removed = false`.
+- Multiple sandstorms are ordinary multiple zone actors. Damage and slow stacking follow the
+  authored status and pulse rules rather than a sketch-local anti-stack rule.
+- `SK-31 Vortex` pulls entities, not hostile zones. This sketch does not grant a generic
+  zone-versus-zone force interaction system.
+- The zone is still bounded by the normal spawned-actor and monitored-zone limits; self-propelled
+  mobility does not create an unbounded per-tick query exception.

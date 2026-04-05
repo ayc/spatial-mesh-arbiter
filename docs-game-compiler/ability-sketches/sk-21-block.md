@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-My character has a chance to fully block incoming attacks, negating all damage from that hit. Block chance is derived from my shield/armor stats. After a successful block, block chance is temporarily reduced (diminishing returns) to prevent permanent invulnerability under rapid attacks.
+My character has a chance to fully block incoming attacks, negating all damage from that hit. Block
+chance is derived from my shield/armor stats. After a successful block, block chance is temporarily
+reduced (diminishing returns) to prevent permanent invulnerability under rapid attacks.
 
 ## Primitive Composition
 
@@ -12,48 +14,94 @@ P-38 (On-Block/Defend Hook)
 
 ## Inputs
 
-- Incoming damage event (any source)
-- Defender's block chance (derived stat)
-- Defender's current block penalty (accumulated from recent blocks)
+- Incoming damage event
+- Defender's block chance stat
+- Defender's current block DR penalty
 
 ## Observable Behavior
 
-1. Attack lands on me — block check is evaluated
-2. If block succeeds: damage is reduced to zero, "Blocked!" indicator shown
-3. After a successful block: block chance is reduced by a penalty (e.g., -15% per recent block)
-4. Block penalty decays over time (e.g., recovers fully over 3 seconds)
-5. Block can trigger SK-13 Counter-Strike (on-block proc)
-6. Block does NOT prevent non-damage effects (debuffs, displacement) unless specifically stated
-7. Visual: shield raise animation, spark effect on block
+1. An eligible incoming attack reaches the defender-side block gate.
+2. The engine evaluates effective block chance from the authored block stat minus any current DR
+   penalty.
+3. If the block succeeds, eligible HP/resource damage from that hit is reduced to zero and a
+   "Blocked!" indicator may be shown.
+4. Each successful block adds the authored DR penalty, reducing later block chance until the penalty
+   decays.
+5. The DR penalty decays over time using the authored decay interval and optional stack cap.
+6. Successful blocks may trigger ordinary `on_block` follow-up effects such as `SK-13
+   Counter-Strike`.
+7. In this reference, non-damage payloads continue unless the authored profile explicitly negates
+   them.
+8. Visual: shield raise / parry response and spark effect on successful block.
 
 ## Engine Primitives Required
 
-TODO: Block is evaluated early in Phase 2 (defense resolution), before damage mitigation (armor, resistances). If block succeeds, the entire damage pipeline short-circuits — no mitigation calc, no shield consumption, no thorns trigger. The block chance is a derived stat on DefensiveStats, but the diminishing returns penalty is a dynamic value on SoftState that changes per-tick. How is the block roll deterministic — engine-provided RNG seeded by tick + entity_id?
+Block is now the canonical `BlockDefenseDef` reference.
 
-## Interaction With Other Defensive Mechanics
+The recommended lowering is:
 
-This is where ordering matters. The Phase 2 pipeline must define when block is checked relative to:
-- **Evasion** — does evasion check happen before or after block? (Typically evasion first: evade = miss entirely, block = hit but negated)
-- **Shield (SK-17)** — if block fails, does the shield absorb? (Yes — block is checked first, shield is the next layer)
-- **Reflection (SK-22)** — if blocked, is there anything to reflect? (No — block negates the damage, nothing to calculate reflection on)
-- **Thorns (SK-23)** — if blocked, do thorns still fire? (Debatable — "you were hit" is ambiguous when the hit was blocked)
-- **Guardian Angel (SK-19)** — if damage is redirected, does the redirected portion get its own block check on the guardian?
-- **Counter-Strike (SK-13)** — triggers on successful block (confirmed interaction)
+1. author defender block policy as:
+   - `block_defense = {`
+     `chance_stat = block_chance,`
+     `applies_to = weapon_hits_only,`
+     `dr_penalty_per_block = 0.15,`
+     `dr_decay_interval_ticks = 180,`
+     `max_dr_stacks = ...,`
+     `negates_non_damage_effects = false`
+     `}`
+2. let successful blocks emit the ordinary Stage 9 `on_block` marker for any separate follow-up
+   passives such as Counter-Strike
+
+This keeps the mechanic inside existing compiler/core surfaces:
+
+- the block gate is already a canonical PreMitigation engine policy
+- diminishing returns are the built-in block DR penalty/decay model, not a sketch-local timer
+- successful blocks automatically publish the `on_block` event for later reactive hooks
 
 ## Cross-Boundary Concerns
 
-TODO: Block is resolved entirely on the defender's Arbiter during Phase 2. The attacker's CombatContext arrives with pre-rolled offensive data. The defender rolls the block check locally. If blocked, no damage is applied and no relay is needed — the event terminates. The only cross-boundary message would be if Counter-Strike triggers (SK-13), sending a counter-attack back to the attacker.
+Block is resolved entirely on the current target owner.
+
+1. The defender's current owner evaluates `BlockDefenseDef` during Stage 7 PreMitigation.
+2. A successful block prevents eligible HP/resource damage from entering later barrier/shield or
+   mitigation resolution on that branch.
+3. If the attacker is remote, there is no extra combat relay for the blocked branch itself; the
+   only possible follow-up relay is from later reactive `on_block` outputs such as Counter-Strike.
+4. If damage was already split onto multiple targets through another mechanic such as Guardian Angel,
+   each branch target evaluates its own block gate independently on its own owner.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: block chance source (derived stat), diminishing returns (penalty per block, decay rate), what block negates (damage only? effects too?), proc triggers (on-block). Compiler produces: Phase 2 check point in the mitigation pipeline + diminishing returns state tracking + proc trigger hook. The compiler needs to place this at the correct position in the `apply_combat_math` step ordering.
+Designer specifies:
 
-## Open Questions
+- which derived stat supplies block chance
+- which incoming hit classes are eligible (`applies_to`)
+- DR penalty per successful block
+- DR decay interval and optional stack cap
+- whether non-damage payloads are also negated
+- any separate `on_block` follow-up effects
 
-- Is block chance a flat percentage or does it scale with attacker stats (accuracy vs block)?
-- Does block work against all damage types (melee, ranged, spell, DoT ticks) or only specific types?
-- Can block chance exceed 100% (from stacking buffs), and if so is it capped?
-- Does the diminishing returns penalty apply per-source or globally (getting hit by 5 enemies simultaneously)?
-- Is the block roll per-hit or per-tick (matters for multi-hit abilities)?
-- Does blocking a DoT tick (SK-02 Poison pulse) block just that tick, or remove the DoT?
-- How does the deterministic RNG for block rolls work — seeded how to prevent prediction/manipulation?
+Compiler emits:
+
+- one `block_defense` profile on the entity definition
+- any optional passive `on_block` triggers that react to successful blocks
+
+Compiler validates:
+
+1. `chance_stat` references a valid derived defensive stat
+2. `dr_decay_interval_ticks > 0`
+3. `dr_penalty_per_block >= 0`
+4. `applies_to` is one of the canonical block profile enums
+
+## Resolved Interaction Notes
+
+- This reference uses `applies_to = weapon_hits_only`, so direct melee/ranged weapon attacks are
+  eligible but DoTs and ordinary spell ticks are not.
+- Successful block happens before shield absorption, so blocked hits do not consume ordinary
+  absorption barriers.
+- Reflection and thorns are keyed from `on_damage_received`; fully blocked hits therefore do not
+  produce those reactions in this reference because no committed damage reaches PostDamage.
+- If the wider combat pipeline rejects a hit earlier for some other reason, this block gate never
+  sees it.
+- Guardian-style redirected branches can still be blocked independently by the branch target,
+  because each branch resolves on that target's own authoritative owner.

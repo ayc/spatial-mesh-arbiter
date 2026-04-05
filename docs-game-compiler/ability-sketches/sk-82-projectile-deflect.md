@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-I activate a deflect stance for 1.25 seconds. During this time, I am Protected (invulnerable to damage). Any projectiles that would hit me are caught and returned to their source, dealing the original damage to the attacker. Non-projectile damage (melee, AoE zones) is blocked but not returned.
+I enter a short deflect stance for 1.25 seconds. While active, incoming projectile hits are caught
+and returned to their source. Non-projectile damage is still negated by the stance, but only true
+projectile actors are returned. The stance can be interrupted by ordinary cast-interrupting CC.
 
 ## Primitive Composition
 
@@ -13,89 +15,100 @@ P-61 (Projectile Ownership Hijacking) → P-03 (Trajectory Steering)
 ## Inputs
 
 - Caster entity
-- No target (self-only defensive activation)
+- No target (self-only activation)
 
 ## Observable Behavior
 
-1. Activate — enter deflect stance for 1.25 seconds
-2. Protected: take no damage from any source
-3. Projectile hits during deflect: projectile is caught and returned to the attacker
-4. Returned projectile deals the original damage to the attacker (using attacker's own offensive stats)
-5. Non-projectile damage: blocked (Protected) but not returned
-6. Melee attacks: blocked, not returned
-7. AoE zone damage: blocked, not returned
-8. The deflect stance does not prevent CC (stun can interrupt the deflect)
-9. Visual: swirling blade animation, caught projectiles visibly redirected
+1. Activate a self-only deflect stance for 1.25 seconds
+2. While active, damage is negated
+3. Incoming projectile actors are intercepted and retargeted to their original source
+4. The returned projectile preserves the original carried payload
+5. Melee hits, instant damage, beam damage, and zone pulses are negated by the stance but are not
+   returned
+6. The stance does not grant CC immunity; ordinary cast-interrupting CC can end it early
+7. Returned projectiles can hit the original attacker's allies/body-blockers through ordinary
+   projectile rules on the way back
+8. Infinite "deflect tennis" is not allowed
 
 ## Engine Primitives Required
 
-### Projectile Interception and Return
+Projectile Deflect is now a canonical short maintained self-defense pattern:
 
-This is fundamentally different from SK-22 Damage Reflection (percentage of damage returned as a new damage event). Projectile Deflect:
-- Only affects PROJECTILE entities (not instant damage, not melee, not zones)
-- CATCHES the projectile (removes it from flight)
-- RETURNS it to the source (creates a new projectile traveling back)
-- Uses the ORIGINAL attacker's damage (the CombatContext from the caught projectile)
+1. the ability authors a short `channel`
+2. the channel owns a maintained self-status for the duration
+3. that status carries:
+   - protection through canonical invulnerability authoring
+   - `projectile_intercept = {`
+     `mode = reflect_to_source,`
+     `max_redirect_generations = 1,`
+     `fallback_target = despawn,`
+     `preserve_original_payload = true`
+     `}`
 
-The Arbiter must:
-1. Detect "a projectile entity is about to hit this entity"
-2. Check "does this entity have ProjectileDeflect active?"
-3. If yes: instead of resolving the projectile's damage, REVERSE the projectile
-4. The reversed projectile targets the original caster, carrying the original CombatContext
-5. The original caster takes their own damage (through their own Phase 2 defenses)
+The recommended channel shape for this sketch is:
 
-### Projectile vs Non-Projectile Classification
+- `cast_time_ticks = 75`
+- `channel = {`
+  `execution_mode = tick_while_active,`
+  `movement_lock = none,`
+  `allow_other_abilities = false,`
+  `break_on_displacement = false`
+  `}`
 
-The engine must distinguish between damage sources:
-- **Projectile entity collision:** Deflectable (SK-02 Poison Shot, SK-43 Drag tongue, SK-80 Wall Bounce)
-- **AoE zone pulse:** Not deflectable (SK-29 Blizzard, SK-08 Aura)
-- **Melee attack:** Not deflectable (close-range, no projectile)
-- **Instant targeted damage:** Not deflectable (no projectile entity in flight)
-- **Beam damage:** Not deflectable? (SK-63 Steerable Beam — continuous line, not a projectile entity)
+The key point is that the stance is maintained, not fire-and-forget. Stage 11 teardown removes the
+channel-owned protection/intercept status immediately if the channel expires or breaks early.
 
-The classification must be clear: deflect only works on damage delivered via a ProjectileActor entity.
-
-### Reversed Projectile Creation
-
-When a projectile is deflected:
-1. The original projectile is despawned (caught)
-2. A new projectile is created at the deflector's position
-3. The new projectile targets the original caster
-4. The new projectile carries the original CombatContext (attacker's offensive stats)
-5. The CombatContext's "source" is now ambiguous — the deflector didn't create the damage, but they redirected it
-
-For kill credit: if the deflected projectile kills the original caster, who gets the kill? The deflector? The caster (killed by their own damage)?
+`projectile_intercept` is only for true projectile actors. It does not apply to melee, instant
+targeted damage, zone pulses, or other non-projectile delivery paths. Those are simply negated by
+the protection state and produce no returned projectile.
 
 ## Cross-Boundary Concerns
 
-TODO: A projectile from Arbiter A (attacker) flies toward the deflector on Arbiter B. The projectile was handed off to Arbiter B during flight. On deflection:
+Projectile Deflect follows the canonical `P-61` return path.
 
-1. Arbiter B catches the projectile (despawns it)
-2. Arbiter B creates a new projectile targeting the original caster (on Arbiter A)
-3. The new projectile needs to be handed off BACK to Arbiter A
-4. The original CombatContext (with attacker's offensive stats) is carried along
+1. A projectile can cross into the deflector's Arbiter through ordinary projectile handoff
+2. If it impacts during the active stance, the deflector's owner applies the local intercept rule
+3. The projectile's redirect-generation counter increments
+4. Control of the returned projectile transfers to the intercepting side
+5. The returned projectile is retargeted to the original source and then follows the ordinary
+   projectile/handoff rules back through the mesh
+6. If the redirect would exceed `max_redirect_generations`, it is rejected instead of creating a
+   ping-pong loop
 
-This is a projectile round-trip: A → B (original) → B catches → B → A (deflected). Two handoffs for one projectile interaction.
+Because the returned projectile becomes an ordinary live projectile again, any later collision,
+body-block, mitigation, or kill-credit handling follows the same canonical rules as a normal
+projectile after interception.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: duration (1.25s), Protected (invulnerable during), deflect projectiles (catch + return), non-projectile damage blocked but not returned, CC still affects, returns use original CombatContext. Compiler produces:
-- Protected status effect (invulnerable) with projectile deflect modifier
-- Projectile collision override: if deflect active → intercept + reverse instead of damage
-- Reversed projectile creation with original CombatContext
-- Damage source classification (projectile vs non-projectile)
+Designer specifies:
 
-The compiler needs to express "this invulnerability has a special interaction with projectile entities" — a conditional override on the projectile collision path.
+- stance duration
+- whether movement is allowed during the stance
+- early-break behavior through ordinary channel policy
+- projectile return policy (`reflect_to_source`, payload preservation, redirect bound)
 
-## Open Questions
+Compiler emits:
 
-- Can deflect return SK-41 Detonation Arrow (catch it and the deflector controls when it detonates)?
-- Can deflect catch SK-55 Growing Projectile (returns it at its current size)?
-- Does the deflected projectile trigger on-hit procs for the deflector or the original caster?
-- Can the deflected projectile be deflected AGAIN by the original caster (infinite deflect tennis)?
-- Does deflect work against SK-62 Boomerang projectiles (catch them on return trip)?
-- Does deflect catch SK-09 Chain Lightning bounces (is a chain bounce a "projectile")?
-- Can deflect catch SK-71 Sticky Bomb mid-flight (before it attaches)?
-- If multiple projectiles hit during deflect, are ALL of them returned?
-- Does the deflect stance block SK-40 Mind Control (not a projectile — should still affect)?
-- Can the deflected projectile be intercepted by body-blocking allies of the original caster?
+- one self-only maintained-cast/channel
+- one channel-owned self-status that grants protection and projectile interception
+- `projectile_intercept` metadata with `max_redirect_generations = 1`
+- maintained-output teardown so interruption cleanly ends the stance
+
+Compiler validates:
+
+1. `cast_time_ticks > 0` when the channel is authored
+2. `projectile_intercept.max_redirect_generations > 0`
+3. the deflect path uses canonical projectile interception rather than a sketch-local damage-reflect clone
+4. non-projectile negation comes from the stance's protection state, not from `projectile_intercept`
+
+## Resolved Interaction Notes
+
+- Because ownership transfers to the intercepting side, kill credit from a lethal returned
+  projectile belongs to the deflector, not to the original attacker.
+- `fallback_target = despawn` is used here: if the original source no longer exists, the caught
+  projectile is simply removed instead of flying to a stale last-known position.
+- All projectile hits during the active stance may be returned; the one-bounce limit is per
+  projectile redirect generation, not per stance activation.
+- The stance does not make the user untargetable or immune to CC. Stun, silence, and sleep follow
+  the canonical channel-break rules and end the maintained stance early.

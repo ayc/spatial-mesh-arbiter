@@ -29,96 +29,74 @@ P-39 (On-Death Hook) → P-47 (Spatial Corpse Registry) → P-11 (N-Nearest Neig
 
 ## Engine Primitives Required
 
-### Multi-Consumer Spatial Resource
+Corpse Economy is now a canonical corpse-profile plus `consume_corpse` reference.
 
-SK-45 Essence Collection has one pickup type consumed by one ability (collect essence → activate trait to heal). Corpse Economy has one resource type (corpses) consumed by MULTIPLE DIFFERENT abilities, each producing a different outcome:
+The canonical contract is:
 
-```
-struct CorpseEntity {
-    corpse_id: EntityID,
-    position: Vec2F,
-    source_entity_max_hp: SimFixed,  // For Corpse Explosion damage scaling
-    source_entity_level: u16,        // For Raise Skeleton stat scaling
-    created_at_tick: u64,
-    expires_at_tick: u64,
-    consumed: bool,
-}
-```
+1. qualifying entity types define a `corpse_profile` so terminal death creates corpse-registry
+   entries with retained death position and any needed stat snapshots
+2. corpse-consuming abilities use `consume_corpse` to:
+   - choose a corpse explicitly (`selection = target`)
+   - choose the nearest corpses to the caster/target/position
+   - optionally bind corpse position and retained corpse stats into downstream effects
+3. child effects then consume those bindings to produce different outcomes:
+   - Corpse Explosion: damage/aoe centered on `bind_position_as`
+   - Raise Skeleton: `spawn_actor` at `bind_position_as`, scaling from `bind_stats`
+   - Corpse Lance: select `count = N` corpses and emit one projectile/effect chain per corpse
 
-The key difference from single-consumer pickups:
-- SK-45: walk over orb → one effect (credit essence)
-- SK-115: target corpse with ability A → effect A (explosion). OR target with ability B → effect B (summon). OR ability C auto-selects nearest corpses → effect C (projectiles)
+This keeps the entire mechanic inside existing corpse surfaces:
 
-The engine must support: "this ability consumes a corpse entity" as a COST, where the consumed entity's data is available to the ability resolution.
-
-### Corpse as Ability Input
-
-When an ability targets or consumes a corpse, the ability resolution receives the CORPSE'S DATA as input:
-- Corpse Explosion: `damage = corpse.source_entity_max_hp * percentage` — damage scales with the dead enemy's stats
-- Raise Skeleton: `skeleton_hp = base + corpse.source_entity_level * scaling` — minion stats scale with corpse quality
-- Corpse Lance: `projectile_count = nearby_corpses.len()` — more corpses = more projectiles
-
-The ability's stage-execution path must receive the consumed corpse's data alongside the normal CombatContext. This is a new input type for ability resolution — not just "caster stats + target stats" but also "consumed entity stats."
-
-### Spatial Resource Management
-
-Corpses are POSITIONED resources. Their location matters:
-- Corpse Explosion: AoE originates at the CORPSE's position, not the caster's
-- Raise Skeleton: minion spawns at the CORPSE's position
-- Corpse Lance: projectiles launch FROM corpse positions
-
-The caster must be near corpses to use them (range check against corpse positions). Abilities that consume corpses perform a spatial query for "nearest corpse within range."
-
-### Contention: Multiple Consumers
-
-If multiple Necromancers are in the same fight, they compete for corpses. Corpse consumption must be atomic — the first ability to claim a corpse gets it. The second ability targeting the same corpse fails (corpse already consumed).
-
-```
-fn try_consume_corpse(corpse: &mut CorpseEntity) -> bool {
-    if corpse.consumed { return false; }
-    corpse.consumed = true;
-    true
-}
-```
-
-This is a contention lock on a resource — similar to the contention lock algorithm gap (T1-04) in the spec.
-
-### Corpse Generation Rate
-
-In a big fight, many enemies die = many corpses = lots of resources. In a quiet area, few corpses = limited ability usage. The corpse economy creates a **fight-dependent resource cycle**: the more enemies you kill, the more corpses you get, the more abilities you can use. This is intrinsically tied to the ARPG combat loop.
+- corpses are not a bespoke second resource type outside the corpse registry
+- multiple different abilities can consume the same corpse class through their own authored
+  `consume_corpse` blocks
+- corpse-derived position and stat snapshots are canonical bindings, not ad hoc effect-local data
+- atomic first-claim-wins contention is already part of `consume_corpse`
 
 ## Cross-Boundary Concerns
 
-TODO: Corpses are stationary entities on whichever Arbiter the enemy died on. Cross-boundary concerns:
+Corpse Economy follows the current canonical corpse rule: corpse access is local to the death
+Arbiter.
 
-1. **Corpse near boundary**: A corpse is on Arbiter A near the boundary. A Necromancer on Arbiter B wants to consume it. The Necromancer's Arbiter needs to know about the corpse (is it visible as a Ghost-like entity?). If yes, the consume command relays to Arbiter A.
-
-2. **Corpse Lance from cross-boundary corpses**: Corpse Lance consumes the nearest N corpses. Some might be on the local Arbiter, some near the boundary on a neighbor. Multi-Arbiter corpse consumption in a single ability.
-
-3. **Corpse explosion near boundary**: The AoE originates at the corpse position on Arbiter A. Enemies in the AoE might be Ghosts from Arbiter B. Standard AoE relay.
-
-Simplest approach: corpses are only consumable by entities on the same Arbiter. You must walk to where the corpses are.
+1. `consume_corpse` query modes read only the CURRENT Arbiter's authoritative corpse registry.
+2. Remote/Ghost corpse access fails cleanly rather than relaying a corpse claim across Arbiters.
+3. Atomic corpse claim happens before child effects execute, so a corpse can feed at most one
+   successful consuming branch even under local contention.
+4. Once a corpse is successfully selected and claimed, corpse-derived bindings such as death
+   position and retained stats are immutable snapshots for that effect execution.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: death-spawned corpse entities (position, source stats, lifetime), multiple abilities that consume corpses for different effects (explosion, summon, projectile), corpse as ability cost + data input, spatial resource (position matters), contention resolution (first-claim-wins). Compiler produces:
-- CorpseEntity definition (spawned on qualifying entity death)
-- Per-ability corpse consumption logic (atomic claim)
-- Per-ability resolution using corpse data as input (damage from corpse HP, minion from corpse level)
-- Spatial query for nearby corpses (range check from caster)
-- Corpse lifetime management (expiry timer)
+Designer specifies:
 
-The compiler needs to support **entity-as-ability-cost** — abilities that consume a spatial entity and use that entity's data in resolution. This generalizes beyond corpses to any consumable placed entity.
+- which entity types produce corpse records
+- corpse persistence duration and retained snapshot fields
+- per-ability corpse selection mode, range, count, and filter
+- which corpse stats/position bindings each consuming ability needs
+- whether each ability actually consumes the corpse or only reads it
 
-## Open Questions
+Compiler emits:
 
-- Do all enemy deaths produce corpses, or only specific types (monsters, not summons)?
-- Can allies' deaths produce corpses (consume your own team's corpses)?
-- Do corpses block pathing?
-- Can enemies interact with corpses (deny them by destroying/consuming them)?
-- Does the corpse's source_entity_max_hp use pre-buff or base max HP?
-- How many corpses can exist simultaneously on one Arbiter (entity_count concern)?
-- Can corpses be created by abilities (e.g., "create a corpse at target position" for setup)?
-- Does SK-107 Corpse Possession compete with Corpse Economy for the same corpses?
-- How does the corpse economy interact with SK-06 Summon Swarm — do killed summons leave corpses?
-- Does Kinematic Dilation affect corpse expiry timers?
+- corpse-bearing entity definitions through `corpse_profile`
+- per-ability `consume_corpse` blocks with deterministic query/claim semantics
+- downstream effect chains that read corpse position/stat bindings for explosion, summon, or
+  projectile outcomes
+
+Compiler validates:
+
+1. corpse-consuming queries use canonical dead/corpse filters
+2. query modes supply required `range` / `center` / `count` fields
+3. requested corpse stat bindings are unique within one `consume_corpse` block
+4. remote/Ghost corpse consumption is not authored under the current canonical profile
+
+## Resolved Interaction Notes
+
+- Only entity types with a qualifying `corpse_profile` create usable corpse records. This sketch
+  does not imply "all deaths always leave corpses."
+- `SK-107 Corpse Possession` competes for the same local corpse registry. The first successful
+  consumer claim wins; later contenders fail cleanly.
+- Corpse-derived stat scaling uses the retained corpse snapshot chosen by the entity's corpse
+  profile, not a live pointer into the dead entity.
+- Corpse Lance and other multi-corpse consumers use deterministic `(distance, corpse_id)` ordering
+  when selecting more than one corpse.
+- Corpse lifetime is ordinary corpse-profile persistence in simulation ticks, so Kinematic Dilation
+  does not create a separate corpse-expiry time base.

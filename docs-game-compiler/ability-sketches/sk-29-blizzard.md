@@ -21,39 +21,105 @@ P-32 (Actor Spawning) → P-09 (Shape Overlap Query) → P-44 (Pulse Timer)
 2. Every 1 second: all enemies inside take X cold damage
 3. Every 1 second: all enemies inside receive 30% movement slow (refreshed each pulse, effectively permanent while inside)
 4. Enemies entering mid-duration begin taking damage/slow on the next pulse
-5. Enemies leaving the zone lose the slow after it expires (1-2 seconds)
+5. Enemies leaving the zone keep only the most recently applied slow instance, which expires naturally after its authored duration
 6. Caster is free to move and act after casting — zone is independent
 7. Zone persists for 8 seconds then dissipates
 8. Visual: swirling snow/ice effect within the zone boundary
 
 ## Engine Primitives Required
 
-TODO: This is the canonical ZoneActor — a stationary, independent actor that runs its own tick loop. Each pulse: spatial query for "enemies within radius," apply damage + apply slow debuff to each. The ZoneActor has its own lifecycle (spawn tick, expiry tick), its own CombatContext (caster's offensive stats baked in at cast time), and its own pulse timer. How does the ZoneActor relate to the caster — does it retain a reference to the caster's EntityID for kill credit? What if the caster dies — does the zone persist?
+This is the canonical stationary `zone` pattern. The compiler lowers Blizzard to one spawned zone
+actor (`P-32`) with:
+
+1. `position = requested ground target`
+2. `shape = circle`
+3. authored `radius`
+4. `duration_ticks = 480`
+5. `pulse_interval_ticks = 60`
+6. `pulse_effects = [cold damage, apply_debuff(blizzard_slow)]`
+
+The zone actor owns its own lifetime cap, pulse timer, and current center, but it also retains the
+normal spawned-actor `owner_entity_id` linkage to the caster for source identity and kill credit.
+That owner linkage survives ordinary handoff and is cleaned up through the normal `P-32` owner-death
+notification path. Whether the storm despawns on caster death is not bespoke to Blizzard; it is
+authored through `ZonePersistenceBlock.end_on_source_removed`, whose default is `false`.
+
+The slow portion is not `apply_cc`. It is an ordinary negative `StatusEffectDefinition` authored
+through `apply_debuff`, with a movement-speed `stat_modifier`, `cc_category = soft_disable`, and
+`duration_scaling = status_resistance`. With `max_stacks = 1`, repeated pulses keep one live slow
+instance on the target instead of building an unbounded stack ladder.
 
 ## Enter/Leave Detection
 
-TODO: The zone needs to track who is currently inside for two reasons:
-1. Only pulse entities that are inside (not re-apply to entities who already left)
-2. The slow debuff needs cleanup when an entity leaves
+Blizzard does NOT need explicit leave cleanup or a persistent occupant set. Because the sketch only
+authors `pulse_effects` and not `enter_effects`, `leave_effects`, or `persistence.mode =
+until_empty_on_pulse`, the runtime can use a fresh hostile overlap query on each pulse from the
+zone actor's committed current position.
 
-Is this a set of EntityIDs maintained per-zone that is diffed each pulse? Or does each pulse do a fresh spatial query and apply effects without tracking membership? If fresh query: the slow from the previous pulse might still be active when the entity leaves, giving a trailing slow. If tracked: the zone maintains state and explicitly removes the slow on leave.
+That means:
+
+1. Entities that are outside on a given pulse are simply not hit on that pulse.
+2. The slow "cleanup" is just expiry of the last applied slow status instance.
+3. If a designer later wants true enter/leave triggers or early-despawn-when-empty behavior, that
+   is when the canonical occupant-set path is required.
 
 ## Cross-Boundary Concerns
 
-TODO: The zone is placed at a position that might be near an Arbiter boundary. Enemies in the zone might be Ghosts owned by a different Arbiter. Each pulse that hits a Ghost generates a damage relay to the Ghost's owning Arbiter. With 8 pulses over 8 seconds and potentially many Ghosts, this is a steady stream of cross-boundary traffic. What if the zone straddles a boundary — part of the radius is in one Arbiter's region, part in another? Can a zone exist in two Arbiters simultaneously, or must it be owned by one?
+Blizzard is still one zone actor with one authoritative owner. It does not split into multiple
+Arbiters when its radius overlaps a boundary. The authoritative zone owner is whichever Arbiter owns
+the spawned zone actor's center position; neighboring Arbiters participate through the Ghost/relay
+model, not by creating duplicate half-zones.
+
+Per pulse:
+
+1. The zone owner runs the hostile overlap query.
+2. Local targets are resolved locally.
+3. Ghost targets generate the normal cross-boundary hostile relay path.
+4. The target owner then performs target-side defense and status admission for the cold damage and
+   slow application.
+
+Because Blizzard is stationary, there is no zone-owner handoff after spawn in the normal case. If a
+future moving-zone variant is authored, the zone actor would use ordinary spawned-actor handoff and
+keep its `owner_entity_id` linkage intact.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: zone shape (circle), radius, pulse interval (1s), duration (8s), damage per pulse, damage type (cold), debuff per pulse (30% slow, 1-2s duration), targeting filter (enemies). Compiler produces: ZoneActor definition with pulse behavior, targeting filter, damage payload, debuff payload, lifecycle timer. This should be a common pattern — many abilities are variations of "place zone, pulse effects."
+Designer specifies:
 
-## Open Questions
+- ground-targeted placement
+- zone radius
+- duration (`480` ticks)
+- pulse interval (`60` ticks)
+- hostile filter
+- cold damage payload per pulse
+- slow status payload per pulse (`30%` movement slow, short trailing duration)
+- optional persistence override if the storm should end on caster removal
 
-- Does the zone damage the caster's allies if they stand in it (friendly fire)?
-- Does the zone interact with SK-03 Terrain Wall — can you wall enemies inside a blizzard?
-- If the caster dies, does the zone persist for its full duration?
-- Does each pulse roll crit independently, or is crit determined at cast time?
-- Can enemies block (SK-21) or evade individual pulses?
-- Does the slow from each pulse stack with itself (30% + 30% = 60%) or refresh (always 30%)?
-- How does Kinematic Dilation affect pulse interval — do pulses happen slower in dilated zones?
-- Can the zone be dispelled or destroyed by enemies?
-- Does the zone count as an entity for Arbiter entity_count / split trigger purposes?
+Compiler emits:
+
+- one `zone` effect lowered to a spawned stationary zone actor
+- one compiled `StatusEffectDefinition` for the Blizzard slow
+- per-pulse overlap evaluation with `pulse_effects = [damage, apply_debuff]`
+- spawned-actor owner linkage back to the caster
+
+Compiler validates:
+
+1. `radius > 0`
+2. `duration_ticks > 0`
+3. `pulse_interval_ticks > 0`
+4. `pulse_effects` is present because the ability is pulse-driven
+5. the slow status is a negative status and not a positive buff
+6. any persistence override uses the canonical `ZonePersistenceBlock` fields instead of sketch-local flags
+
+## Resolved Interaction Notes
+
+- Friendly fire is controlled by the authored hostile filter. This sketch targets enemies only.
+- Caster death does not automatically remove the zone; authored persistence decides that.
+- Each pulse is its own hostile application. Crit, block, evade, and other ordinary combat outcomes
+  are resolved per pulse through the standard combat pipeline.
+- The slow is the same authored status re-applied on each pulse; with `max_stacks = 1`, Blizzard is
+  a refresh-style 30% slow, not a self-stacking 60%/90% slow ladder.
+- Kinematic Dilation does not change the engine's 60Hz clock. The zone pulse timer remains tick
+  based; dilation changes entities' kinematic/cast rates, not the server tick schedule.
+- The zone is a spawned actor and therefore counts against the normal spawned-actor / entity-count
+  bounds while it exists.

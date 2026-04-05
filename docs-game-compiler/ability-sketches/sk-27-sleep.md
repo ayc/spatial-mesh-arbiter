@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-I put an enemy to sleep for 5 seconds. They cannot act at all — fully disabled like a stun, but with a longer duration. However, the sleep breaks instantly if the sleeping entity takes any damage. This creates tactical tension: the CC is powerful but fragile.
+I put an enemy to sleep for 5 seconds. They cannot act at all, like a stun, but the sleep breaks
+instantly if the sleeping entity takes damage. This creates tactical tension: the CC is powerful
+but fragile.
 
 ## Primitive Composition
 
@@ -13,48 +15,94 @@ P-26 (Capability Bitmask) → P-36 (On-Damage-Received Hook)
 ## Inputs
 
 - Caster entity
-- Target enemy entity (must be in range)
+- Target enemy entity
 
 ## Observable Behavior
 
-1. Ability lands on target — sleep is applied for 5 seconds
-2. Target cannot move, attack, or cast (full disable like stun)
-3. Active channels are interrupted
-4. If the sleeping entity takes ANY damage: sleep breaks immediately
-5. Damage from any source breaks sleep (allies, enemies, DoTs, environmental)
-6. After sleep breaks (by damage or expiry): CC immunity window applies
-7. Duration reduced by tenacity
-8. Diminishing returns apply (same hard CC category as stun)
-9. Cleansable by SK-15 Purify
-10. Visual: zzz effect, entity in a resting pose
+1. The ability lands and applies sleep for 5 seconds.
+2. While asleep, the target cannot move, attack, or cast.
+3. Active casts and channels are interrupted immediately on admission.
+4. Any non-zero committed damage instance breaks the sleep immediately.
+5. The hit that breaks sleep still resolves normally; sleep does not absorb that damage.
+6. Duration is reduced by the target's `status_effect_resistance`.
+7. Diminishing returns follow the shared hard-disable DR policy.
+8. When the sleep expires or breaks, the authored follow-up CC-immunity window applies.
+9. Purify-style cleanse removes the sleep early.
+10. Visual: sleeping/zzz presentation on the disabled target.
 
 ## Engine Primitives Required
 
-TODO: Sleep is functionally identical to stun (all capabilities suppressed) but with a **break-on-damage condition**. Every incoming damage event targeting a sleeping entity must check the sleep status BEFORE applying damage. On break: remove the sleep effect, then apply the damage normally. The ordering is critical — does the full damage apply after the sleep breaks, or is the first tick of damage "absorbed" by the sleep?
+Sleep is authored through canonical `apply_cc`; its break-on-damage rule is part of the built-in
+sleep profile rather than a bespoke sketch-local callback.
 
-## Break Condition Complexity
+The runtime contract is:
 
-The break-on-damage check interacts with multiple damage sources:
-- **Direct hits** — straightforward, breaks sleep, damage applies
-- **DoT ticks (SK-02 Poison)** — a poison tick breaks the sleep. Was this intentional by the poisoner?
-- **AoE damage (SK-08 Aura, SK-10 Crit Explosion)** — friendly AoE accidentally breaking a teammate's sleep setup
-- **Thorns (SK-23)** — if a sleeping entity has thorns and someone melees them... the attacker takes thorns damage, but thorns doesn't damage the sleeping entity. Wait — the sleeping entity took a melee hit, which should break sleep. But thorns fires as a response. Does the hit break sleep, or does the sleep prevent the hit from being "received"?
-- **Reflected damage (SK-22)** — if someone attacks a sleeping entity that has damage reflection... does the hit break sleep first, then reflection fires?
+1. the ability emits `apply_cc { cc_type = sleep, category = hard_disable, duration_ticks = 300,
+   dr_category = hard_disable }`
+2. `apply_cc` lowers to a generated negative status carrying:
+   - `cc_behavior_profile = sleep`
+   - `cc_category = hard_disable`
+   - `duration_scaling = status_resistance`
+   - ordinary status metadata such as `is_cleansable`
+3. if admitted, that generated status suppresses `CAN_MOVE`, `CAN_ATTACK`, and `CAN_CAST`
+4. the sleep behavior profile interrupts active casts/channels on admission and breaks after any
+   non-zero committed damage instance
+5. an authored `on_expire_effects` follow-up may grant the brief post-sleep hard-disable immunity
+   window
+
+This keeps the mechanic inside existing canonical surfaces:
+
+- the full-disable behavior is the built-in sleep profile
+- the break condition is profile-defined and does not need a bespoke extra trigger
+- the post-sleep immunity window is just an ordinary positive follow-up status
 
 ## Cross-Boundary Concerns
 
-TODO: Sleep is applied via relay to the target's owning Arbiter. The owning Arbiter manages the break condition. Any damage event arriving on the sleeping entity — from local sources or cross-boundary relays — must check sleep status. The break is local to the owning Arbiter. The concern: if a DoT is ticking on the target from a caster on a different Arbiter, the DoT pulse arrives as a relay and triggers the break check.
+Sleep uses the ordinary target-owner CC path, and the break check is also target-owner local.
+
+1. Remote/Ghost targets receive the `apply_cc` payload on their authoritative owner.
+2. That same owner evaluates later break conditions when any local or relayed damage arrives on the
+   sleeping entity.
+3. If a qualifying hit deals non-zero committed damage, the target owner removes the sleep status
+   before later same-stage timer firings; the hit that broke sleep still resolves normally.
+4. If the target hands off while asleep, the active status transfers as ordinary SoftState and the
+   new owner continues evaluating later break checks.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: CC type (sleep — hard disable with break condition), duration (5s), capability suppression (all), break condition (any damage taken), interrupts channels, DR category (hard CC), tenacity-reducible, cleansable. Compiler produces: status effect with capability flags + break condition trigger registered in the damage resolution path. The compiler needs to express "on incoming damage, remove this effect before damage applies."
+Designer specifies:
 
-## Open Questions
+- hostile target filter and range
+- `cc_type = sleep`
+- sleep duration
+- whether the effect is cleansable
+- the DR category for the effect
+- any follow-up post-sleep immunity status
 
-- Does the damage that breaks sleep benefit from the target being "disabled" (bonus damage to CC'd targets)?
-- Is there a minimum damage threshold to break sleep (to prevent 1-damage ticks from breaking it)?
-- Does sleep break on damage-over-time application (when the DoT is first applied) or on each tick?
-- If the sleeping entity is shielded (SK-17), does damage absorbed by the shield count as "taking damage" for break purposes?
-- Does sleep break on self-damage (SK-17 Sacrifice Shield's self-damage cost)?
-- Can sleep be applied to an entity that is already stunned (stun overrides, or sleep queues)?
-- Does the break-on-damage check happen before or after block (SK-21)? If the hit is blocked (no damage), does sleep break?
+Compiler emits:
+
+- one canonical `apply_cc` payload with `cc_type = sleep`
+- one generated negative status entry using the canonical sleep behavior profile
+- target-side `duration_scaling = status_resistance` and the authored `dr_category`
+- any optional positive follow-up immunity status on break/expiry
+
+Compiler validates:
+
+1. `cc_type = sleep` pairs only with canonical `category = hard_disable`
+2. `duration_ticks > 0`
+3. the authored `dr_category` is a supported DR domain
+4. sleep uses the canonical built-in break-on-damage profile rather than inventing a second custom
+   damage-intercept path
+
+## Resolved Interaction Notes
+
+- Only non-zero committed damage breaks sleep in this reference. Fully blocked hits or zero-damage
+  branches do not break it.
+- Shield-absorbed hits break sleep only if some non-zero committed damage still gets through to the
+  sleeping target's branch. Full negation does not break it.
+- DoT ticks break sleep if the tick deals non-zero damage, because the sleep profile keys from any
+  committed damage instance.
+- The hit that breaks sleep may still drive later non-sleep consequences of that same hit. Sleep
+  does not retroactively cancel the damage source that woke the target.
+- Root, silence, and stun interactions are just ordinary CC composition/admission rules. Sleep does
+  not need a bespoke queueing system beyond the shared target-side CC registry and DR policy.

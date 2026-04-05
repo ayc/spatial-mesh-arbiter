@@ -31,107 +31,118 @@ P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-06 (Attached Kine
 
 ## Engine Primitives Required
 
-### Moving Enterable Vehicle
+Mobile Transport is now a canonical spawned shell + container + late-bound transit reference.
 
-SK-60 Bunker is a STATIONARY enterable structure. Mobile Transport adds MOVEMENT:
+The recommended lowering is:
 
-```
-struct TransportActor {
-    transport_id: EntityID,
-    hp: SimFixed,
-    max_hp: SimFixed,
-    occupants: Vec<EntityID>,
-    max_occupants: u8,
-    owner_team: TeamId,
-    phase: TransportPhase,
-}
+1. the summon cast spawns one dropship shell at `caster_position` and writes its actor ref into a
+   runtime bookmark state for later launch
+2. the dropship archetype carries:
+   - authored HP and ordinary enemy targetability
+   - optional allied-beneficial targetability if the design wants in-flight repairs
+   - `container_profile = {`
+     `max_capacity = 5,`
+     `entry_range = ... ,`
+     `allowed_filter = ally_alive,`
+     `occupant_storage_mode = attached_visible,`
+     `occupant_can_be_targeted = false,`
+     `occupant_cast_policy = none,`
+     `allow_manual_exit = false,`
+     `eject_on_removed = true`
+     `}`
+3. allies (including the caster) enter through ordinary `enter_container` interactions while the
+   shell is still grounded
+4. the launch cast targets one ground position and emits:
+   - `start_actor_transit(target = { state_entity: dropship_shell_state },`
+     `destination = cursor_position,`
+     `speed = ... ,`
+     `arrival_radius = ... ,`
+     `on_arrival_effects = [`
+     `exit_container(container = transit_actor, mode = all_occupants, exit_position = container_position),`
+     `despawn_entity(target = transit_actor)`
+     `])`
+5. the dropship shell's ordinary `on_death` cleanup emits:
+   - `exit_container(container = caster, mode = all_occupants, exit_position = container_position,`
+     `on_exit_effects = [apply_cc(target = target, cc_type = stun, category = hard_disable, duration_ticks = 30)])`
 
-enum TransportPhase {
-    Loading { expires_at_tick: u64 },            // On ground, allies entering
-    InFlight { destination: Vec2F, speed: SimFixed }, // Moving to destination
-    Landing,                                      // Arriving, occupants exiting
-    Destroyed { crash_position: Vec2F },          // Shot down
-}
-```
+This keeps the mechanic inside the canonical compiler surface:
 
-### Flight Path
+- `spawn_actor` provides the transport shell
+- `P-58` / `container_profile` provide loading, occupancy, and occupant protection
+- `start_actor_transit` provides the later "fly this already-live shell to the chosen point"
+  contract
+- ordinary `exit_container` and `on_death` hooks provide landing and crash handling
 
-The transport moves from origin to destination at a fixed speed:
-- Each tick: `transport.position += normalize(destination - position) * speed`
-- The transport traverses the map in a straight line
-- Travel time = distance / speed
-
-During flight, the transport is an entity moving at high speed. Unlike normal entity movement (bounded by movement speed caps), the transport can move at arbitrary speed (it's a vehicle, not a character).
-
-### Occupant State During Flight
-
-While in flight, occupants are:
-- Untargetable (like SK-60 Bunker occupants)
-- Cannot act (unlike SK-60 Bunker where occupants can shoot)
-- Position is tied to the transport (they're inside it)
-- Not individually visible on the map (only the transport is visible)
-
-### Landing and Ejection
-
-On arrival:
-1. Transport lands at destination
-2. All occupants are removed from the transport
-3. Occupants are placed at positions around the landing point
-4. Occupants resume normal entity state (targetable, can act)
-5. Transport despawns
-
-On destruction mid-flight:
-1. Transport is destroyed at its current position
-2. All occupants are ejected at the crash position
-3. Occupants take a brief stun (0.5s crash recovery)
-4. No damage from the crash (or minor damage — design choice)
-
-### Global Range Movement
-
-The transport can fly to any point on the map. This means it will cross MANY Arbiter boundaries during flight. The transport entity must be handed off repeatedly as it traverses the map — potentially crossing 5-10 Arbiter boundaries in a single flight.
-
-Each handoff carries the transport entity AND all its occupant data. The occupants themselves are not in the entity map during flight — they're serialized inside the transport.
+The transport does not need a bespoke vehicle state machine outside those bounded surfaces.
 
 ## Cross-Boundary Concerns
 
-TODO: This is the most boundary-intensive sketch yet (alongside SK-68 Multi-Entity):
+Mobile Transport follows the ordinary moving-shell boundary model.
 
-1. **Multi-boundary traversal:** The transport flies across the entire map. It crosses every Arbiter boundary in its path. Each crossing is an entity handoff for the transport.
-
-2. **Occupants during handoff:** Occupants are stored inside the transport (like SK-54 Entity Consumption). They transfer with the transport. No individual occupant handoffs during flight.
-
-3. **Destination on different Arbiter:** The flight origin and destination are almost certainly on different Arbiters. The transport starts on Arbiter A, flies across B, C, D, and lands on Arbiter E. On landing, occupants materialize on Arbiter E.
-
-4. **Occupant session routing:** Occupants' Edge Nodes need to know they're in transit. They don't receive game state updates during flight (untargetable, can't act). On landing, their Edge Nodes must be redirected to Arbiter E.
-
-5. **Transport shot down:** If destroyed mid-flight on Arbiter C, occupants materialize on Arbiter C. Their Edge Nodes redirect to C.
-
-6. **Flight path and R-Tree:** The transport moves in a straight line through potentially many R-Tree cells. The Controller doesn't manage the transport's flight (it's not a topology operation). The transport uses standard entity handoff at each boundary.
+1. The dropship shell is one authoritative spawned actor. `start_actor_transit` installs one
+   destination/speed record on that shell; each shell owner continues the same transit record after
+   handoff.
+2. `attached_visible` occupants ride with the shell through `P-58`. They do not perform
+   independent handoffs while contained; they follow the shell's current owner and position.
+3. The launch destination is snapshotted to one absolute world position when the launch cast
+   commits. Later shell owners do not recompute from fresh cursor input.
+4. If the shell reaches a destination on another Arbiter, ordinary repeated shell handoff brings it
+   there. `on_arrival_effects` then execute on the shell's current owner, ejecting occupants at the
+   landed shell position before the shell despawns.
+5. If the shell is destroyed mid-flight, its current owner runs the shell's ordinary `on_death`
+   cleanup locally, ejects occupants at the crash position, and applies the crash stun there. Any
+   occupant whose crash position belongs in a neighboring region then follows ordinary post-eject
+   handoff rules.
+6. Passenger sessions are not in a special out-of-band transport state. While contained, they follow
+   the shell's current authoritative owner; on landing or crash they simply resume ordinary local
+   control from the ejection position.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: summon transport at caster position, allies enter (max 4 + caster), caster selects global destination, transport flies at speed X, occupants untargetable + can't act during flight, transport has HP (destructible), on arrival eject all, on destruction eject + stun. Compiler produces:
-- TransportActor entity with state machine (Loading → InFlight → Landing / Destroyed)
-- Occupant storage (serialized entity list, like SK-54)
-- Entry interaction (like SK-60 Bunker)
-- Flight movement (per-tick position update toward destination)
-- Landing action: deserialize occupants, place at destination
-- Destruction action: deserialize occupants, place at crash position + stun
-- Global destination selection input
+Designer specifies:
 
-The most complex entity lifecycle in the sketch set — it combines: enterable structure (SK-60) + entity consumption/storage (SK-54) + global movement + multi-boundary traversal + conditional ejection.
+- dropship shell archetype / HP / lifetime
+- occupant cap and entry range
+- launch speed and arrival radius
+- global-range destination-targeted launch ability
+- crash stun payload
+- whether allies may repair the shell in flight
 
-## Open Questions
+Compiler emits:
 
-- Can the transport be healed by allies during flight?
-- Can enemies see the transport's destination (flight path indicator)?
-- Is the transport affected by CC (stunned mid-flight = stops moving)?
-- Can the caster cancel the flight and land early?
-- Can allies exit voluntarily during flight?
-- Does the transport interact with SK-03 Terrain Wall (blocked or flies over)?
-- If the transport lands on SK-32 Minefield, do mines detonate on the occupants?
-- Can the transport carry non-player entities (SK-06 summons)?
-- Does the transport count as one entity or N+1 entities for entity_count?
-- Performance: rapid boundary crossings during flight — how many handoffs per second at max speed?
-- How does the transport interact with the Warm Pool / Arbiter split triggers as it passes through regions?
-- Can two transports collide in flight?
+- one summon ability that spawns the dropship shell and stores its actor ref in runtime state
+- one shell archetype with canonical `container_profile`
+- ordinary `enter_container` loading interactions
+- one launch ability that uses `start_actor_transit` against the stored shell ref
+- one arrival callback that ejects occupants and despawns the shell
+- one shell `on_death` cleanup path that ejects occupants and applies crash stun
+
+Compiler validates:
+
+1. `max_capacity > 0`
+2. `occupant_storage_mode = attached_visible`
+3. `occupant_cast_policy = none`
+4. `allow_manual_exit = false` for this reference transport
+5. `speed > 0` and `arrival_radius > 0`
+6. the launch ability uses canonical `start_actor_transit` against a live stored actor ref rather
+   than inventing a bespoke transport phase machine
+
+## Resolved Interaction Notes
+
+- The shell remains a normal targetable body during flight. Enemies counter this mechanic by
+  damaging or destroying the shell, not by targeting passengers directly.
+- In this reference, passengers cannot act and cannot manually exit during flight because the
+  container profile uses `occupant_cast_policy = none` and `allow_manual_exit = false`.
+- If the shell archetype allows allied beneficial targeting, allies may repair the dropship during
+  flight through ordinary beneficial effects. If not, the shell is simply not healable.
+- This reference does not expose a manual early-landing / cancel action. The shell either reaches
+  the authored destination or is destroyed first.
+- The flight-path indicator is presentation-only. Enemies see the live shell if normal observer
+  rules reveal it, but they are not entitled to a special destination preview by the transport
+  contract itself.
+- The shell counts as one entity and the contained passengers still count as their own entities for
+  density / split-threshold accounting, so a full dropship is `N+1`, not one compressed object.
+- The shell uses its own archetype collision policy while moving. This reference treats it as a
+  flying shell, so ground obstacles like `SK-03 Terrain Wall` do not cancel the transit path.
+- If the shell lands into an armed hostile area such as `SK-32 Minefield`, those interactions are
+  evaluated only after the passengers are ejected and become ordinary active entities again.

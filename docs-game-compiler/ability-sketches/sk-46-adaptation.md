@@ -29,78 +29,74 @@ P-36 (On-Damage-Received Hook) → P-42 (Stacking Counters w/ Decay) → P-16 (S
 
 ## Engine Primitives Required
 
-### Damage Accumulator
-A status effect on the caster that tracks total damage taken over the window:
+Adaptation is now a canonical status-owned damage-accumulator window.
 
-```
-status_effect: AdaptationTracker {
-    accumulated_damage: SimFixed,
-    expires_at_tick: u64,
-}
-```
+The recommended lowering is:
 
-Each time the entity takes damage (during Phase 2 resolution), AFTER the damage is applied to HP, the tracker increments `accumulated_damage` by the amount of HP actually lost.
+1. apply one positive `adaptation_window` status to the caster for 240 ticks
+2. that status authors:
+   - `damage_accumulator = { bind_total_as = adaptation_damage, include_absorbed_damage = false }`
+   - `on_expire_effects = [heal(target = caster, amount = 0, scaling = { binding = adaptation_damage, coefficient = 1.0 })]`
+   - optional presentation-only status visuals for the player-facing counter
 
-This is a **post-damage hook** — it fires after damage resolution is complete, reading the delta between pre-damage HP and post-damage HP. It's simpler than SK-37 Time Rewind (which snapshots full state per tick). The accumulator just adds a number.
+This keeps the mechanic entirely inside the canonical `damage_accumulator` surface:
 
-Key question: what counts as "damage taken"?
-- Direct damage: yes
-- DoT ticks: yes
-- Reflected damage from SK-22: yes (if reflected damage hits you from another source)
-- Shield absorption (SK-17): does damage absorbed by a shield count? The HP didn't change, but you "would have taken" that damage.
-- Damage redirected via SK-19 Guardian Angel: the guardian takes the redirected portion — does that count for the guardian's Adaptation?
-
-### Deferred Heal on Expiry
-When the status effect expires (4 seconds later), the expiry hook:
-1. Reads `accumulated_damage`
-2. Applies a burst heal to the entity for that amount
-3. Removes the effect
-
-This is a **status effect with an on-expiry action** — the effect does something when it's removed by timer, not just when it's applied or while it's ticking. Not all effects have on-expiry actions; most just disappear. The compiler needs to support on-expiry hooks.
-
-### Timing Sensitivity
-The heal fires at a specific tick (the expiry tick). If the entity is at 1 HP and takes fatal damage on tick T, but the adaptation heal was scheduled for tick T as well, the ordering matters:
-- If damage resolves before the heal: entity dies, heal never fires (dead entities don't heal)
-- If heal resolves before the damage: entity survives
-
-The tick processing order must be deterministic: does the adaptation expiry heal resolve before or after incoming damage for that tick?
+- damage is still taken normally during the window
+- the accumulator records the final post-mitigation HP lost while the status is active
+- expiry resolves one burst heal from the bound accumulated value
+- cleanse/remove does not fire the expiry heal because the binding is only exposed to
+  `on_expire_effects`, not arbitrary remove hooks
 
 ## Cross-Boundary Concerns
 
-TODO: Minimal cross-boundary complexity. The accumulator runs entirely on the entity's owning Arbiter:
-- All damage the entity receives is resolved locally (Phase 2 on the entity's Arbiter)
-- The accumulator increments locally
-- The expiry heal is local
+Adaptation is local to the defended entity's owner.
 
-The only cross-boundary concern: damage arriving via relay (cross-boundary attacks). These relays arrive and are resolved locally on the target's Arbiter, where the accumulator picks them up normally. No special handling needed.
-
-If the entity crosses a boundary during the 4-second window, the AdaptationTracker effect transfers with the entity during handoff. The accumulated value carries over.
+1. All qualifying damage, including cross-boundary prepared-hit relays, is resolved on the target's
+   current authoritative owner. The accumulator therefore records damage locally with no extra relay
+   path.
+2. If the entity hands off during the 4-second window, the active status and its accumulated total
+   transfer as ordinary SoftState.
+3. The expiry heal is just one local reactive heal on the entity's current owner. No special
+   cross-boundary routing is required beyond the ordinary handoff/stage ordering already defined for
+   status lifecycle effects.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: self-cast, tracking window (4s), accumulate all damage taken, on-expiry heal for 100% of accumulated amount, does not reduce damage during window. Compiler produces:
-- Status effect with `accumulated_damage: SimFixed` field
-- Post-damage hook: increment accumulator by HP delta after each damage event
-- On-expiry hook: apply burst heal for `accumulated_damage`
-- Death check: if entity dies during window, effect is removed without healing
+Designer specifies:
 
-The compiler needs to support three hook points on a status effect:
-1. On-apply (when the effect is first applied)
-2. Per-tick (recurring logic)
-3. On-expiry (logic when the effect naturally expires)
-4. On-remove (logic when the effect is dispelled/cleansed — may differ from expiry)
+- tracking duration
+- whether shield-absorbed damage counts
+- heal multiplier on expiry
+- whether the status is cleansable/purgeable
 
-Adaptation uses on-expiry but NOT on-remove — if the effect is cleansed (SK-15 Purify used offensively to remove a beneficial effect), the accumulated heal should NOT fire.
+Compiler emits:
 
-## Open Questions
+- one positive tracking status
+- one canonical `damage_accumulator` block bound to `adaptation_damage`
+- one expiry heal that reads the bound accumulated value
 
-- Does damage absorbed by shields (SK-17) count toward the accumulator?
-- Does damage redirected away via SK-19 Guardian Angel (the 50% you DIDN'T take) count?
-- If the entity has damage reduction buffs, does the accumulator track pre-reduction or post-reduction damage?
-- Can enemies cleanse/purge the Adaptation buff to prevent the heal (SK-15 in reverse)?
-- Does the 100% heal have a cap, or can you take 10,000 damage and heal for 10,000?
-- Can the heal critically strike (applying crit to the burst heal)?
-- Does the heal trigger on-heal effects (SK-04 Tether healing share)?
-- Does Kinematic Dilation affect the 4-second window (dilated time = longer real-time window)?
-- If the entity enters SK-44 Burrow during the window (invulnerable), the accumulator stops gaining. Is the window timer paused too, or does it keep ticking?
-- Can multiple Adaptation activations stack (two overlapping windows, each tracking independently)?
+Compiler validates:
+
+1. the ability is self-only
+2. `duration_ticks > 0`
+3. the heal is authored through `on_expire_effects`, not through an on-remove hook
+4. the accumulator reads resolved HP loss, with shield-absorbed damage included only when the
+   designer explicitly flips `include_absorbed_damage = true`
+
+## Resolved Interaction Notes
+
+- This reference tracks post-mitigation HP actually lost. Shield-absorbed damage is excluded because
+  `include_absorbed_damage = false`.
+- Damage redirected away before it ever reaches the adapting entity does not count. Damage redirected
+  onto the adapting entity does count because it becomes resolved HP loss there.
+- Enemies may purge the beneficial status if the design leaves it cleansable; purge removes the
+  window and prevents the expiry heal because the heal is not authored on remove.
+- The expiry heal is an ordinary heal event. It may participate in ordinary heal-side consumers such
+  as healing mirrors or modifiers, but it is not a crit-capable damage event.
+- Kinematic Dilation does not change the authored tick window. The status lasts 240 simulation ticks
+  just like other timed statuses.
+- Entering Burrow during the window simply means the accumulator stops growing while invulnerability
+  is active. The Adaptation timer itself keeps running in this reference because Burrow does not
+  pause status timers.
+- This reference is non-stacking. Reapplying it refreshes/replaces the active window instead of
+  keeping multiple accumulators alive.

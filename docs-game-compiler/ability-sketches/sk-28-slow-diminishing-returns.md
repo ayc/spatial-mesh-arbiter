@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I apply a 50% movement speed reduction to an enemy for 3 seconds. If the same or another slow is applied again within 8 seconds of the first slow expiring, the new slow is 50% less effective. Repeated slows become increasingly weak, preventing perma-slow from stacking.
+I apply a 50% movement speed reduction to an enemy for 3 seconds. Repeated slows should become less
+oppressive so the game does not devolve into permanent near-immobilization.
 
 ## Primitive Composition
 
@@ -17,55 +18,75 @@ P-16 (Stat Layering) → P-41 (DR Tracker)
 
 ## Observable Behavior
 
-1. First slow applied: target moves at 50% speed for 3 seconds
-2. Slow expires. 8-second DR window begins.
-3. If slowed again within the window: new slow is 25% (50% * 0.5 DR) for 3 seconds
-4. If slowed a third time within the window: 12.5% slow for 3 seconds
-5. After 8 seconds with no new slow: DR resets, next slow is full effectiveness
-6. Multiple different slow sources each apply DR independently... or do they share a DR category?
-7. Movement speed has a floor (e.g., minimum 20% of base speed — cannot be fully immobilized by slows alone)
-8. Visual: frost/sluggish effect, intensity matches slow percentage
+1. The slow applies a 50% movement-speed reduction for 3 seconds.
+2. The target can still attack and cast; only movement speed is reduced.
+3. Duration is reduced by the target's `status_effect_resistance`.
+4. Reapplying slow effects follows the game's ordinary status refresh/stack rules rather than a
+   bespoke per-slow geometric reduction formula.
+5. Slow remains a soft-disable effect for cleanse/immunity interactions.
+6. Visual: frost / sluggish FX whose intensity matches the authored slow.
 
 ## Engine Primitives Required
 
-TODO: This sketch is primarily about the **diminishing returns system** itself, not any single ability. The Arbiter needs to track per-entity CC history:
+The canonical closure for this sketch is an ordinary negative slow status, not a special second DR
+subsystem for repeated slow strength halving.
 
-```
-struct CcHistory {
-    category: CcCategory,          // e.g., Slow, HardCC, Silence
-    applications_in_window: u32,
-    last_expiry_tick: u64,
-    dr_window_ticks: u64,          // e.g., 480 ticks (8 seconds)
-}
-```
+The recommended lowering is:
 
-On each CC application, the Arbiter looks up the history for that category, calculates the DR multiplier, applies it to the incoming CC's effectiveness/duration, and updates the history. The DR formula needs to be deterministic and configurable.
+1. define one negative status with:
+   - `polarity = negative`
+   - `duration_ticks = 180`
+   - `cc_category = soft_disable`
+   - `duration_scaling = status_resistance`
+   - `stat_modifiers = [`
+     `{ stat_id = movement_speed, operation = add_percent, value = -0.50 }`
+     `]`
+2. apply that status through `apply_debuff`
 
-## DR System Design Questions
+This keeps the mechanic inside existing canonical surfaces:
 
-The DR system is shared across all CC sketches (SK-24 through SK-28). Key design decisions:
-
-1. **Category grouping:** Are stun/sleep in one category (hard CC) and root/silence/slow in another (soft CC)? Or is each CC type its own category?
-2. **What diminishes:** Duration only? Or also effectiveness (slow percentage)?
-3. **DR formula:** Exponential decay (0.5^n)? Linear reduction? Hard cap after N applications?
-4. **Immunity window:** After hard CC, brief immunity. After soft CC, just DR? Or immunity for all?
-5. **DR reset:** Time-based (8s window)? Or count-based (resets after N seconds of no CC)?
+- movement reduction is ordinary P-16 stat layering
+- tenacity is the standard `duration_scaling = status_resistance` path
+- cleanse/immunity uses the same `soft_disable` category as other movement-suppression effects
 
 ## Cross-Boundary Concerns
 
-TODO: The DR history is per-entity state on the entity's owning Arbiter. When CC is applied cross-boundary (relay from attacker's Arbiter), the defender's Arbiter calculates the effective CC using its local DR history. The attacker doesn't need to know the DR state — they just send "apply 50% slow for 3s" and the defender's Arbiter applies DR reduction before applying the effect.
+Slow follows the normal target-owner debuff path.
+
+1. Remote/Ghost targets receive the debuff application on their authoritative owner.
+2. The target owner inserts the negative status, applies duration scaling, and computes effective
+   movement speed locally from ordinary stat layering.
+3. If the target hands off while slowed, the active status transfers as ordinary SoftState.
+4. No attacker-side DR bookkeeping is required for this canonical slow reference.
 
 ## Compiler Requirements
 
-TODO: Designer specifies per-ability: CC category for DR purposes, base effectiveness, base duration, tenacity-reducible flag. The compiler needs a global DR configuration: categories, DR formula, window duration, immunity rules. This configuration is part of the game rules (SpellData / game image), not per-ability. How does the compiler validate that all CC abilities reference valid DR categories?
+Designer specifies:
 
-## Open Questions
+- hostile target filter and range
+- slow duration
+- movement-speed reduction amount
+- whether the slow is cleansable
 
-- Is the DR window per-category or per-specific-effect (two different slows share DR, but slow and root don't)?
-- Does tenacity reduce the DR'd duration (applied after DR) or the base duration (applied before DR)?
-- Is there a hard immunity after N applications in a window (e.g., after 3 stuns, immune for 5 seconds)?
-- Do friendly CC effects (ally roots you in place for protection) consume DR charges?
-- Does the movement speed floor interact with root (SK-25) — root is 100% slow, but slow floor is 20%?
-- How does the DR system persist across Arbiter boundaries during entity handoff — is CcHistory part of the entity's transferable state?
-- Does Kinematic Dilation affect DR windows (dilated time = longer real-time DR window)?
-- Should DR be visible to players (UI indicator showing current DR reduction)?
+Compiler emits:
+
+- one negative `StatusEffectDefinition` using `cc_category = soft_disable`
+- one `apply_debuff` payload applying that status to the target
+
+Compiler validates:
+
+1. the status uses a negative `movement_speed` modifier
+2. the status is `negative`
+3. `duration_ticks > 0`
+4. the sketch stays inside ordinary slow/status-resistance behavior instead of inventing a separate
+   exponential slow-strength DR subsystem
+
+## Resolved Interaction Notes
+
+- This reference narrows "diminishing returns" to the already-canonical soft-disable status path:
+  ordinary refresh/stack policy, cleanse/immunity behavior, and tenacity-based duration reduction.
+- Root remains a separate mechanic. A slow does not become a root just by stacking harder.
+- If the game wants hard geometric reapplication decay or a dedicated slow-only DR tracker, that is
+  a future design extension, not part of the current canonical compiler surface.
+- Movement-speed floors remain a broader game-balance policy layered on top of the ordinary derived
+  movement-speed stat, not a sketch-local rule.

@@ -51,13 +51,13 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 | SK-09 | Chain Lightning | P-32 (Actor Spawning) → P-11 (N-Nearest Neighbor) → P-35 (On-Hit Hook) |
 | SK-10 | Crit Explosion | P-37 (On-Crit Hook) → P-09 (Shape Overlap Query) |
 | SK-11 | On-Kill Cascade | P-39 (On-Death Hook) → P-09 (Shape Overlap Query) |
-| SK-12 | Spell Echo | P-40 (On-Cast Intercept) → P-45 (Delay Timer) |
+| SK-12 | Spell Echo | P-40 (On-Cast Intercept) |
 | SK-13 | Counter Strike | P-12 (Facing/Dot-Product Check) → P-38 (On-Block/Defend Hook) |
 | SK-14 | Execute Threshold | P-17 (Conditional Thresholds) |
 | SK-15 | Purify | P-66 (Status Effect Filter Mutation) |
 | SK-16 | Holy Ground | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-44 (Pulse Timer) → P-15 (Value Modification) |
 | SK-17 | Sacrifice Shield | P-18 (Absorption Barrier) → P-21 (Value Conversion) |
-| SK-18 | Resurrect | P-43 (Charge-Up State) → P-39 (On-Death Hook) |
+| SK-18 | Resurrect | P-43 (Charge-Up State) → P-47 (Spatial Corpse Registry) |
 | SK-19 | Guardian Angel | P-34 (Persistent Linkage) → P-20 (Damage Redirection) |
 | SK-20 | Battle Cry | P-09 (Shape Overlap Query) → P-16 (Stat Layering) |
 | SK-21 | Block | P-38 (On-Block/Defend Hook) |
@@ -70,7 +70,7 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 | SK-28 | Slow + Diminishing Returns | P-16 (Stat Layering) → P-41 (DR Tracker) |
 | SK-29 | Blizzard | P-32 (Actor Spawning) → P-09 (Shape Overlap Query) → P-44 (Pulse Timer) |
 | SK-30 | Trail of Fire | P-57 (Polyline Collision Generator) → P-14 (Continuous Proximity Monitor) → P-44 (Pulse Timer) |
-| SK-31 | Vortex | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-02 (Forced Displacement) |
+| SK-31 | Vortex | P-32 (Actor Spawning) → P-44 (Pulse Timer) → P-14 (Continuous Proximity Monitor) → P-02 (Forced Displacement) |
 | SK-32 | Minefield | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-52 (Asymmetric Team-Rendering) |
 | SK-33 | Shifting Sands | P-32 (Actor Spawning) → P-03 (Trajectory Steering) → P-44 (Pulse Timer) |
 | SK-34 | Charge | P-07 (Entity-as-Kinematic-Volume) → P-02 (Forced Displacement) |
@@ -84,29 +84,29 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 | SK-42 | Withering Fire | P-42 (Stacking Counters w/ Decay) → P-11 (N-Nearest Neighbor) |
 | SK-43 | Drag | P-02 (Forced Displacement) → P-34 (Persistent Linkage) |
 | SK-44 | Burrow | P-27 (Targetability Overrides) → P-33 (Entity Dormancy) |
-| SK-45 | Essence Collection | P-14 (Continuous Proximity Monitor) → P-47 (Spatial Corpse Registry) |
+| SK-45 | Essence Collection | P-47 (Spatial Corpse Registry) → P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-42 (Stacking Counters w/ Decay) |
 | SK-46 | Adaptation | P-36 (On-Damage-Received Hook) → P-42 (Stacking Counters w/ Decay) → P-16 (Stat Layering) |
 | SK-47 | Shield Burst | P-18 (Absorption Barrier) → P-09 (Shape Overlap Query) |
 | SK-48 | Death Coil | P-17 (Conditional Thresholds) → P-21 (Value Conversion) |
 | SK-49 | Cone Strike | P-09 (Shape Overlap Query) → P-12 (Facing/Dot-Product Check) |
 | SK-50 | Blind | P-26 (Capability Bitmask) |
-| SK-51 | Unstoppable | P-62 (Categorized CC Immunity) |
+| SK-51 | Unstoppable | P-66 (Status Effect Filter Mutation) → P-62 (Categorized CC Immunity) → P-18 (Absorption Barrier) |
 | SK-52 | Combo Strike | P-42 (Stacking Counters w/ Decay) |
 | SK-53 | HP Swap | P-17 (Conditional Thresholds) → P-15 (Value Modification) |
-| SK-54 | Entity Consumption | P-33 (Entity Dormancy) → P-47 (Spatial Corpse Registry) |
+| SK-54 | Entity Consumption | P-58 (Container/Vehicle Logic) → P-16 (Stat Layering) |
 | SK-55 | Growing Projectile | P-32 (Actor Spawning) → P-09 (Shape Overlap Query) |
 | SK-56 | Knockback Projectile | P-32 (Actor Spawning) → P-02 (Forced Displacement) |
 | SK-57 | Form Transformation | P-31 (Identity/Loadout Swap) → P-16 (Stat Layering) |
 | SK-58 | Cocoon | P-53 (Entity Suspension) → P-33 (Entity Dormancy) |
 | SK-59 | Oil-Ignite | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) → P-64 (Combo Field × Finisher Matrix) |
 | SK-60 | Bunker | P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-20 (Damage Redirection) |
-| SK-61 | Spirit Split | P-32 (Actor Spawning) → P-56 (Spatial Instance Forking) → P-30 (Input Multiplexing) |
+| SK-61 | Spirit Split | P-32 (Actor Spawning) → P-53 (Entity Suspension) → P-30 (Input Multiplexing) |
 | SK-62 | Boomerang | P-32 (Actor Spawning) → P-03 (Trajectory Steering) → P-35 (On-Hit Hook) |
 | SK-63 | Steerable Beam | P-10 (Swept-Segment Raycast) → P-03 (Trajectory Steering) → P-44 (Pulse Timer) |
 | SK-64 | Mosh Pit | P-09 (Shape Overlap Query) → P-26 (Capability Bitmask) → P-14 (Continuous Proximity Monitor) |
 | SK-65 | Taunt | P-03 (Trajectory Steering) → P-26 (Capability Bitmask) |
-| SK-66 | Symbiote | P-06 (Attached Kinematics) → P-34 (Persistent Linkage) → P-60 (Event Cloning) |
-| SK-67 | Entity Clone | P-32 (Actor Spawning) → P-31 (Identity/Loadout Swap) |
+| SK-66 | Symbiote | P-34 (Persistent Linkage) → P-31 (Identity/Loadout Swap) → P-26 (Capability Bitmask) |
+| SK-67 | Entity Clone | P-32 (Actor Spawning) → P-31 (Identity/Loadout Swap) → P-29 (Control Authority Swap) |
 | SK-68 | Multi-Entity Control | P-30 (Input Multiplexing) → P-32 (Actor Spawning) |
 | SK-69 | Portal Pair | P-32 (Actor Spawning) → P-59 (N-Way Portal Network) → P-01 (Instant Translation) |
 | SK-70 | Energy Shield | P-18 (Absorption Barrier) → P-21 (Value Conversion) → P-16 (Stat Layering) |
@@ -128,13 +128,13 @@ Every ability sketch decomposed into its primitive chain. Chains are ordered by 
 | SK-86 | Decoy | P-32 (Actor Spawning) → P-52 (Asymmetric Team-Rendering) → P-27 (Targetability Overrides) |
 | SK-87 | Conditional Counter | P-36 (On-Damage-Received Hook) → P-17 (Conditional Thresholds) → P-09 (Shape Overlap Query) |
 | SK-88 | Positional Leash | P-04 (Positional Clamping) → P-26 (Capability Bitmask) |
-| SK-89 | Respawn Anchor | P-32 (Actor Spawning) → P-39 (On-Death Hook) → P-01 (Instant Translation) |
+| SK-89 | Respawn Anchor | P-32 (Actor Spawning) → P-39 (On-Death Hook) → P-52 (Asymmetric Team-Rendering) |
 | SK-90 | Orbital Sweep | P-06 (Attached Kinematics) → P-07 (Entity-as-Kinematic-Volume) → P-09 (Shape Overlap Query) |
 | SK-91 | Team-Agnostic Stasis | P-33 (Entity Dormancy) → P-27 (Targetability Overrides) → P-13 (Tag/Allegiance Filtering) |
 | SK-92 | Anti-Heal | P-16 (Stat Layering) |
 | SK-93 | Death Prevention | P-39 (On-Death Hook) → P-23 (Floor Clamping) → P-15 (Value Modification) |
 | SK-94 | Placed Potion | P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor) |
-| SK-95 | Mass Effect Detonation | P-16 (Stat Layering) → P-09 (Shape Overlap Query) → P-64 (Combo Field × Finisher Matrix) |
+| SK-95 | Mass Effect Detonation | P-46 (Global Event Scheduler) → P-66 (Status Effect Filter Mutation) → P-16 (Stat Layering) |
 | SK-96 | Death Ghost | P-39 (On-Death Hook) → P-32 (Actor Spawning) → P-45 (Delay Timer) |
 | SK-97 | Escalating Cost | P-42 (Stacking Counters w/ Decay) → P-51 (Desperation Cost Modifiers) |
 | SK-98 | Mobile Transport | P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-06 (Attached Kinematics) |

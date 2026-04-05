@@ -2,11 +2,13 @@
 
 ## Designer Intent
 
-I channel for 3 seconds on the corpse of a dead ally. If the channel completes, the ally is revived at the corpse's position with 50% HP and all abilities on cooldown. The ally can immediately act after revival.
+I channel for 3 seconds on the corpse of a dead ally. If the channel completes, the ally is
+revived at the corpse's position with 50% HP and all abilities on cooldown. The ally can
+immediately move and act after revival, but cannot cast until those cooldowns recover.
 
 ## Primitive Composition
 
-P-43 (Charge-Up State) → P-39 (On-Death Hook)
+P-43 (Charge-Up State) → P-47 (Spatial Corpse Registry)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -17,35 +19,96 @@ P-43 (Charge-Up State) → P-39 (On-Death Hook)
 
 ## Observable Behavior
 
-1. Target a dead ally's corpse within range
-2. Begin channeling — caster is movement-locked for 3 seconds
-3. Channel can be interrupted by stuns, silences, displacement, caster death
-4. On channel complete: ally entity is restored at corpse position with 50% max HP
-5. Revived ally has all abilities on cooldown (cannot immediately cast)
-6. Revived ally has no active buffs or debuffs — clean state
-7. If channel is interrupted: ability goes on partial cooldown, ally remains dead
-8. Visual: resurrection circle around the corpse, light beam on completion
+1. Target a dead ally corpse within range and begin a 3-second rooted channel.
+2. The cast publishes a visible cast bar and can be interrupted before completion.
+3. If the channel survives to completion and the corpse record still exists, the ally
+   re-materializes at the corpse's stored death position.
+4. The revived ally returns with 50% max HP.
+5. The revived ally returns with all abilities on full cooldown and with no active buffs or debuffs.
+6. The revived ally may move, attack, and otherwise participate immediately after re-materializing;
+   only ability cooldowns remain locked.
+7. If the channel breaks early or the corpse becomes invalid, no revive occurs and the ability only
+   takes the authored partial cooldown.
+8. Visual: resurrection circle around the corpse while channeling and a completion beam on
+   successful revival.
 
 ## Engine Primitives Required
 
-TODO: This is the hardest lifecycle question in the sketches. When an entity "dies," what happens to it in the Arbiter's entity map? Current spec (§9.7) suggests entities are destroyed on death. If destroyed, the corpse is just a position marker — the entity's SoftState, OffensiveStats, and EntityID are gone. Revival means: reconstructing the entity from Meta's persistent state (character data), minting or reusing an EntityID, inserting it into the Arbiter's entity map, and notifying Edge Nodes. This is essentially a mini-spawn handshake.
+Resurrect is now a canonical local corpse-return reference built from `channel(complete_only)` plus
+`revive_corpse`.
+
+The recommended lowering is:
+
+1. author one corpse-targeted cast using `filter = ally_dead`
+2. give the ability `cast_time_ticks = 180` with:
+   - `channel = {`
+     `execution_mode = complete_only,`
+     `movement_lock = root,`
+     `break_on_target_invalid = true,`
+     `partial_cooldown_refund = ...`
+     `}`
+3. on successful completion emit:
+   - `revive_corpse(corpse = target, hp_ratio = 0.50, clear_statuses = true,`
+     `cooldown_policy = full_cooldown, consume_corpse = true)`
+
+This keeps the mechanic inside existing canonical surfaces:
+
+- the cast-time bar and interruption rules come from the normal channel lifecycle
+- dead-ally targeting is ordinary corpse-registry targeting
+- the actual return to play is Stage 10 `revive_corpse`, not a bespoke reconstruction path
+- successful revival emits the ordinary `PlayerResurrected` cancel path for any pending Meta
+  respawn timer
 
 ## Cross-Boundary Concerns
 
-TODO: The dead ally's corpse position might be near or across an Arbiter boundary. The caster channels on their Arbiter, but the revived entity needs to be spawned on whichever Arbiter owns the corpse's position. If the corpse is in a different Arbiter's region, the caster's Arbiter needs to coordinate the revival with the target Arbiter. Also: during the 3-second channel, topology might change (split/merge) — the corpse position could shift ownership.
+Resurrect follows the current canonical corpse rule: corpse access is local to the corpse's current
+owner.
+
+1. `revive_corpse` resolves only against the CURRENT Arbiter's authoritative corpse registry.
+   Remote/Ghost corpse revival is not part of the current profile.
+2. Cast admission succeeds only when the targeted corpse record exists locally at cast start.
+3. If topology changes during the channel, ordinary cast-state and corpse-registry handoff carry
+   the cast instance and corpse record to the new authoritative owner. No second revive-control
+   plane is introduced.
+4. If the corpse is consumed, expires, or otherwise invalidates before completion,
+   `break_on_target_invalid = true` ends the channel and no revival fires.
+5. On successful completion, the corpse owner performs the re-materialization locally at the stored
+   death position and emits `PlayerResurrected` if Meta had already scheduled a default respawn.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: channel duration (3s), revive HP (50%), cooldown state (all on cooldown), buff state (clean). Compiler produces: channel definition + entity reconstruction request + spawn parameters. How does the compiler express "revive" as an operation — is it a special action type, or does it compose existing primitives (despawn + spawn)?
+Designer specifies:
 
-## Open Questions
+- dead-ally corpse target filter and cast range
+- channel duration and any partial cooldown refund on failure
+- revive HP ratio
+- cooldown policy on return
+- whether statuses are cleared on return
+- whether the corpse is consumed on success
 
-- Do dead entities persist in the Arbiter's entity map (with a "dead" state) or are they fully removed?
-- If fully removed, how does the game track corpse positions for revival targeting?
-- Is the corpse targetable by enemies (e.g., to prevent revival by destroying the corpse)?
-- Does the revived entity keep their pre-death equipment/stats, or are stats recompiled from Meta?
-- What is the corpse's persistence window — how long after death can an ally be revived?
-- Does the revival go through the spawn handshake (Meta → Controller → Arbiter), or is it a local Arbiter operation?
-- Can multiple supports attempt to revive the same corpse simultaneously? Who wins?
-- How does this interact with the death/respawn lifecycle in the canonical spec (§9.6 of core-concepts)?
-- If the ally had a deferred loot claim (§9.10), does revival cancel the deferred recovery flow?
+Compiler emits:
+
+- one corpse-targeted cast with `channel(complete_only)`
+- one `revive_corpse` effect using the targeted corpse handle
+- the ordinary visible cast-state publication for the non-zero cast time
+
+Compiler validates:
+
+1. the targeted entity resolves to a corpse-registry entry, not a living entity
+2. `hp_ratio` is in `(0, 1]`
+3. the corpse's source entity type defines `corpse_profile`
+4. the sketch stays inside canonical local corpse revival rather than authoring remote/Ghost corpse
+   access or alternate Meta respawn routing
+
+## Resolved Interaction Notes
+
+- This reference revives the same gameplay entity identity carried by the corpse record; it is not a
+  fresh clone or a separate summon.
+- Because `cooldown_policy = full_cooldown`, the ally returns unable to cast immediately even
+  though movement/basic participation resumes as soon as the revive commits.
+- Corpse lifetime remains governed by `corpse_profile.persist_ticks`. The resurrection channel does
+  not extend that timer while it is in progress.
+- If multiple allies channel the same corpse, the first successful `revive_corpse(consume_corpse =
+  true)` clears the record; later channels fail through ordinary target invalidation.
+- This sketch is the in-combat corpse-return path only. Alternate post-terminal respawn locations or
+  timers remain the separate `SK-89 Respawn Anchor` contract.

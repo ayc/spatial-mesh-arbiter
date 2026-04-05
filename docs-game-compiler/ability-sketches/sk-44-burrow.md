@@ -29,61 +29,100 @@ P-27 (Targetability Overrides) → P-33 (Entity Dormancy)
 
 ## Engine Primitives Required
 
-### Invulnerability State
-A new entity state flag: `is_invulnerable`. When true:
-- All incoming damage events resolve to 0 (not blocked, not evaded — just negated)
-- DoT ticks deal 0 damage
-- Reactive procs that trigger on "taking damage" (SK-27 Sleep break, SK-22 Reflection) do NOT trigger (no damage was taken)
-- Shield (SK-17) is NOT consumed (no damage reaches it)
+Burrow is now a canonical self-status plus early-reactivation reference.
 
-### Untargetable State
-A new entity state flag: `is_untargetable`. When true:
-- The entity is excluded from ALL targeting queries (friendly and hostile)
-- Skillshot projectiles (SK-43 Drag) pass through the entity as if it doesn't exist
-- AoE abilities (SK-29 Blizzard, SK-08 Aura) do not affect the entity even if it's within radius
-- Auto-targeting (SK-42 Withering Fire) skips the entity entirely
-- Allies cannot target the entity with heals or buffs (SK-16 Holy Ground pulses skip it, SK-15 Purify cannot select it)
-- The entity still has a position in the entity map — it's not despawned, just invisible to the combat system
+The recommended lowering is:
 
-### Interaction with Ghost System
-If the burrowed entity is near an Arbiter boundary, it still exists as a Ghost to neighbors — but does the Ghost carry the untargetable/invulnerable flags? If not, neighbors might attempt to relay damage to a burrowed entity, which would be rejected by the owning Arbiter. If yes, it saves the wasted relay.
+1. the public Burrow ability writes one bounded runtime-state marker such as
+   `burrow_window = bookmark(position)` and applies one positive `burrowed` status for 120 ticks
+2. `burrowed` authors:
+   - capability suppression for movement / attacks / casts / items
+   - `targetability_policy = {`
+     `hostile_effects = false,`
+     `allied_beneficial_effects = false,`
+     `allied_harmful_effects = false,`
+     `self_effects = true,`
+     `affected_by_area_effects = false,`
+     `collidable_for_skillshots = false,`
+     `collidable_for_pathing = false`
+     `}`
+   - `suspension = {`
+     `mode = dormant,`
+     `invulnerable = true,`
+     `pause_status_timers = false,`
+     `pause_ability_cooldowns = false,`
+     `exclude_from_payloads = false`
+     `}`
+   - `periodic_effects = { interval_ticks = ... , effects = [apply_heal(target = caster, amount = ...)] }`
+3. `ActivationModes` on the same public ability key redirect to one hidden `Emerge` variant while
+   `state_present(burrow_window)` is true
+4. that hidden `Emerge` variant clears the runtime-state marker and removes the `burrowed` status
+   early through the bounded `remove_status` helper
 
-### Self-Heal During Burrow
-A simple per-tick heal on the burrowed entity. Since the entity is invulnerable, this is uncontested — no incoming damage competes with the healing. The heal is a direct HP modification, not a "heal event" that triggers on-heal procs.
+This keeps the mechanic inside current canonical surfaces:
+
+- relation-scoped target denial handles untargetability / AoE / skillshot admission
+- `suspension.mode = dormant` plus `invulnerable = true` handles the "cannot act, cannot be hurt"
+  part
+- the heal is an ordinary self-heal periodic payload
+- early emerge is just activation-mode redirection while the burrow marker is present
 
 ## Cross-Boundary Concerns
 
-TODO: The burrowed entity is on a specific Arbiter. Cross-boundary concerns are minimal because:
-- The entity can't move (no handoff risk)
-- The entity is untargetable (no incoming relays)
-- The entity is invulnerable (even stale relays that arrive are negated)
+Burrow follows the ordinary targetability/suspension overlay rules.
 
-The main concern: does the Ghost representation update to reflect the burrowed state? Neighbors should know the entity is burrowed so they:
-1. Don't waste relay messages targeting it
-2. Can visually represent the burrowed state to their local clients
-3. Exclude it from their own spatial queries (AoE, aura, vortex)
-
-Does GhostUpdate need `is_untargetable: bool`? Currently GhostUpdate carries position, velocity, movement_class — no capability/state flags.
+1. The burrowed entity stays on its current owner because it does not move.
+2. The effective targetability overlay is part of the entity's authoritative state and therefore
+   propagates through the same Ghost/filter path as other targetability and observer metadata.
+   Neighboring Arbiters already need those flags for seam-local AoE, skillshot, and collision
+   admission.
+3. Because the overlay sets `affected_by_area_effects = false`,
+   `collidable_for_skillshots = false`, and `collidable_for_pathing = false`, neighbors skip the
+   burrowed entity for local overlap, impact, and pathing checks instead of relaying doomed hits.
+4. Early emerge and natural expiry both clear the same local status/state pair on the burrowed
+   entity's owner; there is no special boundary case beyond ordinary downstream state publication.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: self-cast, duration (2s), invulnerable + untargetable + unable to act, self-heal per tick, reactivatable (emerge early). Compiler produces:
-- Status effect with flags: `is_invulnerable: true`, `is_untargetable: true`, `can_move: false`, `can_attack: false`, `can_cast: false` (except reactivation)
-- Per-tick heal hook
-- Reactivation removes the effect early (multi-phase like SK-36)
-- Duration expiry removes the effect
+Designer specifies:
 
-The compiler needs to validate that invulnerability and untargetability are consistent — you shouldn't be invulnerable but targetable (enemies waste abilities) or untargetable but vulnerable (edge case if someone finds a way to deal damage without targeting).
+- burrow duration
+- self-heal cadence / amount
+- whether the burrowed body remains visible to enemies/allies
+- whether status timers or cooldowns pause
+- whether early reactivation is allowed
 
-## Open Questions
+Compiler emits:
 
-- Do existing debuffs (DoTs, slows) pause during burrow, or do their timers keep ticking (but deal no damage)?
-- If a DoT timer expires during burrow, is the DoT removed, or does it persist?
-- Can the burrowed entity be displaced (SK-01 Toss, SK-31 Vortex pull)? Untargetable should prevent Toss, but Vortex is area-based.
-- Can the entity burrow to dodge a projectile already in flight (projectile arrives, entity is now untargetable — does it pass through)?
-- Does the heal-over-time count as "healing received" for SK-04 Tether sharing?
-- Is the burrowed entity visible on the minimap / to enemies? Or is it hidden like SK-32 Minefield stealth?
-- Can the burrowed entity be revealed by detection abilities?
-- Does burrow break SK-04 Tether (untargetable partner)?
-- If the burrowed entity has SK-08 Aura, does the aura continue affecting nearby enemies (entity exists, just untargetable)?
-- Does emerging from burrow trigger SK-32 Minefield if a mine was placed on top during burrow?
+- one positive `burrowed` status with targetability denial, `suspension.mode = dormant`,
+  `invulnerable = true`, and periodic self-heal
+- one runtime-state presence marker for reactivation gating
+- one hidden early-emerge activation variant that clears the marker and removes the status
+
+Compiler validates:
+
+1. burrow is self-only
+2. `duration_ticks > 0`
+3. the active burrow overlay denies hostile, allied, and area-based admission while leaving
+   `self_effects = true` so the self-heal still resolves
+4. early reactivation is expressed through `ActivationModes` plus bounded state presence, not a
+   bespoke second input plane
+5. timer pause behavior is explicit; this reference leaves status timers and cooldowns running
+
+## Resolved Interaction Notes
+
+- Existing debuffs and cooldowns continue ticking in this reference because the burrowed status does
+  not pause them. DoTs remain active but deal no damage while invulnerability is in force.
+- The burrowed entity is skipped by hostile AoE, skillshots, and pathing/collision checks, so
+  Toss-, Vortex-, and projectile-style interactions do not move or hit it while the burrow status
+  is active.
+- Burrow can dodge an already-in-flight projectile if the projectile resolves after the targetability
+  overlay has become active; the projectile simply no longer admits the burrowed body for impact.
+- The self-heal is ordinary healing and therefore participates in canonical heal-side consumers if
+  some other link/mirror effect is still valid; the burrow contract itself does not special-case
+  healing semantics.
+- This reference keeps the burrowed body visible downstream as a mound/presence marker by leaving
+  `exclude_from_payloads = false`; hiding it further would be an additional observer-presentation
+  choice, not part of the base burrow contract.
+- Burrow does not automatically break existing links. If some other mechanic wants links to break on
+  burrow, that must come from the authored link policy rather than from targetability denial alone.

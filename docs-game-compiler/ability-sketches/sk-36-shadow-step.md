@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-I blink to a target position instantly. For the next 3 seconds, I can reactivate the ability to teleport back to my original position. If I don't reactivate, the bookmark expires and I stay where I am. This lets me dive into a fight, burst a target, and escape back to safety.
+I blink to a target position instantly. For the next 3 seconds, I can reactivate the ability to
+teleport back to my original position. If I don't reactivate, the bookmark expires and I stay where
+I am.
 
 ## Primitive Composition
 
@@ -13,71 +15,89 @@ P-01 (Instant Translation) → P-05 (Historical State Buffer)
 ## Inputs
 
 - Caster entity
-- Target position (requested ground-target position)
-- Reactivation input (same ability key, within 3-second window)
+- Target position
+- Same-key reactivation within 3 seconds
 
 ## Observable Behavior
 
-1. First cast: caster blinks to target position (instant, like SK-35)
-2. A shadow/marker is left at the original position (visible to allies, optionally to enemies)
-3. For 3 seconds: ability icon changes to "Return" — pressing it again teleports the caster back to the shadow position
-4. If reactivated: caster snaps back to the shadow position instantly
-5. If not reactivated within 3 seconds: shadow fades, caster stays at current position, ability goes on full cooldown
-6. If the caster dies during the 3-second window: no return (shadow fades)
-7. Visual: dark shadow at the bookmark position, trail effect on return blink
+1. First cast: the caster blinks instantly to the requested target position.
+2. The caster's original position is bookmarked for 3 seconds.
+3. While that bookmark is present, the same ability key changes into a return cast.
+4. Reactivating within the window snaps the caster back to the stored origin position instantly.
+5. If the window expires or the caster dies first, the bookmark is cleared and no return remains.
+6. Visual: a shadow marker at the bookmarked origin and a distinct return-state presentation on the
+   ability slot.
 
 ## Engine Primitives Required
 
-### Positional Bookmark
-The first blink stores the caster's pre-blink position as a field on a status effect:
+Shadow Step is now a canonical bookmark-plus-reactivation reference built from one runtime state and
+one activation-mode override.
 
-```
-status_effect: ShadowStepBookmark {
-    bookmark_position: Vec2F,
-    bookmark_tick: u64,
-    bookmark_topology_epoch: u32,
-    bookmark_arbiter_id: u32,
-    expires_at_tick: u64,
-}
-```
+The recommended lowering is:
 
-This is a lightweight status effect — one Vec2F, a few u32/u64 fields. No per-tick cost beyond the normal effect expiry check. The Arbiter doesn't maintain any global tracking — the bookmark is just data on the caster's effect list.
+1. define one runtime state:
+   - `state_id = shadow_step_bookmark`
+   - `kind = bookmark(position)`
+   - `expires_after_ticks = 180`
+   - `capture_topology_epoch = true`
+   - `clear_on_owner_death = true`
+2. base ability mode (no bookmark present):
+   - `write_state(state_id = shadow_step_bookmark, capture = position, position = caster_position)`
+   - one forward `P-01` blink to the requested target position
+3. activation override:
+   - `when = { state_present: shadow_step_bookmark }`
+   - `effects = [restore_from_state(target = caster, state_id = shadow_step_bookmark,`
+     `apply_position = true, position_validation = nearest_walkable),`
+     `clear_state(state_id = shadow_step_bookmark)]`
 
-### Reactivation
-The ability has two phases (cast modes):
-- Phase 1 (no active bookmark): blink forward, apply ShadowStepBookmark effect
-- Phase 2 (bookmark active): read bookmark position, snap caster to it, remove effect
+This keeps the mechanic inside existing canonical surfaces:
 
-The engine needs to support **multi-phase abilities** — an ability whose behavior changes based on whether a specific status effect is active on the caster. The `validate_intent` hook checks: does the caster have ShadowStepBookmark? If yes, this is a return cast. If no, this is a forward blink.
-
-### Blink Mechanics
-Both the forward blink and the return blink are instant position snaps (same as SK-35 Blink Strike). No travel time, no intermediate positions.
+- the stored return location is a runtime bookmark, not a bespoke status-effect payload
+- same-key reactivation is the canonical `ActivationModes` surface
+- both the forward and return snaps are ordinary `P-01` teleports
 
 ## Cross-Boundary Concerns
 
-TODO: The forward blink may cross an Arbiter boundary (same as SK-35). The bookmark stores the position AND the Arbiter context (`bookmark_arbiter_id`, `topology_epoch`). On return:
+Shadow Step follows the canonical absolute-bookmark relocation rule.
 
-1. **Bookmark is in same Arbiter region:** Simple position snap. No handoff.
-2. **Bookmark is in a different Arbiter's region (caster blinked cross-boundary):** Return requires an instant handoff back to the original Arbiter.
-3. **Topology changed since bookmark was set (split/merge happened):** The `bookmark_topology_epoch` is stale. The bookmark position might now be owned by a different Arbiter than `bookmark_arbiter_id`. The return needs to query the current owner of the bookmark position.
-4. **Bookmark position is no longer valid (SK-03 Terrain Wall placed on top of it):** Snap to nearest valid position, or fail the return?
+1. The bookmarked origin stores absolute world coordinates plus topology epoch at the moment of the
+   first cast.
+2. If the return destination is now owned by another Arbiter, the reactivation resolves through the
+   ordinary destination-based teleport/handoff path.
+3. Current topology, not stale stored arbiter identity, decides who owns the return snap.
+4. `clear_on_owner_death = true` cleanly removes the bookmark if the caster dies during the return
+   window.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: blink (instant teleport to requested ground-target position), bookmark (store origin position), reactivation window (3s), return (instant teleport to bookmark). Compiler produces:
-- Phase 1: position snap + apply ShadowStepBookmark status effect
-- Phase 2: read bookmark → position snap → remove effect
-- Multi-phase ability routing via validate_intent hook (check for active bookmark)
-- Bookmark data as a status effect extension field
+Designer specifies:
 
-The compiler validates that the bookmark is bounded (single position, fixed expiry) and that the reactivation is a deterministic check.
+- forward blink range / targeting
+- bookmark lifetime
+- whether the bookmark is cleared on death
+- return cast presentation
 
-## Open Questions
+Compiler emits:
 
-- Can the shadow/marker be attacked or destroyed by enemies to prevent the return?
-- Does the return blink trigger SK-32 Minefield at the bookmark position?
-- If the caster is rooted (SK-25) during the return window, can they still reactivate (is the return a "teleport" that bypasses root)?
-- Does the return blink break SK-04 Tether if it exceeds break distance?
-- If the caster picks up a flag/objective between blink and return, does the objective travel back with them?
-- Can the return be used while CC'd (stun/silence)? Silence blocks casts, but is reactivation a "cast"?
-- Does the bookmark persist through SK-15 Purify (is the bookmark a positive effect that could be accidentally cleansed)?
+- one `bookmark(position)` runtime state
+- one forward blink that writes the bookmark before the relocation
+- one `ActivationModes` override gated on `state_present`
+- one return `restore_from_state` plus `clear_state`
+
+Compiler validates:
+
+1. the referenced runtime state exists and is `bookmark(position)`
+2. the bookmark lifetime is bounded
+3. same-key reactivation is expressed through `ActivationModes`, not a second public ability ID
+4. the return snap uses one canonical `position_validation` rule
+
+## Resolved Interaction Notes
+
+- Because the return is still a cast on the same public ability key, stun and silence block the
+  reactivation normally.
+- Root or leash-style effects block/clamp the return only if their authored status metadata applies
+  to teleports; the bookmark itself does not bypass those broader movement constraints automatically.
+- The bookmark is runtime state, not a normal buff/debuff entry, so generic cleanse does not remove
+  it unless the game authors a separate state-clearing rule.
+- The shadow marker is presentation derived from the active bookmark state; it is not a second
+  attackable gameplay actor in this reference.

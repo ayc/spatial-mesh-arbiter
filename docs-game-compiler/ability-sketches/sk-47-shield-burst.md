@@ -27,60 +27,72 @@ P-18 (Absorption Barrier) → P-09 (Shape Overlap Query)
 
 ## Engine Primitives Required
 
-### Shield With On-Break and On-Expiry Hooks
+Shield Burst is now a canonical shield-lifecycle callback reference.
 
-SK-17 Sacrifice Shield defined shields as a damage absorption layer. This sketch adds **lifecycle hooks** on the shield itself:
+The recommended lowering is:
 
-```
-struct ShieldInstance {
-    shield_hp: SimFixed,
-    max_shield_hp: SimFixed,
-    expires_at_tick: u64,
-    on_expiry: Option<ShieldExpiryAction>,
-    on_break: Option<ShieldBreakAction>,
-}
+1. apply one self absorption shield with:
+   - `amount = ...`
+   - `duration_ticks = 180`
+   - `bind_remaining_value_as = remaining_shield`
+   - `on_expire_effects = [aoe_damage(center = caster_position, shape = circle, radius = ... , filter = enemy_alive, amount = 0, scaling = { binding = remaining_shield, coefficient = 1.0 })]`
+   - `on_break_effects = [aoe_damage(center = caster_position, shape = circle, radius = ... , filter = enemy_alive, amount = 0, scaling = { binding = remaining_shield, coefficient = 1.0 })]`
 
-enum ShieldExpiryAction {
-    AoeDamage { radius: SimFixed, damage_multiplier: SimFixed },
-    // Future: could be heal, buff, etc.
-}
-```
+Because `bind_remaining_value_as` snapshots the shield value immediately before removal:
 
-Two distinct hooks:
-- **On-expiry** (timer runs out, shield still has HP): read `shield_hp`, calculate AoE damage, resolve against all enemies in radius
-- **On-break** (shield HP reaches 0): `shield_hp` is 0, so explosion deals 0. Or: designer could define different on-break behavior.
+- natural expiry sees the real remaining shield value
+- break-by-damage sees `0`
+- partial consumption produces proportionally smaller burst damage
 
-The shield system needs to distinguish "expired naturally" from "consumed by damage" — currently SK-17's shield just disappears in both cases.
-
-### Remaining Value as Ability Input
-
-This is the first ability where a **defensive resource's current value feeds into an offensive calculation**. The shield isn't just a buffer — its remaining HP becomes a damage parameter. The engine needs to read the shield's current value at the moment of expiry/break and pass it to the damage resolution pipeline.
-
-This creates an interesting decision: do you protect the shield (stay safe, deal more damage later) or accept damage (survive now, deal less explosion damage)?
+This keeps the mechanic inside the canonical shield lifecycle surface. No bespoke shield event
+subsystem is needed.
 
 ## Cross-Boundary Concerns
 
-TODO: The shield and explosion are both on the caster's Arbiter. The explosion is a local AoE spatial query — same as SK-29 Blizzard pulses. Enemies in the blast radius that are Ghosts receive damage relays. No special cross-boundary complexity beyond standard AoE.
+Shield Burst stays on the shield owner's current Arbiter.
 
-One edge case: if the shield is consumed by cross-boundary damage (a relay arrives that depletes the shield), the on-break hook fires immediately on the caster's Arbiter. The explosion is local.
+1. Shield absorption, remaining-value snapshots, and lifecycle callbacks all resolve on the shielded
+   entity's current owner.
+2. If cross-boundary damage depletes the shield, that depletion still resolves locally on the
+   shield owner, which immediately records `remaining_shield = 0` for the break callback.
+3. The explosion is just a local AoE query from the shield owner's position. Remote/Ghost enemies in
+   the radius are handled through the same local-query / target-owner damage relay path used by
+   other AoE effects.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: shield amount (800 HP), duration (3s), on-expiry action (AoE damage = remaining_shield * multiplier, radius), on-break action (AoE damage = 0 or different behavior). Compiler produces:
-- Shield instance with `max_shield_hp`, `expires_at_tick`
-- On-expiry hook: read `shield_hp` → AoE damage resolution
-- On-break hook: read `shield_hp` (0) → minimal or no damage
-- AoE payload with damage derived from shield state, not from offensive stats
+Designer specifies:
 
-The compiler needs to express "this shield has side effects on lifecycle events" — extending the shield primitive beyond simple absorption.
+- shield amount and duration
+- burst radius
+- damage coefficient from remaining shield value
+- whether break and expiry use the same payload or different payloads
 
-## Open Questions
+Compiler emits:
 
-- Can the explosion crit?
-- Does the explosion use the caster's offensive stats (for penetration, damage bonuses) or is it purely shield-value-based?
-- Can enemies cleanse/purge the shield to prevent the explosion (SK-15 Purify in reverse)?
-- If the shield is cleansed, does it count as "break" (0 damage explosion) or "removal" (no explosion at all)?
-- Does damage redirected via SK-19 Guardian Angel consume the shield? If so, the explosion deals less damage because of your ally's redirected damage.
-- Can multiple Shield Burst shields stack? If so, do they all explode independently?
-- Does the explosion trigger on-hit procs (SK-09 Chain Lightning per enemy hit)?
-- Does SK-22 Damage Reflection interact — if reflected damage consumes the shield, does the explosion fire?
+- one absorption shield
+- one lifecycle binding for `remaining_shield`
+- one expiry AoE payload
+- one break AoE payload
+
+Compiler validates:
+
+1. the shield is an absorption shield
+2. `duration_ticks > 0`
+3. lifecycle damage scaling reads only the bound remaining shield value
+4. any difference between break and expiry is expressed through separate authored callback payloads,
+   not through a bespoke shield-burst primitive
+
+## Resolved Interaction Notes
+
+- In this reference, the burst damage is driven only by `remaining_shield * coefficient`. It is not
+  separately multiplied by weapon damage or other offensive formulas unless the designer layers
+  those in elsewhere.
+- Purging/removing the shield before natural expiry prevents the expiry burst. Only natural expiry
+  or damage depletion fire the authored lifecycle hooks in this reference.
+- Damage redirected onto the shielded entity consumes the shield normally and therefore reduces the
+  later burst, because the remaining-value snapshot reads the shield's actual final state.
+- Multiple shield instances may coexist if the broader design allows them, and each shield fires its
+  own lifecycle callback using its own snapped remaining value.
+- The burst is ordinary AoE damage after the reactive callback re-enters on the next tick, so later
+  proc consumers can see it the same way they see other AoE damage events.

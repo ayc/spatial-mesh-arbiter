@@ -27,22 +27,88 @@ P-32 (Actor Spawning)
 
 ## Engine Primitives Required
 
-TODO: Minting 6 new EntityIDs, inserting them into the Arbiter's entity map, assigning Arbiter-local AI FSM (simple: idle → chase → attack → follow-caster), lifecycle management (expiry timer, caster-death binding). What are the minions' stats — derived from caster? Fixed from SpellData?
+Summon Swarm is now a canonical multi-spawn autonomy pattern.
+
+The recommended lowering is:
+
+1. one `spawn_actor` effect with:
+   - `count = 6`
+   - `position = caster_position`
+   - `placement.offsets` containing the authored ring pattern around the caster
+   - `lifetime_ticks = 900`
+   - `instance_limit = { scope = owner_ability, max_live = 6, overflow = replace_oldest }`
+2. one minion archetype with HP, movement speed, basic attack, and ordinary hostile targetability
+3. `autonomy = {`
+   `engage_filter = enemy_alive,`
+   `engage_radius = ... ,`
+   `attack_mode = basic_attack_only,`
+   `idle_mode = follow_owner,`
+   `follow_distance = ... ,`
+   `on_owner_removed = die`
+   `}`
+
+This keeps the minions inside the canonical spawned-actor autonomy contract. Each minion is an
+ordinary spawned actor with one deterministic FSM:
+
+- idle near owner
+- acquire nearest hostile within engage radius
+- chase / basic-attack
+- return to follow-owner idle behavior when no target is engaged
+
+The minions use their own archetype stats and ability list. If the game wants caster-scaling
+minions, that scaling must be baked into the archetype or authored through other canonical stat /
+loadout projection surfaces rather than through implicit summon magic.
 
 ## Cross-Boundary Concerns
 
-TODO: If the caster crosses an Arbiter boundary, the minions need to follow — are they handed off as a group? What if some minions are near the boundary and some aren't? Each minion is an independent entity — does each get its own handoff? If a minion attacks a Ghost, the damage relays to the Ghost's owner. 6 minions × 60Hz = significant entity density increase — could this push the Arbiter toward a split threshold?
+Summon Swarm follows the ordinary independent spawned-actor boundary model.
+
+1. Each minion is its own authoritative spawned actor. They do not hand off as a single "swarm
+   group."
+2. `idle_mode = follow_owner` samples the owner's current local-or-Ghost position each tick, so if
+   the owner crosses a seam the minions continue following through the same local/Ghost tracking
+   path used by other follow-owner autonomy.
+3. Any minion that physically crosses a boundary hands off independently through ordinary spawned-
+   actor handoff. Some minions may hand off while others remain local; there is no swarm-local
+   special case.
+4. If a minion attacks a Ghost/remote target, the minion's current owner emits the ordinary hostile
+   relay toward the target's authoritative owner.
+5. The six minions are just six ordinary additional entities for density / split-threshold
+   accounting. There is no special exemption for summons.
 
 ## Compiler Requirements
 
-TODO: What does the designer write to define a minion — stats, AI behavior, attack pattern, lifetime? How does the compiler produce the FSM and stat block? Does the compiler validate that the summon count is bounded?
+Designer specifies:
 
-## Open Questions
+- minion archetype
+- summon count and placement pattern
+- lifetime
+- hostile acquisition filter / radius
+- follow-owner idle distance
+- per-owner live-count policy
 
-- Do minions count toward the Arbiter's entity_count for split trigger purposes?
-- Is there a maximum summon count per caster (to prevent entity flooding)?
-- Can minions be targeted by enemies? Do they have collision?
-- Do minions inherit any of the caster's stats/buffs, or are they fully independent?
-- What happens if the caster summons again while previous minions are alive — replace, or stack?
-- How does the Commander Pattern (docs/1-architecture/02-npc-architecture.md) relate to minion control?
-- Performance: what is the per-entity cost of 6 additional FSMs ticking at 60Hz?
+Compiler emits:
+
+- one multi-spawn `spawn_actor`
+- one ability-local `placement` ring
+- one autonomy block using the canonical follow / acquire / chase / attack FSM
+- one per-owner live-count rule to keep summon flooding bounded
+
+Compiler validates:
+
+1. `count <= max_spawns_per_rule`
+2. `count = len(placement.offsets)`
+3. `engage_radius > 0`
+4. `follow_distance >= 0`
+5. the summon uses canonical `spawn_actor.autonomy` rather than a bespoke NPC commander loop
+
+## Resolved Interaction Notes
+
+- Minions count as ordinary entities for density and split-threshold accounting while alive.
+- Minions are normal targetable bodies with normal collision / pathing policy unless their archetype
+  explicitly changes that.
+- This reference uses a per-owner live cap of 6 with oldest-first replacement, so recasting does
+  not create unbounded summon stacking.
+- Owner death kills the minions immediately through `on_owner_removed = die`.
+- The old ARPG "Commander Pattern" is not a separate compiler concern here; the minions are just
+  spawned actors using the existing bounded autonomy FSM.

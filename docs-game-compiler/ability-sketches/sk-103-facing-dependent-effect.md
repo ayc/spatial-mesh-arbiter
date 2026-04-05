@@ -28,97 +28,63 @@ P-12 (Facing/Dot-Product Check) → P-17 (Conditional Thresholds)
 
 ## Engine Primitives Required
 
-### Entity Facing Direction
+Facing-Dependent Effect is now a canonical cone-targeting plus guarded per-target branching
+reference.
 
-This is the first ability that READS an entity's facing direction for gameplay purposes. The engine must track facing as an authoritative property:
+The recommended lowering is:
 
-```
-struct EntityCore {
-    position: Vec2F,
-    velocity: Vec2F,
-    facing: Vec2F,       // Normalized direction the entity is "looking"
-    // ... other fields
-}
-```
+1. author one cone snapshot query exactly like `SK-49` for the affected target set
+2. apply two mutually exclusive conditional follow-up effects to each admitted target:
+   - `condition: { facing_toward: { entity: target, other: caster } }`
+     -> `apply_cc(cc_type = stun, category = hard_disable, duration_ticks = 120, ...)`
+   - `condition: { not: { facing_toward: { entity: target, other: caster } } }`
+     -> one negative slow status using canonical stat layering / soft-disable metadata
 
-Facing is typically derived from:
-- Last movement direction (if moving)
-- Last attack direction (if attacking a target)
-- Explicit facing/orientation input from the client (requested aim direction)
+This keeps the mechanic inside existing surfaces:
 
-Facing must be authoritative (server-determined) and included in the entity state. Currently, the spec's entity state doesn't explicitly track facing — this may be a new field.
-
-### Facing Angle Check
-
-For each target hit by the cone, determine their orientation relative to the caster:
-
-```
-fn is_facing_toward(target: &Entity, caster_position: Vec2F) -> bool {
-    let to_caster = normalize(caster_position - target.position);
-    let facing_dot = dot(target.facing, to_caster);
-    facing_dot > 0.0  // Positive = facing toward, Negative = facing away
-}
-```
-
-If `facing_dot > 0` (angle between facing and direction-to-caster is less than 90°): target is facing toward → stun.
-If `facing_dot <= 0` (angle is greater than 90°): target is facing away → slow.
-
-This is a dot-product check (same fixed-point math as SK-49 Cone Strike's angle check) but between the TARGET's facing and the direction TO THE CASTER, not between the caster's facing and the direction to the target.
-
-### Branching CC Based on Geometry
-
-The ability applies DIFFERENT effects to different targets based on a spatial/geometric condition:
-- SK-85 Ring Geometry: different effect based on DISTANCE (in ring = hit, inside = safe)
-- SK-103: different effect based on ANGLE (facing toward = stun, facing away = slow)
-
-Both are "geometric conditionals" — the effect branches based on spatial relationships at resolution time.
-
-### Facing in Ghost Updates
-
-If the target is a Ghost, does the Ghost carry facing data? Currently, GhostUpdate has position, velocity, movement_class — no facing. The caster's Arbiter would need facing data for Ghost targets to determine the stun-vs-slow branch.
-
-Options:
-- Add facing to GhostUpdate (small overhead — one Vec2F per Ghost update)
-- Use velocity as a proxy for facing (if moving, facing = movement direction)
-- Always apply the weaker effect (slow) for Ghosts (conservative)
-
-Using velocity as a facing proxy is reasonable for entities in motion. Stationary entities have ambiguous facing — design choice needed.
+- the cone query is the same canonical targeting shape as `SK-49`
+- the per-target branch is a normal conditional effect using `GuardExpr`
+- facing checks are already a supported geometric guard, not a new primitive
 
 ## Cross-Boundary Concerns
 
-TODO: The cone AoE hits enemies, some of which may be Ghosts. For local entities, facing is known authoritatively. For Ghosts:
+Facing-Dependent Effect is origin-owner admission, target-owner branch resolution.
 
-1. **Ghost with velocity**: facing = movement direction (proxy). Can determine stun vs slow.
-2. **Stationary Ghost**: facing is unknown (Ghost doesn't carry facing). Must default to one effect.
-3. **Relay question**: does the caster's Arbiter determine stun vs slow locally (using Ghost data), or does it relay "check facing and apply stun or slow" to the Ghost's owning Arbiter?
-
-If the caster determines locally: fast, but uses approximate Ghost facing. If relayed: accurate, but adds a round-trip. The caster's Arbiter should determine locally using Ghost velocity as facing proxy — the edge case of stationary Ghosts defaults to slow (safer).
+1. The caster owner performs the cone query against local and Ghost-visible candidates just like
+   other short-range AoEs.
+2. Remote/Ghost targets are relayed to their authoritative owners with the already-admitted payload.
+3. Each remote target owner then evaluates the `facing_toward(target, caster)` guard
+   authoritatively when deciding whether that target receives stun or slow.
+4. This avoids any need for the origin owner to guess remote facing from Ghost data.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: cone AoE, per-target facing check (toward caster = stun 2s, away = slow 40% 2s), instantaneous facing check at moment of impact, Tenacity/DR apply to both effects. Compiler produces:
-- Cone AoE query (SK-49)
-- Per-target facing check: dot product between target.facing and direction_to_caster
-- Branching effect application: stun if facing toward, slow if facing away
-- Ghost facing approximation (velocity proxy)
+Designer specifies:
 
-The compiler needs to support **geometric conditional effects** — effects where the outcome depends on spatial relationships (facing, distance, angle) evaluated at resolution time.
+- cone angle / range
+- stun duration
+- slow amount / duration
+- the instantaneous facing condition that selects the branch
 
-### Entity Facing as Engine Property
+Compiler emits:
 
-This may require a `docs-core/` change: the entity state model must include `facing: Vec2F` as an authoritative property. This affects:
-- `docs-core/01-spatial-runtime-kernel.md`: entity state includes facing
-- Ghost updates: optionally include facing data
-- Edge Node input: facing is derived from movement direction or explicit orientation input
+- one cone-targeting snapshot query
+- one guarded stun effect for targets facing the caster
+- one guarded slow effect for targets not facing the caster
 
-## Open Questions
+Compiler validates:
 
-- Is entity facing derived from movement direction, or explicitly controlled by aim/orientation input?
-- For stationary entities, what is their facing direction? Last movement direction? Last requested orientation?
-- Does facing change instantaneously or smoothly (turn rate)?
-- Should facing be included in GhostUpdate (adds bandwidth) or approximated from velocity?
-- Can the facing check be manipulated (turn away at the last tick to avoid the stun)?
-- Does the stun/slow distinction apply to each target independently (some stunned, some slowed in the same cast)?
-- How does this interact with SK-78 Fear (feared entity is running away — their facing is away from the fear source, but toward or away from the caster?)?
-- Does SK-51 Unstoppable prevent both the stun AND the slow (both are CC)?
-- If the target is inside SK-91 Stasis (frozen — can't change facing), what's their facing at the check?
+1. the branch conditions are mutually exclusive and cover the admitted target set
+2. the stun branch uses canonical `apply_cc`
+3. the slow branch uses canonical negative status layering rather than a bespoke slow primitive
+
+## Resolved Interaction Notes
+
+- Different targets in the same cone may receive different branches based on their own facing at
+  impact time.
+- Unstoppable / Super Armor can block the stun branch through ordinary CC immunity, but the slow
+  branch is still a normal debuff unless some other immunity rejects it.
+- The facing check is instantaneous at effect resolution; late turning before impact can change the
+  outcome.
+- This sketch does not require a `docs-core/` expansion. The compiler already treats facing guards
+  as a supported conditional-effect input.

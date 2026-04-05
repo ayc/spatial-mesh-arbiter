@@ -265,10 +265,10 @@ Used for: - Rockets - Grenades - Slow spells - Traps
 
 Because these objects have a travel time and can cross server boundaries, they are promoted to **Ephemeral Actors** within the Mesh.
 -   **Creation:** The Arbiter instantiates the projectile as an independent Actor with its own velocity and ownership receipt (`owner_id`).
--   **Runtime Boundary Handoff (RUDP):** If a projectile crosses a normal sibling boundary, Arbiters use a dedicated lightweight `ProjectileHandoff` protocol over Reliable-UDP (not the split WAL path). This carries a full mid-flight snapshot so the receiver can reconstruct exact state (position, velocity, fuse/lifetime timers, target lock, pierce counters, impact sequence, data epoch).
+-   **Runtime Boundary Handoff (RUDP):** If a projectile crosses a normal sibling boundary, Arbiters use a dedicated lightweight `ProjectileHandoff` protocol over Reliable-UDP (not the split WAL path). This carries a full mid-flight snapshot so the receiver can reconstruct exact state (position, velocity, fuse/lifetime timers, target lock, pierce counters, ordered carried-target roster, impact sequence, data epoch).
 -   **Split-Safe Ownership:** Projectile Actors obey the exact same single-owner spatial invariant as standard entities. During a split, the surrogate Arbiter assigns each in-flight projectile to exactly one child at the cutover tick using the same jurisdiction tie-breaker (depth, then lowest Arbiter_ID). The non-owner child may keep a shadow copy for observability but must never advance simulation or emit `ImpactEvent`.
 -   **Resolution:** The projectile itself carries the detonation logic. When it calculates an impact, it submits a `MeshInternalEvent` (containing an `ImpactEvent` payload) to its host Arbiter. The host Arbiter applies the damage based on Target-Favoring rules (evaluating the victim's position at the exact moment of impact). 
--   **Cross-Boundary Kill Credit:** If a long-range projectile kills a player several Arbiters away, the receiving Arbiter will not have the original attacker in its local memory. This is by design. The receiving Arbiter simply emits the `PlayerDied { killer, victim }` event to the **Meta Services Event Bus** (Section 9.3). The Meta Services layer resolves the global IDs and distributes the XP/Loot without the Spatial Mesh ever needing to verify the distant attacker's existence.
+-   **Cross-Boundary Kill Credit:** If a long-range projectile kills a player several Arbiters away, the receiving Arbiter will not have the original attacker in its local memory. This is by design. The receiving Arbiter simply emits the `PlayerDied { killer, victim, respawn_delay_credit_ticks, respawn_override }` event to the **Meta Services Event Bus** (Section 9.3). The Meta Services layer resolves the global IDs and distributes the XP/Loot without the Spatial Mesh ever needing to verify the distant attacker's existence.
 
 ### 5.2.1 ProjectileHandoff Protocol (Prepare -> Ack -> Commit)
 - **Prepare:** Sender packages `ProjectileSnapshot` plus transfer metadata (`handoff_seq`, `topology_epoch`, `source_tick`, `commit_tick`, `prepare_expiry_tick`) and sends to target Arbiter over RUDP.
@@ -277,6 +277,10 @@ Because these objects have a travel time and can cross server boundaries, they a
 - **Single-Simulator Invariant:** At any tick, only one Arbiter may advance projectile simulation or emit impacts.
 - **Idempotency & Ordering:** Receiver only accepts strictly newer `handoff_seq` for each `projectile_id`. Duplicate/stale Prepare packets are rejected safely.
 - **Epoch Change During Transfer:** If handoff `topology_epoch` is stale/new, apply the same surrogate-forwarding or short buffer timeout strategy used by proposal epoch handshake before accepting transfer. Never commit under unresolved epoch disagreement.
+- **Carried Target Roster:** If a projectile owns a bounded carried-target roster, `ProjectileSnapshot`
+  transfers only the ordered entity IDs. The carried entities themselves remain ordinary entities and
+  continue through co-located entity handoff or temporary projectile-shadow following until
+  reunified on the receiver.
 
 ### 5.2.2 Cross-Boundary Dilation Blend Contract (No Snap)
 The overlap buffer is also the deterministic transition band for kinematic dilation during projectile travel.
@@ -686,16 +690,16 @@ The Spatial Mesh is strictly a physics and combat runner. It does not query data
 ### The Initial Spawn Handshake
 When a player logs in for the first time, or spawns after a death/logout:
 1. **The Login (Client -> Meta):** The Edge Node proxies the user's auth directly to the Meta Services (Login Service).
-2. **Database Resolution (Meta):** The Meta Service checks the database for the character's `last_save_zone` coordinates (or defaults to the `NEWBIE_ZONE`).
+2. **Database / Lifecycle Resolution (Meta):** The Meta Service checks the database for the character's `last_save_zone` coordinates (or defaults to the `NEWBIE_ZONE`), then applies any still-active bounded respawn override for the current death.
 3. **Topology Discovery (Meta -> Mesh Controller):** The Meta Service queries the Mesh Controller: *"Which Arbiter currently owns coordinate [x, y]?"* The Controller replies with the target Arbiter's IP.
-4. **Engine Injection (Meta -> Arbiter):** The Meta Service sends a `SpawnEntity` command containing the player's compiled `SoftState` and coordinates directly to the target Arbiter via the internal Event Bus.
+4. **Engine Injection (Meta -> Arbiter):** The Meta Service sends a `SpawnEntity` command containing the player's compiled `SoftState`, coordinates, and any optional `respawn_context` directly to the target Arbiter via the internal Event Bus.
 5. **Connection Handoff (Meta -> Edge Node):** The Meta Service replies to the Edge Node with the target Arbiter's IP address. The Edge Node initiates its UDP stream, and the game begins.
 
 ### The Logout Protocol (Combat Logging Prevention)
 To prevent players from force-quitting to avoid death, the engine enforces strict logout rules driven by JRPG Save Zones.
 *   **Safe Zone Logout:** If a player clicks "Log Out" while standing inside a designated Safe Zone, Meta validates the coordinates and sends an `InitiateLogout { is_safe_zone: true }` command to the Arbiter. The Arbiter instantly despawns the entity.
 *   **Wilderness Logout / Force Quit:** If a player logs out in the wild, or their router disconnects, the Arbiter flags their `SoftState` with a 60-second `logout_fuse_ticks`. The character remains fully targetable and killable in the simulation for 60 seconds.
-*   **The Next Login:** Regardless of how the player left the game (Safe Zone, survived the 60s fuse, or died), their next login will *always* trigger the Spawn Handshake at their last recorded JRPG Save Zone. This heavily incentivizes returning to town before logging off.
+*   **The Next Login:** Regardless of how the player left the game (Safe Zone, survived the 60s fuse, or died), their next login will *always* trigger the Spawn Handshake using the currently active lifecycle route. In the normal case that route is the last recorded JRPG Save Zone. This heavily incentivizes returning to town before logging off.
 
 ## 9.6 The Death & Respawn Lifecycle (With Resurrection)
 To keep the Spatial Mesh hyper-optimized, the engine uses strictly decoupled death logic, leaning heavily on the Meta Services for spawn orchestration, but preserving a local "Corpse" state for in-combat resurrections.
@@ -703,10 +707,10 @@ To keep the Spatial Mesh hyper-optimized, the engine uses strictly decoupled dea
 ### Player Death & The Healer Window
 When a player's HP reaches 0:
 1. **The Kill & Corpse State:** The Arbiter flags the player's `SoftState` as `is_dead = true` and strips their collision geometry. However, the player remains in the Arbiter's memory as a targetable "Corpse" for a brief window (e.g., `resurrect_window_ticks` = 10 seconds). 
-2. **The Meta Handoff:** Simultaneously, the Arbiter emits a `PlayerDied` event to the Meta Service. The Meta Service begins ticking down the total MOBA-style respawn penalty timer (e.g., 15 seconds).
+2. **The Meta Handoff:** Simultaneously, the Arbiter emits a `PlayerDied` event to the Meta Service. The Meta Service begins ticking down the total MOBA-style base respawn penalty timer (e.g., 15 seconds) and, if the death carried a supported respawn override, also tracks that bounded alternate route until it is either consumed or revoked.
 3. **Branch A: The Healer Succeeds:** Before the 10-second corpse window expires, an ally casts a Resurrection spell on the corpse. The Arbiter flips `is_dead = false`, restores HP/collision, and emits `PlayerResurrected` to the Meta Service. Meta instantly cancels the pending 15-second respawn timer. The player is back in the fight.
 4. **Branch B: The Hard Wipe:** The 10-second corpse window expires with no heal. The Arbiter permanently deletes the player from its memory and broadcasts a `GhostUpdate { is_despawning: true }` to instantly clear neighboring ghosts. 
-5. **The Re-Injection:** 5 seconds later, the Meta Service's 15-second respawn timer finishes. Meta automatically executes the **Spawn Handshake (Section 9.5)**, injecting the player at their designated JRPG Save Zone and redirecting their Edge Node to the new location.
+5. **The Re-Injection:** When the active respawn timer finishes, the Meta Service automatically executes the **Spawn Handshake (Section 9.5)**, injecting the player at either their designated JRPG Save Zone or one supported bounded override location and redirecting their Edge Node to the new location.
 
 ### Monster Death (ARPG Style)
 Monsters must leave a presence in the world for players to see and loot.

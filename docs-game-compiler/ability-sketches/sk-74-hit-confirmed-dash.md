@@ -28,77 +28,76 @@ P-07 (Entity-as-Kinematic-Volume) → P-17 (Conditional Thresholds) → P-01 (In
 
 ## Engine Primitives Required
 
-### Conditional Post-Resolution Effect
+Hit-Confirmed Dash is now a canonical first-hit projectile plus hit-only self-follow-up reference.
 
-All existing abilities have a fixed outcome: they either succeed or fail. Hit-Confirmed Dash has a **branching outcome**: the ability's effect on the CASTER depends on whether the OFFENSIVE portion succeeded.
+The recommended lowering is:
 
-```
-enum ProjectileOutcome {
-    Hit { target_id: EntityID },
-    Miss,
-}
+1. one first-hit skillshot projectile with:
+   - authored speed / max range
+   - `detonation_policy = { entity_impact = detonate, world_impact = stop, expiry = despawn }`
+   - no pierce
+2. the public ability's base cooldown is the miss cooldown
+3. on the first admitted enemy impact:
+   - deal the ordinary hit damage
+   - trigger one hit-only self dash in the original cast direction through canonical
+     `kinematic_sweep`
+   - use the bounded Lua helper `set_cooldown` to replace the miss cooldown with the shorter
+     hit-confirmed cooldown
 
-// After projectile resolution:
-match outcome {
-    Hit { target_id } => {
-        apply_damage(target_id, combat_context);
-        self_dash(caster, cast_direction, dash_distance);  // Conditional!
-        set_cooldown(ability, hit_cooldown);
-    },
-    Miss => {
-        set_cooldown(ability, miss_cooldown);
-    },
-}
-```
+This keeps the mechanic inside existing bounded surfaces:
 
-The conditional dash is the new primitive — a self-displacement that only fires if a preceding offensive action succeeded.
-
-### Hit Detection → Self-Displacement Pipeline
-
-The ability is a single cast that produces two effects:
-1. Offensive: damage to the target (standard)
-2. Mobility: self-dash in the cast direction (conditional on hit)
-
-These must resolve in order: first confirm the hit, then apply the dash. The dash uses the cast direction (not the direction to the target), so the caster dashes forward regardless of where the target was in the skillshot path.
-
-### Conditional Cooldown
-
-The ability has two cooldown values:
-- Hit: shorter cooldown (reward for accuracy)
-- Miss: longer cooldown (penalty for whiffing)
-
-The cooldown is set AFTER the outcome is known. This requires the ability definition to express: `cooldown_on_hit: 6s, cooldown_on_miss: 12s`.
+- the projectile remains an ordinary first-hit hostile shot
+- the movement reward is an ordinary self `kinematic_sweep`, not a bespoke "dash if hit" primitive
+- miss-versus-hit cooldown branching stays inside the existing bounded `set_cooldown` fallback
 
 ## Cross-Boundary Concerns
 
-TODO: The skillshot might hit a Ghost. If the projectile hits a Ghost:
-1. Damage is relayed to the Ghost's owning Arbiter (standard)
-2. The caster's Arbiter confirms "hit" and triggers the self-dash locally
-3. The dash is a local self-displacement on the caster's Arbiter
+The dash decision stays with the projectile / caster owner.
 
-The key question: does the caster's Arbiter confirm the hit BEFORE relaying damage, or does it wait for the target's Arbiter to confirm? If the caster's Arbiter can determine "projectile collided with Ghost hitbox" locally (using Ghost position data), the hit confirmation and dash can be immediate without waiting for the cross-boundary relay.
-
-This is the likely approach — the caster's Arbiter detects the collision locally (Ghost position is approximate but sufficient for hit detection) and triggers the dash immediately. The damage relay proceeds in parallel.
+1. The projectile's first-hit admission is determined on the projectile's current owner through the
+   ordinary local-or-Ghost collision contract.
+2. If the admitted hit target is remote/Ghost, the hostile damage payload still relays to the
+   target owner as normal.
+3. The hit-only self dash does not wait for a second remote acknowledgment. Once the projectile
+   owner has admitted the hit, that same owner schedules the self `kinematic_sweep` and hit-only
+   cooldown replacement locally.
+4. If the caster crosses an Arbiter boundary during the dash, the sweep follows the existing
+   authoritative mover handoff rules just like other `kinematic_sweep` movement.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: skillshot (direction, first-hit), on-hit effects (damage + self-dash in cast direction + reduced cooldown), on-miss effects (no dash + longer cooldown). Compiler produces:
-- ProjectileActor with `CollisionMode::FirstHit`
-- Branching post-resolution: hit → damage + self-dash + cooldown_A, miss → cooldown_B
-- Self-displacement definition (direction, distance, instant)
-- Conditional cooldown values
+Designer specifies:
 
-The compiler needs to support **outcome-dependent ability resolution** — where the ability's effect on the caster branches based on the offensive result.
+- projectile speed / range
+- dash distance / duration
+- miss cooldown
+- hit-confirmed cooldown
 
-## Open Questions
+Compiler emits:
 
-- Does the dash trigger SK-32 Minefield if the caster dashes onto a mine?
-- Does the dash break SK-25 Root (dash is movement — root prevents movement)?
-- Can the dash cross an Arbiter boundary (instant handoff)?
-- Does the dash trigger any on-dash effects (if such effects exist)?
-- If the skillshot hits multiple targets (future pierce variant), does the dash trigger once or per-hit?
-- Does the hit confirmation use Ghost position accuracy (dash on approximate hit) or wait for authority (dash delayed by relay)?
-- Can the dash direction differ from the cast direction (e.g., dash backward on hit)?
-- Does SK-12 Spell Echo interact — if the echo fires and hits, does it trigger another dash?
-- If the caster is rooted (SK-25) when the skillshot hits, does the conditional dash fail silently or override the root?
-- Does the reduced cooldown on hit interact with cooldown reset (SK-14 Execute Threshold)?
+- one first-hit projectile spawn
+- one hit-only self `kinematic_sweep` that uses the committed cast direction
+- one hit-only `set_cooldown` mutation that replaces the base miss cooldown with the shorter
+  hit-confirmed cooldown
+
+Compiler validates:
+
+1. the projectile uses first-hit collision semantics
+2. the follow-up movement is expressed through canonical `kinematic_sweep`, not a bespoke mobility
+   outcome primitive
+3. the hit-only cooldown branch stays inside the bounded `set_cooldown` helper rather than a hidden
+   second public ability
+4. the hit-confirmed cooldown is non-negative and does not exceed the authored miss cooldown in this
+   reference version
+
+## Resolved Interaction Notes
+
+- The dash uses the original cast direction, not a recomputed vector toward the struck target.
+- Because the follow-up movement is ordinary mover-owned motion, roots or other movement denial may
+  prevent the dash from starting if they are active when the hit-confirmed follow-up would execute.
+- The dash is still ordinary movement for downstream interactions, so entering a minefield or other
+  movement-sensitive area triggers those systems the same way other dashes do.
+- This reference is single-hit only. If a future pierce variant is authored, it would still need to
+  specify whether the follow-up fires once per cast or once per admitted hit.
+- Spell replay or echo mechanics may generate another dash only if they generate another admitted
+  hit envelope; there is no special exemption for this sketch.

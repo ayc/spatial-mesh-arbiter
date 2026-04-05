@@ -27,50 +27,78 @@ P-01 (Instant Translation)
 
 ## Engine Primitives Required
 
-TODO: This is an **instant position snap** — the caster's position changes from A to B in a single tick with no intermediate positions. This is fundamentally different from:
-- Normal movement (continuous, bounded by movement speed)
-- Displacement (SK-01 Toss — trajectory over multiple ticks)
-- Charge (SK-34 — continuous movement at high speed)
+Blink Strike is canonical `P-01` instant translation with a destination derived from a target entity
+rather than from a fixed ground point.
 
-The Arbiter needs to:
-1. Calculate destination: target's position + offset in the direction opposite to target's facing
-2. Validate destination is walkable (not inside a wall, not off the map)
-3. Snap the caster's position to the destination
-4. Apply the strike damage to the target
+The resolving owner must:
 
-### Position Snap Implications
-A position snap bypasses all intermediate positions — the caster was never "between" A and B. This means:
-- No collision with entities or geometry along the path (can blink through walls?)
-- No triggering of SK-30 Trail of Fire or SK-32 Minefield between origin and destination
-- Ghost updates for the caster show a discontinuous position jump — interpolation on other clients will look wrong unless the snap is flagged
+1. Read the target's current authoritative pose and `facing_direction`
+2. Compute the behind-target offset from that pose/facing
+3. Run the normal `P-01` destination validation and nearest-valid-position resolution
+4. Commit the snap atomically
+5. Resolve the immediate follow-up strike from the post-snap position in the same tick
 
-### Destination Calculation
-"Behind the target" requires knowing the target's facing direction. If the target is a Ghost, the Ghost's facing data may be stale or unavailable (current GhostUpdate only carries position, velocity, movement_class). Does the Arbiter need Ghost facing data for this ability to work?
+This is not ordinary movement and not `P-02` displacement. There is no traversed path, no
+intermediate collision history, and no travel window. The caster is never "between" origin and
+destination for collision or overlap purposes.
+
+The target-facing dependency is also canonical, not sketch-local. `docs-core/` already requires a
+`facing_direction` in kinematic state, so "behind target" is derived from formal engine-facing
+state rather than from a vague animation concept.
 
 ## Cross-Boundary Concerns
 
-TODO: The caster might blink from one Arbiter's region to another Arbiter's region in a single tick — no traversal, no intermediate position. This is an **instant cross-boundary handoff** with no travel window. The caster needs to be removed from Arbiter A and inserted into Arbiter B at the same tick.
+Blink Strike follows the canonical `CG-01` cross-boundary snap rule.
 
-Scenarios:
-1. **Target is local, destination is local:** No boundary issues. Position snap + strike resolve locally.
-2. **Target is a Ghost, destination is in target's Arbiter's region:** Caster blinks into a different Arbiter's territory. Instant handoff required.
-3. **Target is local, but destination (behind target) is across a boundary:** Caster blinks past the boundary. Handoff triggered by the destination position, not by movement.
+1. If the target is local and the resolved destination stays local, the current owner computes the
+   behind-target point, validates it, commits the snap, and resolves the strike locally.
+2. If the target is remote/Ghost, or if the computed behind-target destination belongs to another
+   Arbiter, the origin owner emits a `cross_boundary_snap` request instead of treating Ghost data as
+   authoritative.
+3. The destination owner re-derives the behind-target point from the target's authoritative
+   pose/facing, validates walkability, commits the snap, and resolves the follow-up strike there in
+   the same tick.
 
-The existing entity handoff protocol is designed for continuous movement (entity approaches boundary, handoff initiated). An instant snap bypasses the approach — the entity was never near the boundary. Does the handoff protocol support "entity is now at position X which is in your region"?
+This is destination-based handoff, not travel-based handoff. There is no dual ownership window and
+no mid-path authority sharing. Ghost pose/facing can be used for admission or preview only; final
+coordinates and strike resolution are always recomputed on the authority that already owns the
+target-side spatial state.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (enemy), destination calculation (behind target, offset distance), instant teleport (no travel time), strike damage (bonus backstab modifier), range requirement. Compiler produces: position snap + destination function (relative to target position/facing) + immediate damage payload. The compiler needs to flag this as a "teleport" movement type that bypasses normal movement validation (speed caps, collision along path).
+Designer specifies:
 
-## Open Questions
+- hostile target entity
+- cast range / admission constraints
+- behind-target offset distance
+- instant-translation behavior (no travel time)
+- follow-up strike payload, including any backstab bonus
 
-- Can the caster blink through walls / terrain (since there's no traversal)?
-- If the destination is inside a wall (target is backed against geometry), where does the caster appear? Closest valid position?
-- Does the blink break SK-25 Root (root prevents movement, but is a teleport "movement")?
-- Does the blink trigger SK-32 Minefield at the destination (caster appears on top of a mine)?
-- Does the blink break SK-04 Tether if it exceeds the break distance?
-- If the target moves or dies between cast and resolution (same tick?), what happens?
-- How does the backstab bonus work — is "facing" a formal entity property, or derived from last movement direction?
-- Can the caster blink to a target on a different Arbiter? This means the cast targets a Ghost but the resolution (strike + position snap) must happen on the target's Arbiter.
-- Does the position snap generate a special Ghost update type (teleport flag) so clients don't interpolate through intermediate positions?
-- How does the instant handoff interact with the topology epoch — if the caster blinks cross-boundary, the handoff must be immediate, not a 3-phase protocol.
+Compiler emits:
+
+- one `P-01`-style instant translation whose destination is derived from the target entity's
+  current pose/facing
+- one immediate follow-up hostile strike payload
+- cross-boundary relay metadata carrying the relative-offset rule, not guessed world coordinates
+
+Compiler validates:
+
+1. the target reference is entity-targeted and hostile
+2. the authored offset is positive and bounded
+3. the ability is lowered as teleport/snap behavior, not as displacement or sweep
+4. cross-boundary lowering carries only parameters needed to recompute the destination on the
+   authoritative owner
+
+## Resolved Interaction Notes
+
+- Blink has no traversed path, so it does not collide with or trigger path-intermediate effects on
+  the route between origin and destination.
+- `P-01` still enforces collision safety at the final location; if the authored behind-target point
+  is invalid, the engine resolves to the nearest valid position instead of placing the caster inside
+  static geometry.
+- Facing is a formal engine property via `facing_direction`, so backstab-style "behind target"
+  logic is grounded in canonical kinematic state.
+- Remote-target Blink Strike is allowed, but the final destination and strike resolve on the
+  destination/target owner, not from origin-side Ghost guesses.
+- Root, tether, and leash-style movement constraints only block or clamp Blink if their authored
+  status metadata applies to teleports (`apply_to_teleports = true`).

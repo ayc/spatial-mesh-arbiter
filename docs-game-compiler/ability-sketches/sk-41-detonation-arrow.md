@@ -6,7 +6,7 @@ I fire a projectile in a line. The projectile keeps flying until I reactivate th
 
 ## Primitive Composition
 
-P-32 (Actor Spawning) → P-45 (Delay Timer) → P-09 (Shape Overlap Query)
+P-32 (Actor Spawning) → P-09 (Shape Overlap Query) → P-26 (Capability Bitmask)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -29,69 +29,92 @@ P-32 (Actor Spawning) → P-45 (Delay Timer) → P-09 (Shape Overlap Query)
 
 ## Engine Primitives Required
 
-### Player-Controlled Detonation
-Normal projectiles have two detonation triggers: entity collision (hit something) and fuse expiry (max lifetime/range). This projectile adds a third: **player command**.
+Detonation Arrow is now a canonical manual-trigger projectile pattern built from one live projectile
+reference plus one same-key detonate variant.
 
-The ProjectileActor needs a detonation policy:
-```
-ProjectileDetonationPolicy {
-    manual_trigger_enabled: true,
-    proximity_trigger_radius: None,
-    entity_impact_behavior: Ignore,
-    world_impact_behavior: Ignore,
-    expiry_behavior: Detonate,
-}
-```
+The recommended lowering is:
 
-For this policy, the projectile flies until either:
-- The caster sends a `DetonateOwnedProjectile { projectile_id }` command (reactivation)
-- The projectile reaches its lifetime expiry and detonates as a safety cap
+1. Define one runtime state:
+   - `state_id = detonation_arrow_projectile_ref`
+   - `kind = bookmark(entity_ref)`
+   - `expires_after_ticks = projectile_lifetime_ticks`
+   - `clear_on_owner_death = true`
+2. Base cast variant:
+   - `spawn_actor {`
+     `count = 1,`
+     `output_binding = detonation_arrow_projectile,`
+     `projectile = {`
+       `speed = ... ,`
+       `detonation_policy = {`
+         `manual_trigger = true,`
+         `entity_impact = ignore,`
+         `world_impact = ignore,`
+         `expiry = detonate`
+       `}`
+     `}`
+   - `write_state(state_id = detonation_arrow_projectile_ref, capture = entity_ref, entity = { binding: detonation_arrow_projectile })`
+3. The projectile's authored detonation payload is one hostile AoE centered on its CURRENT position:
+   - ordinary AoE damage
+   - ordinary `apply_cc(cc_type = silence)` to admitted hostile targets in the blast
+4. Reactivation variant:
+   - `when = { state_present: detonation_arrow_projectile_ref }`
+   - resolve the stored projectile's authored `manual_trigger`
+   - `clear_state(state_id = detonation_arrow_projectile_ref)`
 
-### Caster-Projectile Link
-The caster must be able to send a command to a specific live projectile. This is similar to SK-39 Spectral Dash (reactivating a live projectile), but instead of teleporting TO the projectile, the caster tells it to EXPLODE.
+This keeps the mechanic inside existing canonical surfaces:
 
-```
-status_effect: DetonationArrowLink {
-    projectile_id: EntityID,
-    can_detonate: bool,
-}
-```
-
-On reactivation:
-1. Look up projectile by ID
-2. Trigger detonation at projectile's current position
-3. Resolve AoE damage + silence against all entities in blast radius
-4. Despawn projectile
-
-### Pass-Through Projectile
-The projectile ignores entity collisions during flight — it only responds to the player's detonation command or lifetime expiry. This is a flag on the projectile: `collides_with_entities: false`.
+- the projectile owns its own detonation behavior through `detonation_policy`
+- the live actor reference is stored as `bookmark(entity_ref)` runtime state
+- same-key reactivation uses ordinary `ActivationModes` rather than a second public ability ID
 
 ## Cross-Boundary Concerns
 
-TODO: Same pattern as SK-39 — the projectile might cross a boundary before the caster detonates it. The detonation command must reach the projectile's current Arbiter:
+Detonation Arrow follows the ordinary live-projectile routing model.
 
-1. Projectile launched on Arbiter A, still on Arbiter A: detonation is local.
-2. Projectile handed off to Arbiter B: caster's detonation command goes from Arbiter A (caster) to Arbiter B (projectile). The AoE resolves on Arbiter B.
-3. The explosion hits entities on Arbiter B, but some might be Ghosts from Arbiter C — damage relays fan out.
-
-The caster's Arbiter needs to know which Arbiter currently hosts the projectile to route the detonation command. Or: the detonation command is broadcast to all Arbiters that might have the projectile (based on its trajectory).
+1. The projectile hands off normally when it crosses an Arbiter boundary.
+2. The stored runtime state keeps only the stable projectile actor ID; the manual detonate action
+   resolves against the projectile's current authoritative owner at the moment of reactivation.
+3. The actual explosion runs on that projectile owner using the projectile's CURRENT position. Any
+   remote/Ghost victims then follow the ordinary target-owner damage / CC relay path.
+4. Natural expiry detonation and manual detonation use the same live projectile state, so handoff
+   does not create a duplicate or source-side detonation race.
+5. If the projectile is already gone when reactivation would occur, the stored state is cleared and
+   the same-slot detonate variant disappears cleanly.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: projectile speed, max range, pass-through (no entity collision), detonation policy (player command or lifetime expiry), AoE blast radius, AoE damage, silence duration (2.5s), targeting filter (enemies). Compiler produces:
-- ProjectileActor with `ProjectileDetonationPolicy { manual_trigger_enabled: true, entity_impact_behavior: Ignore, expiry_behavior: Detonate, ... }` and `collides_with_entities: false`
-- Status effect on caster linking to the projectile
-- Multi-phase ability: Phase 1 (launch), Phase 2 (detonate)
-- AoE resolution + silence application on detonation
+Designer specifies:
 
-## Open Questions
+- projectile speed and lifetime / max range
+- blast radius and hostile targeting filter
+- explosion damage payload
+- silence duration
+- observer presentation
 
-- Can the caster fire a second Detonation Arrow while the first is still in flight? (Two active projectiles?)
-- Does the projectile pass through SK-03 Terrain Walls, or does it detonate on wall collision?
-- Can the silence from the explosion interrupt channels (SK-05 Global Strike)?
-- Does the AoE damage use the caster's stats at cast time (epoch-pinned) or at detonation time?
-- If the caster dies while the projectile is in flight, does it detonate automatically, keep flying until fuse, or despawn?
-- Can enemies see the projectile coming (giving them time to dodge before detonation)?
-- If the projectile is mid-handoff between Arbiters when the detonation command arrives, what happens?
-- Does the explosion damage trigger on-hit procs for the caster (SK-09 Chain Lightning, SK-10 Crit Explosion)?
-- Can the caster detonate while CC'd (stunned/silenced)?
+Compiler emits:
+
+- one single-spawn projectile actor with `detonation_policy.manual_trigger = true`
+- one `bookmark(entity_ref)` runtime state that stores the live projectile
+- one hidden same-key detonate variant gated on `state_present`
+- one projectile detonation payload that resolves AoE damage plus canonical `apply_cc(cc_type = silence)`
+
+Compiler validates:
+
+1. `count = 1` because this reference stores one live projectile ID for reactivation
+2. the referenced runtime state exists and is `bookmark(entity_ref)`
+3. `expiry = detonate` for the intended max-range fallback
+4. the projectile's pass-through policy remains explicit through `entity_impact = ignore` and
+   `world_impact = ignore`; the compiler/runtime do not silently re-enable contact detonation
+
+## Resolved Interaction Notes
+
+- This reference supports one active Detonation Arrow at a time. While the projectile is in flight,
+  the same public slot is redirected to the detonate variant instead of allowing a second launch.
+- The projectile ignores both entity and world collision until manual or expiry detonation. It is a
+  timing-controlled explosive, not a contact-trigger missile in this reference.
+- The silence from the blast is canonical `apply_cc(cc_type = silence)` and therefore interrupts
+  active casts and channels normally.
+- Explosion damage uses the projectile's carried offensive context baked at launch; each struck
+  target still resolves mitigation on its own authoritative owner at detonation time.
+- If the caster dies, reactivation disappears with the cleared state. The projectile itself then
+  follows its own authored lifetime / expiry behavior unless some other rule removes it first.

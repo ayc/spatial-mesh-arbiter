@@ -223,6 +223,10 @@ Operations that change entity positions or spatial geometry. Executed during the
 
 **Detach:** Setting `parent_entity_id` to null detaches the child. The child resumes independent kinematic resolution from its current position on the next tick.
 
+`P-06` is intentionally entity-to-entity only. Projectile-local carried-target rosters may borrow
+the same co-located-handoff intuition, but they do not widen `P-06` into a general actor-to-entity
+relationship.
+
 ---
 
 ### 3.7 P-07: Entity-as-Kinematic-Volume

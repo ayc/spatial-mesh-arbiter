@@ -8,7 +8,7 @@
 
 **Description:** Teleportation — repositioning an entity to a target coordinate without physical traversal of intermediate space.
 
-**Sketches:** SK-35 (Blink Strike), SK-36 (Shadow Step), SK-69 (Portal Pair), SK-72 (Nydus Network), SK-89 (Respawn Anchor)
+**Sketches:** SK-35 (Blink Strike), SK-36 (Shadow Step), SK-69 (Portal Pair), SK-72 (Nydus Network)
 
 **Engine layer:** `docs-core/`
 
@@ -64,7 +64,7 @@
 
 **Description:** Opt-in rolling memory of `(position, hp, tick)` tuples over the last N seconds for an entity, enabling temporal rewind.
 
-**Sketches:** SK-37 (Time Rewind), SK-89 (Respawn Anchor)
+**Sketches:** SK-37 (Time Rewind)
 
 **Engine layer:** `docs-core/`
 

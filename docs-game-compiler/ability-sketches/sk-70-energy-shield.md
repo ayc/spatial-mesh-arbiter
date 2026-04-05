@@ -6,7 +6,8 @@ I shield myself (or an ally). The shield absorbs incoming damage as normal. BUT:
 
 ## Primitive Composition
 
-P-18 (Absorption Barrier) → P-21 (Value Conversion) → P-16 (Stat Layering)
+P-18 (Absorption Barrier) → `apply_shield.on_absorb_effects` → `modify_resource` → passive
+`resource_stat_links` + periodic decay → P-16 (Stat Layering)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -30,54 +31,70 @@ P-18 (Absorption Barrier) → P-21 (Value Conversion) → P-16 (Stat Layering)
 
 ### Shield-to-Resource Conversion Pipeline
 
-The shield absorption path currently:
-1. Incoming damage arrives
-2. Check for active shields (consume shield HP before real HP)
-3. Apply remaining damage to real HP
+The canonical contract is:
 
-Energy Shield adds a step:
-1. Incoming damage arrives
-2. Check for active shields
-3. **Calculate damage absorbed by shield: `absorbed = min(damage, shield_hp)`**
-4. **Credit `absorbed` to the caster's Energy resource**
-5. Consume shield HP
-6. Apply remaining damage to real HP
-
-The shield needs metadata linking it back to the caster:
-```
-struct EnergyShield {
-    shield_hp: SimFixed,
-    max_shield_hp: SimFixed,
-    expires_at_tick: u64,
-    energy_recipient_id: EntityID,  // Who receives the Energy (the caster)
-    conversion_rate: SimFixed,      // 1.0 = full conversion, 0.5 = half
-}
-```
+1. `apply_shield` authors `bind_absorbed_value_as = absorbed_damage`.
+2. `apply_shield.on_absorb_effects` emits `modify_resource(target = caster, pool_id = energy, ...)`.
+3. The callback reads `absorbed_damage` through `ScalingExpr(binding = absorbed_damage)`.
+4. The credited amount is the authoritative damage prevented by that specific shield instance on
+   that hit, after shield-priority ordering is already resolved.
+5. Shield break and shield expiry stay on the ordinary `on_break_effects` / `on_expire_effects`
+   path; they are not required for Energy credit.
 
 ### Cross-Entity Resource Credit
 
-When the shield is on an ALLY, damage absorbed on the ally's Arbiter must credit Energy to the caster — who might be on a different Arbiter. Each time the ally's shield absorbs damage:
-1. Calculate absorbed amount
-2. If caster is local: credit Energy directly
-3. If caster is cross-boundary: relay "credit X Energy to caster" to the caster's Arbiter
+Energy is an ordinary resource pool on the caster:
 
-This is a per-damage-event cross-boundary relay from the shield bearer to the caster.
+```yaml
+max_resource:
+  energy: 100
+```
+
+Every shield absorb event mutates that pool through canonical `modify_resource`. For example:
+
+```yaml
+type: modify_resource
+target: caster
+pool_id: energy
+mode: add
+amount: 0
+scaling:
+  binding: absorbed_damage
+  coefficient: 1.0
+```
+
+When the shield is on an ally, the shield bearer computes the authoritative absorbed amount on
+their current owner. If the caster is remote, the resulting `modify_resource(target = caster, ...)`
+uses the ordinary target-owner relay path. No bespoke "Energy credit" protocol is required.
 
 ### Secondary Resource With Decay
 
-Energy is a secondary resource (like SK-45 Essence, but with continuous decay):
+Energy decay and the outgoing damage bonus are both status-owned, not shield-owned:
 
-```
-struct EnergyState {
-    current: SimFixed,
-    max: SimFixed,
-    decay_per_tick: SimFixed,
-    damage_bonus_per_point: SimFixed,
-}
+```yaml
+status_id: energy_attunement
+is_passive: true
+resource_stat_links:
+  - pool_id: energy
+    stat_id: physical_damage_multiplier
+    operation: add_percent
+    coefficient: 0.005
+periodic_effects:
+  interval_ticks: 20
+  effects:
+    - type: modify_resource
+      target: caster
+      pool_id: energy
+      mode: remove
+      amount: 1
 ```
 
-Each tick: `current = max(0, current - decay_per_tick)`
-On damage calculation: `effective_damage = base_damage * (1.0 + current * damage_bonus_per_point)`
+This yields:
+
+- 1 Energy = +0.5% weapon-damage bonus through `physical_damage_multiplier`
+- 100 Energy = +50% weapon-damage bonus
+- deterministic decay through ordinary periodic resource mutation
+- no bespoke per-shield Energy state object
 
 ### Feedback Loop
 
@@ -93,34 +110,44 @@ The loop is bounded by:
 
 ## Cross-Boundary Concerns
 
-TODO: Two cross-boundary patterns:
-
 1. **Self-shield:** Caster shields themselves. All absorption and Energy credit are local. No cross-boundary concern.
 
-2. **Ally shield:** Caster on Arbiter A shields an ally on Arbiter B. The shield is applied on Arbiter B. When the ally takes damage, Arbiter B calculates the absorbed amount and relays an Energy credit to Arbiter A. Every damage event on the shielded ally generates a cross-boundary relay to the caster.
+2. **Ally shield:** Caster on Arbiter A shields an ally on Arbiter B. The shield is applied on
+   Arbiter B. When the ally takes damage, Arbiter B calculates the authoritative absorbed amount,
+   then the deferred `modify_resource(target = caster, pool_id = energy)` mutation routes to
+   Arbiter A if the caster is remote.
 
-If the ally is frequently taking damage (in a teamfight), this could generate many relays. Bounded by: shield HP (once consumed, no more relays) and shield duration (3 seconds).
+This can generate one relay per absorb event, but it is bounded by shield HP, shield duration, and
+incoming hit cadence. If the shield is removed, cleansed, or expires, future credits stop
+immediately. Energy already gained remains because it is ordinary resource state on the caster.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: shield amount, duration, energy conversion rate, energy max, energy decay rate, damage bonus per energy point, self-cast and ally-cast variants. Compiler produces:
-- EnergyShield definition with recipient_id for cross-entity credit
-- Shield absorption hook: calculate absorbed → credit Energy to recipient
-- Energy resource definition with decay per tick
-- Damage modifier: read Energy → apply bonus in Phase 1 offense calculation
-- Cross-boundary relay for ally-shield Energy credit
+Designer authors:
 
-The compiler needs to support **shields with absorption callbacks** — shields that do something with the damage they absorb, not just passively consume it.
+- shield amount and duration
+- Energy conversion coefficient
+- Energy pool max
+- Energy decay cadence
+- Energy-to-weapon-damage coefficient
+- self-target and ally-target variants
 
-## Open Questions
+Compiler produces:
 
-- Does Energy credit from ally shields count as "the caster received something" for any other mechanic?
-- Can Energy be gained from multiple simultaneous shields (shield self + shield ally)?
-- Does the damage bonus from Energy apply to ability damage, auto-attack damage, or both?
-- Does Energy persist through death (reset to 0 on death)?
-- Can enemies see the caster's Energy level (UI indicator visible to enemies)?
-- Does SK-22 Damage Reflection interact — reflected damage hits the shield, absorbed damage credits Energy?
-- Does SK-47 Shield Burst's explosion damage scale with Energy (bonus damage affects explosion)?
-- If the shield is cleansed (removed by enemies), does the caster keep the Energy already gained?
-- Does Kinematic Dilation affect Energy decay rate?
-- Can Energy be consumed by other abilities (spend 50 Energy for a special attack)?
+- a canonical `apply_shield` with `bind_absorbed_value_as` and `on_absorb_effects`
+- canonical `modify_resource` mutations against the caster's `energy` pool
+- a passive status with `resource_stat_links` so current Energy continuously affects present
+  offense
+- periodic `modify_resource(mode = remove)` decay on that passive status
+- ordinary cross-boundary target-owner relay when an ally shield credits a remote caster
+
+## Resolved Notes
+
+- The outgoing damage bonus is modeled as weapon damage by linking Energy to
+  `physical_damage_multiplier`.
+- Multiple simultaneous qualifying shields may all feed the same `energy` pool; ordinary
+  `max_resource.energy` clamping bounds the result.
+- Energy already gained is retained if the shield is cleansed or removed early; only future absorb
+  callbacks stop.
+- Energy persistence through death follows the ordinary lifecycle for authored resource pools. This
+  sketch does not add a bespoke exception.

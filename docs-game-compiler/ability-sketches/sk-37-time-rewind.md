@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I activate this ability to revert my position and HP to what they were 3 seconds ago. I snap back to where I was, and my health is restored to whatever it was at that moment. Everything else (cooldowns, buffs, debuffs) stays current — only position and HP rewind.
+I activate this ability to revert my position and HP to what they were 3 seconds ago. Everything
+else stays current; only position and HP rewind.
 
 ## Primitive Composition
 
@@ -13,95 +14,83 @@ P-05 (Historical State Buffer) → P-01 (Instant Translation)
 ## Inputs
 
 - Caster entity
-- No target (self-only)
+- No target
 
 ## Observable Behavior
 
-1. Activate — caster disappears from current position
-2. Caster reappears at the position they occupied 3 seconds ago
-3. Caster's HP is restored to the value it was 3 seconds ago (could be higher or lower than current)
-4. If HP 3 seconds ago was lower than current: caster LOSES health (rewinding into a worse state)
-5. Cooldowns, buffs, debuffs, resource — all remain at their CURRENT values (no rewind)
-6. Visual: time-reverse particle trail from current position through recent movement path to destination
+1. The entity continuously records its own position and HP into a bounded 3-second history buffer.
+2. On activation, the runtime reads the sample from 3 seconds ago.
+3. The caster snaps to that stored position instantly.
+4. The caster's HP is overwritten with the stored HP sample from that same moment.
+5. Cooldowns, buffs, debuffs, and resources remain at their CURRENT values.
+6. Visual: reverse-time movement trail and an obvious rewind snap.
 
 ## Engine Primitives Required
 
-### Ability-Driven Rolling Buffer
+Time Rewind is now a canonical passive snapshot recorder plus active `restore_from_state`
+reference.
 
-The rewind is NOT a global engine feature. It's an ability that opts the caster into snapshot recording via a hidden status effect:
+The recommended lowering is:
 
-```
-status_effect: TimeRewindRecorder {
-    buffer: RingBuffer<RewindSnapshot, 180>,  // 3 seconds at 60Hz
-    write_index: usize,
-}
+1. define one runtime state:
+   - `state_id = time_rewind_buffer`
+   - `kind = snapshot_buffer`
+   - `window_ticks = 180`
+   - `sample_interval_ticks = 1`
+   - `fields = [position, hp]`
+2. define one hidden passive status on the caster with:
+   - `snapshot_recorder_state = time_rewind_buffer`
+3. on cast, emit:
+   - `restore_from_state(target = caster, state_id = time_rewind_buffer, apply_position = true,`
+     `apply_hp = true, position_validation = nearest_walkable)`
 
-struct RewindSnapshot {
-    position: Vec2F,
-    hp: SimFixed,
-    tick: u64,
-}
-```
+This keeps the mechanic inside existing canonical surfaces:
 
-**Lifecycle:**
-1. When the caster equips/learns the Time Rewind talent, the compiler applies the `TimeRewindRecorder` hidden effect
-2. Each tick: the effect's per-tick evaluation writes `(position, hp, tick)` to the ring buffer
-3. When the ability is activated: read the oldest entry in the buffer (3 seconds ago), snap position and set HP
-4. When the talent is unlearned/unequipped: effect is removed, buffer is freed
-
-**Cost:**
-- Per-entity, opt-in only — entities without the talent have zero overhead
-- 180 entries × (8 + 4 + 8 bytes) = ~3.5 KB per entity with the talent
-- One write per tick (append to ring buffer) — negligible
-- The buffer is part of the entity's status effect extension state, not a global engine structure
-
-### Position Snap
-Same instant position snap as SK-35 and SK-36. No traversal, no intermediate positions.
-
-### HP Overwrite
-The rewind directly sets `soft_state.hp = snapshot.hp`. This bypasses damage/heal resolution — it's not "dealing damage" or "healing," it's a state overwrite. This means:
-- No on-hit procs trigger
-- No on-heal procs trigger
-- No damage/heal numbers display (optional: show the delta as a special "rewind" indicator)
-- Shield (SK-17) is not affected — only base HP rewinds
+- the recorder is opt-in and bounded through `snapshot_buffer`
+- the rewind uses one canonical state read rather than a bespoke rollback subsystem
+- HP rewind is an overwrite from stored state, not a heal/damage event
 
 ## Cross-Boundary Concerns
 
-TODO: The stored position from 3 seconds ago might be in a different Arbiter's region:
+Time Rewind follows the canonical snapshot-buffer handoff rule.
 
-1. **Caster hasn't moved far:** Position is in the same Arbiter. Simple snap.
-2. **Caster crossed a boundary in the last 3 seconds:** Stored position is in the previous Arbiter's region. Instant cross-boundary handoff required (same problem as SK-35/SK-36).
-3. **Topology changed in the last 3 seconds:** The stored position's owning Arbiter may have changed due to split/merge. The rewind needs to query the current owner.
-
-Additional concern: the `TimeRewindRecorder` buffer snapshots are recorded on whichever Arbiter the entity was on at each tick. If the entity crossed boundaries during the 3-second window, some snapshots were recorded on Arbiter A and some on Arbiter B. But the buffer travels with the entity during handoff, so the current Arbiter has the complete buffer. The stored positions are absolute world coordinates, not relative to any Arbiter — so they're valid regardless of which Arbiter recorded them.
+1. The snapshot buffer transfers intact on handoff as ordinary bounded runtime state.
+2. Stored positions are absolute world coordinates, so a rewind can resolve under the CURRENT
+   topology even if older samples were recorded on a different Arbiter.
+3. If the stored destination is now owned by another Arbiter, the instant relocation follows the
+   same destination-based teleport/handoff path as other `P-01` snaps.
+4. The HP overwrite happens on the caster's current authoritative owner at the same time as the
+   relocation.
 
 ## Compiler Requirements
 
-TODO: Designer specifies:
-- Passive component: "while this talent is equipped, record position and HP every tick in a 3-second ring buffer"
-- Active component: "on activation, read the 3-second-old snapshot, snap position, set HP"
+Designer specifies:
 
-Compiler produces:
-- Hidden status effect definition (`TimeRewindRecorder`) with ring buffer allocation
-- Per-tick write hook (append current position + HP to buffer)
-- Active ability definition that reads the buffer and applies the rewind
-- Buffer size validation: compiler calculates `duration_ticks = duration_seconds * 60` and sets the ring buffer capacity
+- rewind lookback horizon
+- which fields are recorded (`position`, `hp`)
+- whether the recorder is passive/always-on while the talent is equipped
+- any rewind presentation rules
 
-The compiler validates:
-- Buffer is bounded (fixed capacity, not growable)
-- Per-tick cost is O(1) (append to ring buffer)
-- Ability correctly reads from the buffer (oldest entry, not newest)
-- Buffer is allocated/freed with the effect lifecycle
+Compiler emits:
 
-## Open Questions
+- one bounded `snapshot_buffer` runtime state
+- one hidden recorder status using `snapshot_recorder_state`
+- one self-targeted `restore_from_state` read applying position and HP
 
-- If the position from 3 seconds ago is inside a SK-03 Terrain Wall that was placed since then, where does the caster appear?
-- If the caster was dead 3 seconds ago (revived by SK-18 Resurrect within the window), does the rewind kill them?
-- Does the HP overwrite interact with shields — if the caster had no shield 3 seconds ago but has one now, is the shield removed?
-- Should the buffer record additional state beyond position and HP? (Resource/mana? Active effects?)
-- Can the rewind be used while CC'd (stun/root/silence)?
-- Does the rewind trigger SK-32 Minefield at the destination?
-- If the caster has SK-04 Tether active, does the rewind snap break the tether?
-- Is 3 seconds at 60Hz (180 snapshots) the right granularity, or can the buffer sample at a lower rate (every 3rd tick = 60 snapshots) to save memory?
-- When multiple entities have this talent in a Blackhole scenario (200+ entities with recorders), what is the total memory cost? (200 × 3.5 KB = 700 KB — bounded and reasonable)
-- Does the rewind visual (showing the caster's movement path in reverse) require the buffer to be sent to the client, or is it purely cosmetic and client-predicted?
+Compiler validates:
+
+1. the buffer window and sampling interval stay within bounded runtime limits
+2. the recorder references a runtime state of kind `snapshot_buffer`
+3. the active rewind reads only the supported `position` / `hp` fields
+4. the mechanic is expressed through `restore_from_state`, not a bespoke full-entity rollback
+
+## Resolved Interaction Notes
+
+- Rewinding HP is a direct state overwrite. It does not create heal/damage events and therefore
+  does not trigger on-heal or on-hit consumers.
+- If the stored HP sample is lower than the caster's current HP, the rewind lowers current HP to
+  that stored value in this reference.
+- If the stored destination has become invalid due to later geometry, `nearest_walkable` gives the
+  canonical relocation answer.
+- Because the rewind only restores recorded `position` and `hp`, current buffs, debuffs, cooldowns,
+  and resource pools remain unchanged by design.

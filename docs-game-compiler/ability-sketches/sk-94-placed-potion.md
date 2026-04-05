@@ -29,75 +29,78 @@ P-32 (Actor Spawning) → P-14 (Continuous Proximity Monitor)
 
 ## Engine Primitives Required
 
-### Friendly Placed Consumable
+Placed Potion is now a canonical spawned-actor interaction reference.
 
-SK-45 Essence Collection has death-spawned pickups collected by the killer. Placed Potion is different:
-- PLACED by a healer (not spawned by death)
-- COLLECTED by any ally (not just the placer)
-- HEALS on collection (not resource credit)
-- Multiple can exist simultaneously (up to 5)
-- Persists for a long duration (20 seconds)
+The recommended lowering is:
 
-```
-struct PotionPickup {
-    potion_id: EntityID,
-    position: Vec2F,
-    heal_amount: SimFixed,
-    owner_team: TeamId,
-    caster_id: EntityID,        // For pickup limit tracking
-    pickup_radius: SimFixed,
-    expires_at_tick: u64,
-}
-```
+1. spawn one stationary potion actor at the target position with:
+   - ordinary visible presentation
+   - non-hostile, non-blocking base targetability
+   - lifetime of 20 seconds
+   - `interaction = {`
+     `trigger_filter = allies,`
+     `trigger_radius = pickup_radius,`
+     `resolution_mode = collector_only,`
+     `effects = [ heal(amount = X, target = collector) ],`
+     `consume_on_trigger = true`
+     `}`
+   - `instance_limit = {`
+     `scope = owner_by_ability,`
+     `max_live = 5,`
+     `overflow_policy = despawn_oldest`
+     `}`
+2. let the first allied collector resolve the heal through the ordinary heal pipeline, then remove
+   the potion actor
 
-### Proximity Collection for Allies
+This keeps the mechanic inside existing surfaces:
 
-Each tick, the Arbiter checks: is any allied entity within pickup_radius of any uncollected potion? On collection:
-1. Heal the collecting entity for `heal_amount`
-2. Despawn the potion entity
-3. The heal goes through normal heal resolution (affected by SK-92 Anti-Heal)
-
-### Per-Caster Pickup Limit
-
-The caster can have at most 5 potions on the ground. The Arbiter must track: how many active potion entities belong to this caster? If placing a 6th, the oldest potion despawns.
-
-This is a **per-caster entity count limit** for a specific entity type. Different from the global entity_count limit for Arbiter splits.
-
-### Agency Split: Healer vs Recipient
-
-The unique design aspect: the HEALER decides WHERE healing is available, the RECIPIENT decides WHEN to use it. The healer pre-positions potions; allies collect when they need healing. This creates:
-- Strategic potion placement (chokepoints, retreat paths, objectives)
-- Ally skill expression (walking over a potion at the right moment)
-- Enemy awareness (seeing potions and playing around them)
-
-No other heal has this agency split — all other heals are healer-targeted (SK-16 zone), healer-auto-targeted (Li Li), or instant (direct heal).
+- the pickup is just one spawned actor with `interaction`
+- ally-only collection is the `trigger_filter`
+- heal-on-pickup is an ordinary `heal` effect on the collector
+- oldest-first overflow is the canonical spawn instance-limit policy
 
 ## Cross-Boundary Concerns
 
-TODO: Potions are stationary entities on one Arbiter. An allied Ghost walking over a potion:
-- The potion's Arbiter detects the Ghost within pickup radius
-- Relay "heal for X" to the Ghost's owning Arbiter
-- Despawn the potion locally
+Placed Potion is pickup-owner authoritative after trigger admission.
 
-The per-caster limit must track potions across Arbiters if the caster places potions in different regions. Or: potions are always on the caster's current Arbiter (can only place nearby).
+1. The potion actor's current owner runs the proximity trigger each tick using local and Ghost
+   collector poses.
+2. If the first admitted collector is remote/Ghost, the potion owner emits the ordinary heal effect
+   to that collector's current owner and removes the potion only after the trigger commits.
+3. `instance_limit` buckets live potion actors by `(owner, ability_id)` across all Arbiters, so the
+   oldest-first overflow rule remains deterministic even if a healer has potions in multiple
+   regions.
+4. Enemies cannot pick up the potion in this reference because they never match the authored
+   `trigger_filter`.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: ground-targeted placement, heal on ally pickup, 20s lifetime, max 5 per caster (oldest despawns), ally-only collection, pickup radius. Compiler produces:
-- PotionPickup entity definition (position, heal, team, lifetime)
-- Per-tick proximity collection check (allies within radius)
-- Heal application through standard heal pipeline
-- Per-caster instance limit (max 5, FIFO despawn)
+Designer specifies:
 
-## Open Questions
+- ground-target position
+- heal amount
+- pickup radius
+- lifetime
+- ally-only pickup behavior
+- per-owner live cap and overflow policy
 
-- Can enemies destroy potions (attack them)?
-- Can enemies see the heal amount, or just that a potion exists?
-- Does the potion heal go through SK-92 Anti-Heal?
-- Can the caster pick up their own potions?
-- Can SK-31 Vortex pull allies onto potions (forced collection)?
-- Do potions block pathing?
-- Can potions be placed inside SK-60 Bunker?
-- Do potions count toward entity_count for split triggers?
-- Can potions be placed on top of each other (stacking)?
-- Does SK-91 Team-Agnostic Stasis freeze potion expiry timers?
+Compiler emits:
+
+- one spawned potion actor definition with canonical `interaction`
+- one canonical `instance_limit` block on that spawned actor
+- one ordinary `heal` effect targeting the collector
+
+Compiler validates:
+
+1. `trigger_radius > 0`
+2. `max_live = 5` for this reference and `overflow_policy = despawn_oldest`
+3. the pickup uses canonical spawned-actor interaction instead of a bespoke item entity loop
+
+## Resolved Interaction Notes
+
+- The caster may collect their own potion because they are included in the allied trigger filter.
+- Forced movement can push allies onto a potion, and collection still happens if they enter the
+  pickup radius.
+- The heal is ordinary healing, so anti-heal and healing amplification modify it normally.
+- The base reference gives the potion no hostile interaction surface: enemies can see it, but they
+  cannot attack or collect it.

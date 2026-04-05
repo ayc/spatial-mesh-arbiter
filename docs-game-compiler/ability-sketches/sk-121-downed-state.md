@@ -2,7 +2,11 @@
 
 ## Designer Intent
 
-When my HP reaches 0, I don't die immediately. Instead, I enter a Downed State — I collapse to the ground with a new, smaller HP pool and 4 limited abilities. I can crawl slowly and try to fight back. My teammates can channel on me to RALLY me (revive to partial HP). Enemies can channel on me to FINISH me (instant kill). If I manage to kill an enemy while downed, I self-rally automatically. If my downed HP reaches 0, I actually die.
+When my HP reaches 0, I do not die immediately. Instead, I enter a Downed State: I collapse to
+the ground with a smaller HP pool and a restricted four-ability bar. I can crawl slowly and try to
+fight back. Teammates can rally me with a channel, enemies can finish me with a shorter channel,
+and if I score a kill while downed I self-rally automatically. If my downed HP reaches 0, I truly
+die.
 
 ## Primitive Composition
 
@@ -19,171 +23,154 @@ P-39 (On-Death Hook) → P-25 (Multi-Phase Vitals) → P-31 (Identity/Loadout Sw
 
 ## Observable Behavior
 
-1. Main HP reaches 0 → enter DOWNED STATE (not dead)
-2. Downed state has its own HP pool (e.g., 30% of max HP)
-3. While downed: can crawl slowly (25% movement speed)
-4. While downed: ability bar replaced with 4 downed abilities (weak attack, self-heal, CC, last resort)
-5. While downed: allies can channel on you for 3 seconds to RALLY you (restore to 25% main HP)
-6. While downed: enemies can channel on you for 2 seconds to FINISH you (instant kill, bypasses everything)
-7. If you kill an enemy while downed (with downed abilities): SELF-RALLY (auto-revive to 25% HP)
-8. If downed HP reaches 0 (enemies damage you while downed): ACTUALLY DIE (death event, respawn flow)
-9. If rallied: return to standing with 25% main HP, all main abilities restored
-10. Visual: character on the ground, crawling animation, rally/finish progress bars
+1. Main HP reaches 0 and the entity enters Downed instead of dying
+2. Downed has its own HP pool, typically 30% of base max HP
+3. While downed, the entity crawls slowly at 25% movement speed
+4. While downed, the ordinary ability bar is replaced with the authored downed ability set
+5. Allies can channel on the downed target for 3 seconds to rally them back to 25% HP
+6. Enemies can channel on the downed target for 2 seconds to finish them immediately
+7. If the downed entity scores a kill while still downed, it self-rallies automatically
+8. If downed HP reaches 0 before rally succeeds, true death commits and the normal death flow begins
+9. On rally, the entity returns to standing with partial HP and regains its normal ability bar
+10. Visual: character on the ground, crawling animation, rally and finish progress bars
 
 ## Engine Primitives Required
 
-### Three-Phase Health System
+Downed State is now a canonical `P-25` intermediate life phase, not a pending docs-core change.
 
-The current entity lifecycle is: Alive (HP > 0) → Dead (HP ≤ 0). Downed State adds a middle phase:
+### Downed Is A Non-Terminal Intermediate Phase
 
-```
-enum EntityLifePhase {
-    Alive,       // Main HP pool, full abilities
-    Downed,      // Downed HP pool, limited abilities
-    Dead,        // Entity removed, respawn flow
-}
+The mechanic lowers to one `downed_state` entity definition block with:
 
-struct DownedState {
-    downed_hp: SimFixed,
-    max_downed_hp: SimFixed,
-    downed_ability_set: AbilitySetId,
-    rally_channel_ticks: u64,      // Time for ally to rally
-    finish_channel_ticks: u64,     // Time for enemy to finish
-    downed_movement_speed: SimFixed, // 25% of normal
-}
-```
+1. `downed_hp_ratio`
+2. `downed_ability_set`
+3. `downed_movement_speed_ratio`
+4. `rally_hp_ratio`
+5. `rally_channel_ticks`
+6. `finish_channel_ticks`
+7. optional `self_rally_on_kill = true`
 
-The death check is modified:
-```
-fn check_death(entity: &mut Entity) -> bool {
-    if entity.hp <= SimFixed::ZERO {
-        match entity.life_phase {
-            Alive => {
-                // Don't die — transition to downed
-                entity.life_phase = Downed;
-                entity.downed_state.downed_hp = entity.downed_state.max_downed_hp;
-                swap_ability_set(entity, entity.downed_state.downed_ability_set);
-                entity.movement_speed = entity.downed_state.downed_movement_speed;
-                return false;  // Not dead yet
-            },
-            Downed => {
-                if entity.downed_state.downed_hp <= SimFixed::ZERO {
-                    entity.life_phase = Dead;
-                    return true;  // Actually dead now
-                }
-                return false;
-            },
-            Dead => return true,
-        }
-    }
-    false
-}
-```
+Stage 10 behavior is:
 
-### Downed HP as Separate Pool
+1. lethal damage on `Active` transitions the entity into the downed phase instead of terminal death
+2. the engine sets the phase HP pool from `downed_hp_ratio`
+3. on the next tick, the downed ability set and phase movement and capability overrides become
+   active
+4. while downed, incoming damage is routed to `phase_hp`
+5. only when the downed phase reaches terminal death does the entity leave the intermediate phase
+   and enter the normal death, corpse, and respawn path
 
-While downed, damage targets `downed_hp` instead of `hp`:
-- `hp` stays at 0 (the entity's main health is depleted)
-- `downed_hp` is the new health bar
-- When `downed_hp` reaches 0: entity transitions to Dead
+This is ordinary lifecycle behavior already formalized in
+`docs-core/01-2-entity-lifecycle-contract.md`, not a sketch-specific exception.
 
-All damage resolution redirects to `downed_hp` during the Downed phase:
-```
-fn apply_damage_to_entity(entity: &mut Entity, damage: SimFixed) {
-    match entity.life_phase {
-        Alive => entity.hp -= damage,
-        Downed => entity.downed_state.downed_hp -= damage,
-        Dead => {}  // Can't damage dead entities
-    }
-}
-```
+### Downed Ability Set And Capability Profile
 
-### Downed Ability Set
+While downed, the entity's ordinary bar is replaced by the authored `downed_ability_set`. The
+canonical profile for this sketch is:
 
-While downed, the entity's abilities are replaced with a limited downed set:
-- Ability 1: Weak attack (low damage projectile/melee)
-- Ability 2: Self-heal (small, slow heal on downed HP)
-- Ability 3: CC (knockback or daze to push enemies away)
-- Ability 4: Last resort (high damage, long cooldown, or area denial)
+- crawl movement at 25% of normal speed
+- no items or consumables
+- only the authored downed abilities are legal while the phase is active
 
-The ability set swap uses the same mechanism as SK-57 Form Transformation. The validate_intent hook checks `life_phase == Downed` and routes to the downed ability set.
+The ability set swap is phase-owned rather than a bespoke ad hoc loadout rewrite. Normal attacks,
+items, and ordinary non-downed abilities are rejected while the entity occupies the downed phase.
 
-### Rally Mechanic (Ally Channel to Revive)
+### Rally, Finish, And Self-Rally
 
-Allies can channel on a downed entity to rally them:
-1. Ally starts channeling (like SK-18 Resurrect but target is downed, not dead)
-2. Channel duration: 3 seconds (interruptible)
-3. On complete: downed entity transitions back to Alive with 25% main HP
-4. Ability set reverts to normal
-5. Movement speed reverts to normal
+Rally is the canonical `restore_phase` recovery path:
 
-Multiple allies can rally simultaneously (channel progress stacks? Or first to complete wins?).
+1. an ally channels on a target filtered as `ally_downed`
+2. on successful completion, the ability emits
+   `restore_phase { required_phase = downed, hp_ratio = 0.25 }`
+3. the target returns to Active on Stage 10 with ordinary main HP restored to 25%
 
-### Finish Mechanic (Enemy Channel to Execute)
+Finish is the hostile terminal execute path:
 
-Enemies can channel on a downed entity to finish them:
-1. Enemy starts channeling (interruptible)
-2. Channel duration: 2 seconds (shorter than rally — offense advantage)
-3. On complete: downed entity transitions to Dead (bypasses downed HP — instant kill)
-4. Like SK-114 Piercing Execute but delivered as a channel
+1. an enemy channels on a target filtered as `enemy_downed`
+2. on successful completion, the finisher emits a terminal execute or kill path against the downed
+   target
+3. this bypasses the remaining downed HP pool and commits true death
 
-The finish is an execution mechanic specifically for downed entities.
+Self-rally is phase-local Stage 10 recovery:
 
-### Self-Rally on Kill
-
-If the downed entity kills an enemy (using their downed abilities):
-1. Automatic rally: transition back to Alive with 25% main HP
-2. No channel needed — instant
-3. Creates a dramatic comeback opportunity
-
-The engine must check: on enemy death, was the killer in Downed state? If yes, trigger self-rally.
+1. if `self_rally_on_kill = true` and the downed entity is credited with a terminal kill
+2. the runtime schedules one `restore_phase` return to Active at `rally_hp_ratio`
+3. multiple same-tick qualifying kills do not stack multiple restores
 
 ### Interaction With Death Prevention Mechanics
 
-How does the Downed State interact with existing death mechanics?
-- **SK-73 Death Immunity**: Prevents main HP from reaching 0 → never enters Downed State (HP floors at 1)
-- **SK-93 Death Prevention**: Prevents death by healing to full → prevents entering Downed State (main HP restored before transition)
-- **SK-114 Piercing Execute**: Bypasses everything → entity goes straight to Dead, skipping Downed
-- **SK-96 Death Ghost**: If entity is Downed and then downed HP reaches 0 → Dead → THEN Death Ghost activates
+How Downed State interacts with adjacent death mechanics:
+
+- **SK-73 Death Immunity** prevents main HP from reaching the downed transition
+- **SK-93 Death Prevention** restores the entity before Stage 10 commits the downed transition
+- **SK-114 Piercing Execute** bypasses `P-25` entirely and goes straight to terminal death
+- **SK-96 Death Ghost** only evaluates after the downed phase reaches true terminal death
 
 ## Cross-Boundary Concerns
 
-TODO: The downed entity remains on their Arbiter. They can crawl slowly (minimal movement, unlikely to cross boundaries). Rally/finish channels from nearby allies/enemies are local interactions.
+The downed entity remains an ordinary active entity under one Arbiter owner.
 
-If the downed entity crawls across a boundary: the Downed state (downed HP, downed abilities, life phase) transfers with the handoff. The new Arbiter continues the downed phase.
+1. If the downed entity crawls across a seam, the current phase ID, phase HP, and phase config hand
+   off with the entity like any other kernel-tracked lifecycle state.
+2. Rally and finish are ordinary proximity and channel interactions. If the channeler and downed
+   target straddle a seam, the normal authority and relay rules apply; the final `restore_phase` or
+   terminal execute still commits on the downed target's owner.
+3. Self-rally also resolves on the downed entity's owner during Stage 10 after the credited victim
+   death commits.
+4. Corpse creation and `PlayerDied` do not happen at the Active-to-Downed transition. They happen
+   only if and when the downed phase reaches terminal death.
 
-If an ally on a different Arbiter wants to rally: they need to walk to the downed entity's position. The rally channel is a proximity interaction — standard cross-boundary interaction if the ally is a Ghost.
+This means Downed State does not need a separate corpse or Meta-side detour. It stays entirely
+inside the ordinary lifecycle contract until true death occurs.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: downed HP (30% of max HP), downed ability set (4 abilities), downed movement speed (25%), rally (ally channel 3s → revive at 25% HP), finish (enemy channel 2s → kill), self-rally on kill, transition Alive → Downed on main HP = 0, transition Downed → Dead on downed HP = 0. Compiler produces:
-- DownedState entity component (optional — some entities might not have downed state)
-- Three-phase life cycle: Alive → Downed → Dead
-- Downed ability set definitions in SpellData
-- Death check modification: intercept at main HP = 0, transition to Downed instead
-- Damage routing: target downed_hp during Downed phase
-- Rally interaction definition (ally channel → revive)
-- Finish interaction definition (enemy channel → kill)
-- Self-rally hook (on kill while downed → revive)
+Designer specifies:
 
-### docs-core/ Impact
+- `downed_hp_ratio`
+- `downed_ability_set`
+- `downed_movement_speed_ratio`
+- `rally_hp_ratio`
+- `rally_channel_ticks`
+- `finish_channel_ticks`
+- optional `self_rally_on_kill`
 
-This likely requires a `docs-core/` change:
-- The entity lifecycle model must support a three-phase health system (Alive → Downed → Dead)
-- The death pipeline must support interception at the Downed transition, not just at death prevention
-- The game adapter must be able to define per-entity downed state parameters
+Compiler emits:
 
-## Open Questions
+- one entity-level `downed_state` definition
+- Stage 10 lethal-HP interception into the non-terminal downed phase
+- phase-specific ability-set exposure and movement and capability overrides on the next tick
+- rally abilities lowered to `restore_phase`
+- finish abilities lowered to a terminal execute path restricted to `enemy_downed`
+- optional self-rally scheduling on credited kill while downed
 
-- Can a downed entity be healed by allies (healing downed HP without a rally channel)?
-- Does being rallied trigger any immunity window (prevent immediate re-downing)?
-- Can a downed entity use items/consumables?
-- Does the downed entity generate aggro (PvE: do monsters keep attacking a downed player)?
-- Can downed entities be affected by AoE damage (SK-29 Blizzard damages downed HP)?
-- Can a downed entity be displaced (SK-01 Toss a downed ally to safety)?
-- Does SK-91 Stasis affect downed entities (frozen while downed)?
-- Can multiple allies rally the same downed entity simultaneously (faster rally)?
-- Is the downed state optional per entity type (bosses don't enter downed state, players do)?
-- Does Kinematic Dilation affect rally/finish channel times?
-- Can the downed entity enter SK-44 Burrow while downed (invulnerable in downed state)?
-- Does the downed ability set benefit from the entity's normal stats, or are downed abilities fixed?
+Compiler validates:
+
+1. `downed_hp_ratio` is in `(0, 1]`
+2. `rally_hp_ratio` is in `(0, 1]`
+3. `downed_movement_speed_ratio` is in `[0, 1]`
+4. `rally_channel_ticks > 0`
+5. `finish_channel_ticks > 0`
+6. `downed_ability_set` is non-empty
+7. rally paths target a non-active phase through `restore_phase`, not `revive_corpse`
+8. finish paths that are meant to skip the remaining downed HP use an authored execute or
+   terminal-kill path rather than a sketch-local death shortcut
+
+## Resolved Notes
+
+- Ordinary ally healing does not automatically restore downed HP in this sketch. Rally is the
+  canonical recovery path unless a separate ability is explicitly authored against `ally_downed`.
+- Being rallied does not grant an automatic immunity window in this sketch.
+- Downed entities cannot use items or consumables here.
+- Downed entities remain valid hostile targets and can still be damaged by direct hits or AoE; that
+  damage is routed to the phase HP pool.
+- Downed entities can still be displaced or affected by other ordinary active-entity mechanics
+  unless a separate effect denies that interaction.
+- Multiple allies may channel rally at once, but progress does not stack; the first successful
+  rally or finish resolves and the remaining channels terminate against the changed target state.
+- The downed state is optional per entity type. Player-like actors may author it; bosses or simple
+  mobs may omit it entirely.
+- Kinematic Dilation affects rally and finish timings like other cast and channel timers because
+  they are still ordinary simulation-time abilities.
+- Downed abilities use the entity's ordinary authored combat and stat context unless a specific
+  downed ability overrides that behavior through its own canonical ability definition.

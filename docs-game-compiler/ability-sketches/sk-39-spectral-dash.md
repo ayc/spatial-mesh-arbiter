@@ -6,7 +6,7 @@ I send a wave of banshees forward in a line. The wave travels as a projectile. A
 
 ## Primitive Composition
 
-P-07 (Entity-as-Kinematic-Volume) → P-27 (Targetability Overrides)
+P-32 (Actor Spawning) → P-01 (Instant Translation)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -28,58 +28,90 @@ P-07 (Entity-as-Kinematic-Volume) → P-27 (Targetability Overrides)
 
 ## Engine Primitives Required
 
-### Moving Bookmark (Projectile as Destination)
-Unlike SK-36 Shadow Step (static bookmark at cast position), the bookmark here is a **live projectile** whose position changes every tick. The caster needs a reference to the projectile actor to query its current position on reactivation.
+Spectral Dash is now a canonical moving-bookmark projectile pattern built from one live projectile
+reference plus one same-key reactivation variant.
 
-```
-status_effect: SpectralDashLink {
-    wave_projectile_id: EntityID,  // Reference to the live projectile
-    can_reactivate: bool,
-}
-```
+The recommended lowering is:
 
-The projectile is a `ProjectileActor` with special properties:
-- No collision with entities (passes through everything)
-- No damage payload
-- Optional collision with static geometry (does the wave stop at walls?)
-- Provides its position to the caster's reactivation logic
+1. Define one runtime state:
+   - `state_id = spectral_dash_wave_ref`
+   - `kind = bookmark(entity_ref)`
+   - `expires_after_ticks = wave_lifetime_ticks`
+   - `clear_on_owner_death = true`
+2. Base cast variant:
+   - `spawn_actor {`
+     `count = 1,`
+     `output_binding = spectral_dash_wave,`
+     `projectile = {`
+       `speed = ... ,`
+       `detonation_policy = { entity_impact = ignore, world_impact = ignore, expiry = despawn }`
+     `}`
+   - `write_state(state_id = spectral_dash_wave_ref, capture = entity_ref, entity = { binding: spectral_dash_wave })`
+3. Reactivation variant:
+   - `when = { state_present: spectral_dash_wave_ref }`
+   - `effects = [restore_from_state(target = caster, state_id = spectral_dash_wave_ref,`
+     `apply_position = true, position_validation = nearest_walkable),`
+     `despawn_entity(target = { state_entity: spectral_dash_wave_ref }, reason = "spectral_dash_reactivate"),`
+     `clear_state(state_id = spectral_dash_wave_ref)]`
 
-### Reactivation Targeting a Moving Entity
-When the caster reactivates, the engine must:
-1. Look up the wave projectile by `wave_projectile_id`
-2. Read its CURRENT position (which has changed since cast)
-3. Snap the caster to that position (instant teleport, same as SK-35/SK-36)
-4. Despawn the wave projectile
+This keeps the mechanic inside existing canonical surfaces:
 
-This is a new interaction: an ability that targets one of the caster's own active projectiles, not an enemy entity or a ground position.
+- the moving destination is a `bookmark(entity_ref)` runtime state, not a bespoke status link
+- the reactivation path is ordinary `ActivationModes`
+- teleport destination resolution is late-bound from the projectile's CURRENT position at cast time
 
 ## Cross-Boundary Concerns
 
-TODO: The wave projectile might have crossed an Arbiter boundary while in flight (standard projectile handoff). If the caster reactivates after the wave crossed a boundary:
-1. The caster is on Arbiter A
-2. The wave is now on Arbiter B (after handoff)
-3. Reactivation requires: reading the wave's position from Arbiter B, then teleporting the caster from A to B
+Spectral Dash follows the ordinary projectile handoff and teleport-destination rules.
 
-This is an **indirect cross-boundary teleport** — the caster doesn't directly choose to go cross-boundary, they follow their projectile which happened to cross. The caster's Arbiter needs to know where the projectile currently is, even though the projectile might have been handed off. Does the caster's Arbiter maintain a reference to the handed-off projectile's current Arbiter?
+1. The wave projectile hands off exactly like any other projectile actor if it crosses an Arbiter
+   boundary.
+2. The runtime state stores only the stable projectile actor ID, not a cached Arbiter identity.
+3. On reactivation, `restore_from_state` resolves the projectile's CURRENT local-or-Ghost position
+   at execution time. If that position now belongs to another Arbiter, the caster's teleport uses
+   the ordinary destination-based cross-boundary handoff path.
+4. Manual use, natural expiry, or owner death all clear the reactivation state, so the same-slot
+   teleport variant disappears cleanly instead of leaving a stale actor reference behind.
+5. Mid-handoff cases are handled by the same handoff-stable live-projectile state used for normal
+   projectile ownership transfer; the reactivation lookup follows the projectile's current
+   authoritative owner.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: wave speed, wave max range, wave collision rules (pass through entities, stop at walls?), reactivation (teleport to wave position), no damage. Compiler produces:
-- ProjectileActor definition with no damage payload and no entity collision
-- Status effect on caster linking to the projectile
-- Multi-phase ability: Phase 1 (launch wave), Phase 2 (teleport to wave)
-- Projectile despawn on reactivation or max range
+Designer specifies:
 
-The compiler needs to express "this projectile is a mobility tool, not a weapon" — no CombatContext, no offensive stats baked in.
+- wave speed
+- wave lifetime / max range
+- observer presentation
+- same-key reactivation routing
+- any broader teleport constraints that should also apply to the return snap
 
-## Open Questions
+Compiler emits:
 
-- Does the wave pass through SK-03 Terrain Walls, or does it stop (and the caster can teleport to the wall)?
-- Can the caster be CC'd (stun/root) and still reactivate? Root blocks movement — is teleporting "movement"?
-- If the wave is in flight and the caster dies, does the wave persist (allowing a revived caster to teleport)?
-- Does the teleport trigger SK-32 Minefield at the destination?
-- Can enemies see the wave (revealing the potential teleport destination)?
-- If the wave crosses a boundary and gets handed off, how does the caster's Arbiter track the wave's current position for reactivation?
-- What happens if the wave is mid-handoff (in the 3-phase protocol) when the caster reactivates?
-- Can the caster cast other abilities while the wave is in flight (wave doesn't lock the caster)?
-- Does the wave have a collision radius, or is it a point? If the caster teleports to it, do they appear at the wave's center or its front edge?
+- one non-damaging single-spawn projectile actor with `output_binding`
+- one `bookmark(entity_ref)` runtime state that stores the live projectile reference
+- one `ActivationModes` reactivation variant gated on `state_present`
+- one reactivation effect list that teleports to the projectile's current position, despawns the
+  projectile, and clears the runtime state
+
+Compiler validates:
+
+1. `count = 1` because a single live actor reference is stored
+2. the referenced runtime state exists and is `bookmark(entity_ref)`
+3. the runtime-state lifetime is bounded and aligned with the projectile's flight window
+4. the base cast remains non-damaging; this reference does not smuggle a weapon payload into the
+   mobility projectile
+
+## Resolved Interaction Notes
+
+- This reference assumes the wave ignores both entity and world collision. It is a mobility marker,
+  not a damage source or wall probe.
+- The caster may move and use other abilities while the wave is in flight; only the same public
+  ability slot is redirected to the teleport variant.
+- Because reactivation is still a normal same-slot cast, stun and silence block it normally. Root,
+  leash, or other movement constraints only clamp the teleport if their authored rules also apply
+  to teleports.
+- If the wave expires naturally, nothing happens beyond the ordinary cooldown; the teleport option
+  simply disappears.
+- If the caster dies, `clear_on_owner_death = true` removes the stored wave reference so no
+  post-death teleport remains.

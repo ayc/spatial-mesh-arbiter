@@ -47,6 +47,11 @@ The normative 12-stage tick lifecycle is:
 11. **StateUpdate:** Adapter updates timers and accumulators. MUST defer new combat events to the next tick.
 12. **ObserverScopedPayloadEmission:** Adapter filters observability. **Engine Boundary:** Engine serializes downstream payloads.
 
+At Stage 10, the adapter MAY return bounded post-terminal respawn-route metadata only through
+engine-approved declarative outcomes. The engine remains responsible for entity removal,
+`HardEvent` emission, Meta handoff, and final spawn routing. The adapter MUST NOT imperatively pick
+an Arbiter, talk to Meta directly, or mutate spawn commands out of band.
+
 Within any given stage, the adapter MUST return deterministic, declarative outcomes (mutations, events, defers). The adapter MUST NOT assume out-of-band callbacks or perform direct imperative mutation of engine state.
 
 ## 4. Ownership and Mutation Contract

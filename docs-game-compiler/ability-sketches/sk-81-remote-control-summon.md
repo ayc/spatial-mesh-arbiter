@@ -30,76 +30,97 @@ P-32 (Actor Spawning) → P-29 (Control Authority Swap)
 
 ## Engine Primitives Required
 
-### Player Input Redirected to Summon
+Remote Control Summon is now the canonical "single spawned shell plus `control_projection`
+callbacks" pattern.
 
-This is distinct from:
-- SK-06 Summon Swarm: AI-controlled summons, player doesn't steer
-- SK-40 Mind Control: caster's input steers an ENEMY
-- SK-66 Symbiote: caster's ABILITIES fire from ally's position, not movement control
+### Canonical Controlled Bomb Shape
 
-SK-81 is: caster's MOVEMENT INPUT controls a FRIENDLY SUMMON's movement. The caster spawns an entity and their Edge Node's movement stream is rerouted:
+The recommended lowering is one `spawn_actor` shell plus a `control_projection` block:
 
-```
-struct RemoteControlState {
-    controlled_entity_id: EntityID,
-    caster_body_position: Vec2F,  // Frozen
-    detonation_damage: SimFixed,
-    detonation_radius: SimFixed,
-    expires_at_tick: u64,
-}
-```
+- bomb shell archetype with HP, collision, movement speed, and hostile targetability
+- `control_projection = {`
+  `controller = caster,`
+  `owner_body_policy = root_owner,`
+  `control_scope = movement_only,`
+  `on_actor_removed = release_control,`
+  `on_expire = release_control,`
+  `manual_trigger_effects = [aoe_damage(center = projected_actor_position, ...), despawn_entity(target = projected_actor, reason = "manual_detonate")],`
+  `on_expire_effects = [aoe_damage(center = projected_actor_position, ...), despawn_entity(target = projected_actor, reason = "timeout_detonate")],`
+  `on_controller_break_effects = [aoe_damage(center = projected_actor_position, ...), despawn_entity(target = projected_actor, reason = "control_break_detonate")]`
+  `}`
 
-The Arbiter must:
-1. Accept movement proposals from the caster's session
-2. Apply them to the controlled entity (bomb), not the caster
-3. Reject ability proposals (caster can only steer and detonate)
-4. On detonation: AoE at bomb's position using caster's offensive stats
+The caster body stays rooted in-world through ordinary channel/status authoring. It is not
+suspended. Steering input is redirected to the bomb through `control_projection`, and the detonation
+button is the generated same-slot manual trigger exposed while that control session remains active.
 
-### Destructible Controlled Entity
+### Source and Position Semantics
 
-The bomb has HP — enemies can attack and destroy it:
-- If destroyed: no detonation, bomb despawns, caster regains control
-- The bomb is a valid target for enemies (not stealthed, not invulnerable)
-- The bomb has collision (can be blocked by terrain, can't pass through walls)
+The callback context solves the old ambiguity directly:
 
-### Channel-Like State on Caster
+- `caster` remains the summoner/controller, so detonation damage scales from the summoner's stats
+- `projected_actor_position` is the bomb's current authoritative position, so the explosion happens
+  where the bomb actually is
+- `despawn_entity(target = projected_actor)` consumes the shell only for the authored detonation
+  paths
 
-While controlling the bomb, the caster is in a channel-like state:
-- Immobile (position frozen)
-- Vulnerable (can be targeted and damaged)
-- Interruptible (CC on caster → bomb detonates immediately)
-- Can only send steering input and detonation command
+### Enemy Destruction vs Detonation
+
+The bomb is a normal targetable spawned actor with HP.
+
+- If enemies destroy it, the actor is removed and control ends through `on_actor_removed`
+- enemy destruction does **not** emit `manual_trigger_effects`, `on_expire_effects`, or
+  `on_controller_break_effects`
+- therefore destruction cleanly means "no explosion"
 
 ## Cross-Boundary Concerns
 
-TODO: The bomb can move freely, potentially crossing Arbiter boundaries:
+Remote Control Summon follows the ordinary single-actor control-projection boundary rules.
 
-1. **Bomb crosses boundary:** Standard entity handoff for the bomb entity. But the caster (on Arbiter A) is still sending steering input. After handoff, the bomb is on Arbiter B. Steering input must be relayed from A to B per-tick.
-
-2. **Continuous cross-boundary steering:** Like SK-40 Mind Control, the caster's input stream must reach the bomb's Arbiter every tick. If the bomb is on a different Arbiter than the caster, this is per-tick cross-boundary relay.
-
-3. **Detonation command cross-boundary:** Caster sends "detonate" from Arbiter A. Bomb is on Arbiter B. The command must reach B and trigger the AoE locally on B.
-
-4. **Bomb destroyed cross-boundary:** Bomb on Arbiter B is destroyed. Caster on Arbiter A must be notified to exit the control state.
+1. If the bomb crosses an Arbiter boundary, the bomb itself hands off normally as one authoritative
+   spawned actor.
+2. The control-routing overlay follows that actor through the existing Stage 1 routing rules, so the
+   controller's steering input reaches the bomb's current owner without inventing a second transport.
+3. The manual detonation button resolves against the bomb's current owner through the same
+   control-projection path, and the callback explosion runs there using `projected_actor_position`.
+4. If the controller is interrupted on another Arbiter, the routed control session breaks and
+   `on_controller_break_effects` fire once on the bomb's current owner.
+5. If the bomb is externally destroyed on another Arbiter, that owner applies normal actor removal,
+   the control session ends, and no detonation callback is emitted.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: spawn bomb at caster position, caster immobile + channeling, movement input redirected to bomb, bomb HP (destructible), detonate on command or timeout or caster interrupt, AoE damage at bomb position, caster's stats for damage. Compiler produces:
-- Bomb entity definition (HP, movement speed, collision)
-- RemoteControlState on caster (input redirect, immobile, channel-like)
-- Input routing: movement from caster session → bomb entity
-- Detonation trigger: reactivation, timeout, caster interrupt
-- AoE resolution at bomb's position with caster's CombatContext
+Designer specifies:
 
-## Open Questions
+- bomb shell archetype and lifetime
+- rooted/channeling lockout on the summoner body
+- movement-control projection from summoner to shell
+- detonation payload (radius, damage, scaling)
+- whether timeout and controller-break should emit the same detonation payload
 
-- Can the bomb go through SK-69 Portal Pair (steer it into a portal)?
-- Does the bomb trigger SK-32 Minefield when it rolls over mines?
-- Can the bomb enter SK-29 Blizzard and take damage from zones?
-- If the caster dies while controlling the bomb, does the bomb detonate or despawn?
-- Can allies heal the bomb?
-- Does the bomb have collision with other entities (push them aside)?
-- How fast can the bomb move — is it faster than normal movement speed?
-- Can the bomb cross SK-03 Terrain Wall (blocked by walls)?
-- Does the bomb's detonation trigger on-hit procs for the caster?
-- Performance: per-tick cross-boundary steering relay for the control duration
+Compiler emits:
+
+- one spawned bomb shell actor
+- one `control_projection` with `control_scope = movement_only`
+- one temporary same-slot manual trigger action while control is active
+- authored callback payloads for manual trigger, expiry, and controller-break
+- ordinary actor removal cleanup for enemy destruction with no detonation callback
+
+Compiler validates:
+
+1. `count = 1` because `control_projection` is authored
+2. `projected_actor` / `projected_actor_position` are used only inside the `control_projection`
+   callback effect lists
+3. the manual detonate path is authored through `manual_trigger_effects`, not by granting arbitrary
+   additional ability control to the routed shell
+4. enemy destruction is modeled through ordinary actor removal, not by overloading the detonation
+   callbacks
+
+## Resolved Notes
+
+- The detonation control is a temporary same-slot/manual-trigger action that should appear in the UI
+  only while the control session is active.
+- Timeout and controller interruption both detonate at the bomb's current position using the
+  summoner's offensive context.
+- Enemy destruction ends the control session with no explosion.
+- The bomb remains an ordinary spawned actor for terrain collision, zone interaction, portal entry,
+  and handoff; there is no special "drone physics" subsystem for this sketch.

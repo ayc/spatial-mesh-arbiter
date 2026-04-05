@@ -28,78 +28,69 @@ P-09 (Shape Overlap Query) → P-12 (Facing/Dot-Product Check)
 
 ## Engine Primitives Required
 
-### Cone/Fan-Shaped Spatial Query
+Cone Strike is now a canonical cone-targeting reference.
 
-All existing spatial queries are circular (radius-based):
-- SK-08 Aura: "entities within radius R of caster"
-- SK-29 Blizzard: "entities within radius R of zone center"
-- SK-20 Battle Cry: "allies within radius R"
+The recommended lowering is:
 
-A cone query needs:
-```
-struct ConeQuery {
-    origin: Vec2F,         // Caster's position
-    direction: Vec2F,      // Normalized direction vector
-    half_angle: SimFixed,  // Half the cone's opening angle (e.g., 45° for a 90° cone)
-    range: SimFixed,       // Maximum distance from origin
-}
-```
+1. author `targeting = {`
+   `type = area,`
+   `shape = cone,`
+   `range = 6m,`
+   `radius = 6m,`
+   `cone_angle = 45deg,`
+   `filter = enemy_alive`
+   `}`
+2. resolve the cone from the caster's position using the cast direction / facing snapshot at cast
+   commit
+3. apply ordinary `damage` plus one generated slow debuff to every admitted enemy in the cone
 
-For each candidate entity, the query checks:
-1. Is the entity within `range` distance from `origin`?
-2. Is the angle between `direction` and the vector from `origin` to `entity` less than `half_angle`?
+This uses the existing canonical target geometry:
 
-Both checks use fixed-point math. The angle check can be done via dot product (avoid trig functions for determinism):
-```
-let to_target = normalize(entity.position - origin);
-let cos_angle = dot(direction, to_target);
-let cos_threshold = cos(half_angle); // Pre-computed at compile time
-return cos_angle >= cos_threshold;
-```
-
-### New Geometry Type in the Engine
-
-The engine currently supports:
-- Circle (radius-based queries)
-- AABB rectangles (static_grid for collision)
-- Line segments (raycast for LOS, projectile paths)
-
-Cone is a new geometry primitive. It needs to be:
-- Expressible in ability definitions (compiled by the game compiler)
-- Supported by the Arbiter's spatial query system
-- Deterministic (fixed-point angle math)
-
-### Direction Dependency
-
-Unlike circular AoEs (which are symmetric), cone queries depend on a **direction**. The cast direction comes from the caster's facing or requested aim direction. The ability definition must specify "cone oriented in cast direction" — the engine resolves the direction at cast time from the submitted input.
-
-This is the first geometry that requires orientation, not just position + size.
+- `shape = cone` is already part of `TargetingBlock`
+- the dot-product/facing gate is already part of the `P-12` targeting surface
+- the result set is just a normal snapshot AoE query, not a persistent zone
 
 ## Cross-Boundary Concerns
 
-TODO: The cone query originates from the caster's position on the caster's Arbiter. Enemies in the cone might be Ghosts near the boundary. Standard damage relay applies — same as any AoE hitting Ghosts.
+Cone Strike follows the ordinary short-range AoE rule.
 
-One concern: the cone extends in a direction. If the cone points toward a boundary, most of its area might be in the neighboring Arbiter's region. The caster's Arbiter can only query locally + Ghosts. Enemies deep in the neighbor's region (beyond Ghost range) won't be detected. Is this acceptable, or does the cone need to be escalated to the neighbor (similar to Global Events for large radii)?
-
-For short-range cones (6 meters), this shouldn't be an issue — Ghost range covers the cone. For long-range cones, it could matter.
+1. The caster's owner performs the cone query locally against current local entities plus
+   Ghost-visible candidates near the seam.
+2. Admitted Ghost/remote enemies receive the usual hostile relay for damage / debuff resolution on
+   their own owner.
+3. This reference assumes a short melee cone, so ordinary Ghost range is sufficient. Mesh-wide or
+   unusually long cones would be a different design problem, not part of this baseline sketch.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: shape (cone), angle (90°), range (6m), damage, slow (40%, 2s), targeting filter (enemies), instant (snapshot, not persistent). Compiler produces:
-- ConeQuery geometry definition with half_angle and range
-- Pre-computed `cos_threshold` from half_angle (compile-time trig, not runtime)
-- Snapshot AoE resolution: query → apply damage + slow to all results
-- Direction binding: "use cast direction" or "use caster facing"
+Designer specifies:
 
-The compiler needs to support cone as a geometry type alongside circle. The geometry type determines which spatial query function the Arbiter uses.
+- cone angle
+- range
+- damage payload
+- slow amount / duration
+- whether the cone uses cast direction or current facing
 
-## Open Questions
+Compiler emits:
 
-- Can cone abilities be used with auto-targeting, or do they always use the caster's facing/requested aim direction?
-- Does the cone check use the center of the enemy's hitbox or the edge (an enemy partially inside the cone)?
-- Can cone geometry be used for persistent zones (a cone-shaped Blizzard)?
-- Are there other non-circular geometries needed (rectangle, line AoE, ring/donut)?
-- How does the cone interact with SK-03 Terrain Wall — does the wall block the cone (LOS check per target)?
-- Does the cone angle need to be configurable per ability, or are there standard angle presets (narrow 30°, medium 90°, wide 180°)?
-- Can the cone be aimed independently of movement direction (explicit aim input vs facing aim)?
-- Performance: is the dot-product angle check more expensive than a radius check? By how much per entity?
+- one cone-targeting query in `TargetingBlock`
+- one snapshot result set filtered to hostile living entities
+- one damage payload and one slow payload for every admitted target
+
+Compiler validates:
+
+1. `shape = cone`
+2. `radius > 0`
+3. `cone_angle > 0`
+4. the ability stays a snapshot query rather than a persistent cone-shaped zone in this reference
+
+## Resolved Interaction Notes
+
+- This reference uses the cast-direction snapshot at cast commit, not an auto-targeted nearest enemy
+  facing override.
+- Cone admission is based on the same authoritative spatial snapshot used by other AoE queries; no
+  extra line-of-sight wall blocking is implied unless the wider game layer separately authors it.
+- Cone geometry is already a configurable targeting shape in the compiler docs. No new primitive or
+  special engine-side geometry family is needed for this sketch.
+- Persistent cone-shaped hazards would be a separate zone-authoring pattern. This sketch is only the
+  instant snapshot strike.

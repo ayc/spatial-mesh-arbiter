@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-I place a portal at my current position. After a short delay, I place a second portal at my new position (or target location). The two portals are linked — any ally who clicks one is instantly teleported to the other. Portals persist for 9 seconds. Bidirectional — allies can go either way.
+I place Portal A, then place Portal B shortly afterward. The two portals are linked for 9 seconds.
+Any ally who interacts with either portal is instantly teleported to the other. The portals are
+bidirectional, visible to enemies, and unusable by enemies.
 
 ## Primitive Composition
 
@@ -13,100 +15,110 @@ P-32 (Actor Spawning) → P-59 (N-Way Portal Network) → P-01 (Instant Translat
 ## Inputs
 
 - Caster entity
-- First portal: placed at caster's position (or ground-targeted)
-- Second portal: placed at caster's position after delay (or second ground target)
+- First portal position
+- Second portal position
 
 ## Observable Behavior
 
-1. First cast — Portal A appears at the caster's position
-2. Short delay (1-2 seconds), then second cast — Portal B appears at the caster's new position
-3. Both portals are linked and active for 9 seconds
-4. Any ally (including the caster) can right-click either portal to teleport to the other
-5. Teleportation is instant — same as SK-35 Blink Strike (position snap)
-6. Portals are bidirectional — A→B and B→A
-7. Brief cooldown per user after teleporting (1 second — can't spam back and forth)
-8. Enemies cannot use the portals
-9. Portals are visible to enemies but not interactable by them
-10. Visual: swirling magical doorways, whoosh effect on teleport
+1. First use places Portal A
+2. Second use places Portal B and links it to Portal A
+3. Once both portals exist, allies may interact with either portal to teleport to the other
+4. Teleportation is instant
+5. Each user has an individual short reuse cooldown before they can use the pair again
+6. Enemies can see the portals but cannot use them
+7. The linked pair lasts 9 seconds unless removed earlier
+8. For this sketch, removing either portal collapses the pair
 
 ## Engine Primitives Required
 
-### Linked Placed Structures
+Portal Pair is now a canonical `spawn_actor.portal_anchor` pattern built as a two-step reactivation.
 
-Two portal entities are placed in the world, linked to each other:
+The recommended lowering is:
 
-```
-struct PortalActor {
-    portal_id: EntityID,
-    linked_portal_id: EntityID,
-    linked_portal_position: Vec2F,
-    linked_portal_arbiter_id: u32,
-    owner_team: TeamId,
-    expires_at_tick: u64,
-    use_cooldown_ticks: u64,
-    recent_users: HashMap<EntityID, u64>,  // entity → last_use_tick (for per-user cooldown)
-}
-```
+1. First cast:
+   - `spawn_actor {`
+     `output_binding = portal_a,`
+     `portal_anchor = {`
+       `network_mode = new_pair_leader,`
+       `interaction_range = ... ,`
+       `allowed_filter = ally_alive,`
+       `destination_mode = paired_other,`
+       `per_user_cooldown_ticks = 60,`
+       `channel_ticks = 0,`
+       `destroy_network_on_removed = true`
+     `}`
+   - write `portal_a` into a runtime-state bookmark
+2. Second cast while that bookmark is present:
+   - hidden reactivation variant
+   - `spawn_actor {`
+     `portal_anchor = {`
+       `network_mode = pair_follower,`
+       `paired_anchor_state = first_portal_bookmark,`
+       `interaction_range = ... ,`
+       `allowed_filter = ally_alive,`
+       `destination_mode = paired_other,`
+       `per_user_cooldown_ticks = 60,`
+       `channel_ticks = 0,`
+       `destroy_network_on_removed = true`
+     `}`
 
-Each portal knows where its partner is. When an ally interacts with Portal A, the Arbiter:
-1. Validates: is the user on the correct team? Is the per-user cooldown expired?
-2. Reads `linked_portal_position`
-3. Snaps the user's position to the linked portal's position (instant teleport)
-4. Records the use for per-user cooldown
+This keeps the portal pair inside the canonical portal-network contract. The anchors are ordinary
+spawned actors with portal metadata; they are not a bespoke actor class.
 
-### Interaction Model
-
-Portals are interact-able entities — allies can "use" them, similar to SK-45 Essence Collection's pickup mechanic but with a teleportation outcome. The interaction is:
-- Proximity-based: ally must be within interact range of the portal
-- Team-restricted: only the caster's team
-- Cooldown-restricted: per-user, not per-portal
-
-### Instant Cross-Boundary Teleportation
-
-If Portal A is on Arbiter X and Portal B is on Arbiter Y, using Portal A teleports the ally from Arbiter X to Arbiter Y. This is an **instant cross-boundary handoff** — same as SK-35 Blink Strike but triggered by interacting with a placed structure rather than casting an ability.
-
-The portal entity on Arbiter X must know the linked portal's Arbiter and position to route the handoff correctly.
-
-### Portal Placement Across Boundaries
-
-The caster places Portal A, walks to a new location, and places Portal B. If the caster crossed a boundary between placements, the two portals are on different Arbiters. The portals must maintain a cross-boundary link:
-- Portal A on Arbiter X has `linked_portal_arbiter_id = Y`
-- Portal B on Arbiter Y has `linked_portal_arbiter_id = X`
-- Position updates are needed if either portal could move (they're stationary, so position is fixed at placement)
-
-### Linked Lifecycle
-
-If one portal is destroyed or expires:
-- The other portal also despawns (portals are useless alone)
-- Or: the other portal persists but becomes non-functional (design choice)
+For this sketch, the portals are visible to enemies through ordinary `observer_presentation`, but
+enemy interaction is rejected by `allowed_filter = ally_alive`. The portals are not designed as
+enemy-destructible structures here; enemy hostility is visual counterplay / information only, not
+an attack interaction.
 
 ## Cross-Boundary Concerns
 
-TODO: Portals are designed for cross-boundary use — the whole point is moving allies across distances:
+Portal Pair is designed to work cleanly across Arbiters.
 
-1. **Both portals on same Arbiter:** Simple. Teleport is a local position snap.
-2. **Portals on different Arbiters:** Portal A (Arbiter X) knows Portal B is at position P on Arbiter Y. On use: ally is removed from Arbiter X and inserted at position P on Arbiter Y. Instant handoff.
-3. **Topology change:** If a split/merge changes which Arbiter owns a portal's position, the portal must update its linked_portal_arbiter_id. Or: portals don't survive topology changes (simpler).
-4. **Multiple allies using simultaneously:** Two allies use Portal A in the same tick. Both are teleported to Portal B's position on Arbiter Y. Two simultaneous handoffs to the same destination.
+1. If both portals are local, use is a local `P-01` instant translation
+2. If the paired anchor is remote, `P-59` already replicates the network registry across the
+   Arbiters that host anchors in that network
+3. The source-anchor owner validates interaction range, team filter, and per-user cooldown, then
+   teleports the user to the paired anchor through the ordinary instant-translation + destination
+   handoff rules
+4. Topology changes do not break the pair. If an anchor hands off, the portal-network registry
+   updates with the new authoritative Arbiter for that anchor
+5. Simultaneous ally uses are ordinary independent portal uses. The pair does not serialize users
+   beyond each user's own cooldown gate
 
 ## Compiler Requirements
 
-TODO: Designer specifies: two-part placement (Portal A, then Portal B), link between portals, ally-only interaction, instant teleport to linked position, per-user cooldown (1s), portal duration (9s), bidirectional. Compiler produces:
-- PortalActor entity definition (position, link, team, lifetime, cooldown tracking)
-- Two-phase placement ability (place A, then place B with linking)
-- Interact action definition (proximity, team check, cooldown check)
-- Teleport resolution: instant position snap to linked portal position
-- Linked lifecycle: despawn partner on expiry/destruction
+Designer specifies:
 
-## Open Questions
+- first and second anchor placement positions
+- portal lifetime
+- interaction range
+- ally-only usage filter
+- per-user reuse cooldown
+- observer presentation
 
-- Can portals be placed inside buildings/structures?
-- Can portals be destroyed by enemies (do they have HP)?
-- Does teleporting through a portal trigger SK-32 Minefield at the destination?
-- Can enemies see which direction allies teleported (from A→B or B→A)?
-- Does teleporting through a portal break SK-04 Tether if it exceeds break distance?
-- Can SK-01 Toss throw an enemy INTO a portal (forced portal use)?
-- Can the caster place both portals at the same location (degenerate case)?
-- Does the portal interaction interrupt movement, or is it seamless?
-- Can SK-55 Growing Projectile or SK-62 Boomerang pass through portals?
-- How does the portal interact with SK-44 Burrow — can a burrowed entity use a portal?
+Compiler emits:
+
+- one reactivation/bookmark-based two-step portal placement flow
+- one `new_pair_leader` portal anchor on the first cast
+- one `pair_follower` portal anchor on the second cast
+- one owner-local bookmark that remembers the first anchor between casts
+- ordinary `P-59` interaction and `P-01` teleport routing
+
+Compiler validates:
+
+1. the follower variant references a valid `RuntimeStateDefinition` of kind `bookmark(entity_ref)`
+2. `interaction_range > 0`
+3. `per_user_cooldown_ticks >= 0`
+4. `channel_ticks >= 0`
+5. `destination_mode = paired_other` for pair-style anchors
+
+## Resolved Interaction Notes
+
+- Bidirectionality is automatic once both anchors exist in the same `P-59` network; there is no
+  second explicit "reverse link" mechanic.
+- Teleport destination effects, traps, or leash checks at the destination follow the ordinary
+  `P-01` instant-translation rules after arrival.
+- Placing both portals at the same coordinates is legal but strategically useless; it still creates
+  a valid pair under the canonical portal contract.
+- Because `destroy_network_on_removed = true` is authored for this sketch, expiry or manual removal
+  of either anchor collapses the pair instead of leaving behind a useless singleton portal.

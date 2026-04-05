@@ -27,73 +27,79 @@ P-35 (On-Hit Hook) → P-49 (Resource Destruction-to-Damage)
 
 ## Engine Primitives Required
 
-### Resource-Targeting Combat
+Mana Burn is the canonical `P-35 (On-Hit Hook) -> P-49 (Resource Destruction-to-Damage)` pattern.
 
-All existing combat targets HP. Mana Burn introduces **combat that targets a secondary resource (mana)**:
+The sketch does not require a bespoke "mana combat" primitive. It lowers to:
 
-```
-struct ManaBurnEffect {
-    mana_per_hit: SimFixed,
-    damage_per_mana: SimFixed,  // 1.0 = damage equals mana destroyed
-}
-```
+1. a passive `TriggerDefinition { hook = on_hit }`
+2. whose effect list contains `resource_burn`
+3. with `pool_id = mana`, authored `amount`, authored `damage_ratio`, and `grant_to_caster = false`
 
-On auto-attack hit:
-1. Read target's current mana
-2. `mana_destroyed = min(mana_per_hit, target.current_mana)`
-3. `target.current_mana -= mana_destroyed`
-4. `bonus_damage = mana_destroyed * damage_per_mana`
-5. Apply `bonus_damage` as additional damage through normal Phase 2 resolution
+Because `on_hit` is a Stage 9 PostDamage hook, the burn payload is deferred to the NEXT tick's
+Stage 7 under the compiler's normal deferred-execution rule. The base weapon hit resolves first;
+the follow-up burn then:
 
-### Mana as Attackable Resource
+1. reads the target's current authoritative mana pool
+2. computes `actual_destroyed = min(authored amount, current mana)`
+3. subtracts that amount from the pool
+4. derives bonus damage as `actual_destroyed * damage_ratio`
+5. feeds that bonus damage back through ordinary HP damage resolution
 
-Currently, mana is a passive resource: spent by abilities, regenerated over time. Mana Burn makes mana a TARGETABLE resource — enemies can forcibly reduce it. The engine needs:
-- Mana stored as part of entity state (SoftState): `current_mana: SimFixed, max_mana: SimFixed`
-- Mana modification by external combat events (not just self-consumption from ability casts)
-- Mana can't go below 0 (floor at 0)
-
-### Mana Drain vs Mana Burn
-
-Two variants of the mechanic:
-- **Mana Burn** (Anti-Mage): destroy target's mana, deal damage. The mana is DESTROYED (gone).
-- **Mana Drain** (Lion): steal target's mana, transfer it to yourself. The mana MOVES from target to caster.
-
-Both require the engine to support external mana modification. Mana Drain additionally requires cross-entity resource transfer (like SK-70 Energy Shield's cross-entity resource credit).
-
-### Interaction With Mana-Dependent Abilities
-
-When a target's mana is burned:
-- They can no longer cast abilities that cost more than their remaining mana
-- SK-97 Escalating Cost's exponential costs become unaffordable faster
-- Abilities with conditional effects based on mana (Mana Void: damage based on MISSING mana) scale with the burn
+This already covers the important secondary-resource rule: the target owner, not the attacker,
+performs the authoritative pool read and floor-at-zero behavior. Mana Burn is therefore just one
+authored use of the generic `resource_burn` surface. A true mana-drain variant would use the same
+target-side read plus `grant_to_caster = true`.
 
 ## Cross-Boundary Concerns
 
-TODO: Mana burn happens during auto-attack damage resolution. If the target is a Ghost:
-1. Auto-attack damage relays to target's Arbiter (standard)
-2. The mana burn effect also relays: "burn X mana and deal bonus damage equal to mana destroyed"
-3. The target's Arbiter resolves the mana burn locally (reads actual mana, calculates burn, applies damage)
-4. The bonus damage amount depends on the target's current mana — the attacker's Arbiter can't know this for Ghosts
+Mana Burn follows the canonical `CG-01` target-side-read rule.
 
-The mana burn resolution must happen on the TARGET's Arbiter (where mana is authoritative). The relay carries the burn parameters, not the result.
+If the struck target is remote/Ghost:
+
+1. the base auto-attack already resolves through the ordinary prepared-hit relay path
+2. once that hit is admitted, the `on_hit` hook schedules the Mana Burn follow-up
+3. the follow-up relay carries only the authored burn parameters, not a guessed destroyed amount
+4. the target owner reads current mana, computes `actual_destroyed`, mutates the pool, derives the
+   bonus damage, and resolves that damage locally
+
+So the authoritative statement is: the attacker never decides how much mana was actually burned on a
+remote target. It only supplies `pool_id`, `amount`, `damage_ratio`, and the already-committed hit
+context. Any returned "you burned 17 mana" number is observational data sent back after the target
+owner commits the result.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: passive on auto-attacks, mana destroyed per hit, bonus damage per mana destroyed. Compiler produces:
-- ManaBurnEffect on-hit modifier
-- Per-hit resolution: read target mana → calculate burn → modify mana → calculate bonus damage → apply damage
-- Mana modification as external combat event
+Designer specifies:
 
-The compiler needs to support **resource-targeting effects** — combat that modifies resources other than HP.
+- a passive trigger on admitted weapon/attack hits
+- target resource pool (`mana`)
+- amount destroyed per proc
+- bonus damage ratio per destroyed resource point
+- bonus damage type
 
-## Open Questions
+Compiler emits:
 
-- Does mana burn apply before or after normal auto-attack damage?
-- Can mana burn trigger on-hit procs (SK-09 Chain Lightning from the bonus damage)?
-- Does SK-17 Sacrifice Shield block the bonus damage (shield absorbs the HP damage but mana is still burned)?
-- Can mana burn be reflected by SK-22 Damage Reflection (reflect the bonus damage back)?
-- Does SK-51 Unstoppable prevent mana burn (it's not CC — it's resource manipulation)?
-- Can mana burn affect entities with no mana pool (some entities might use a different resource)?
-- Does SK-92 Anti-Heal interact with mana burn (anti-heal reduces healing, not mana burn)?
-- Can mana burn be applied by abilities (not just auto-attacks)?
-- Does the target's Edge Node need to show the mana change immediately (client prediction of mana burn)?
+- a Stage 9 `on_hit` trigger
+- a deferred follow-up combat payload containing `resource_burn`
+- target-side `P-49` lowering using the named pool, amount, ratio, and `grant_to_caster = false`
+
+Compiler validates:
+
+1. the trigger is authored as a reactive `on_hit` rule rather than as inline same-tick damage math
+2. `pool_id` references a valid resource pool
+3. `amount`, `damage_ratio`, and `damage_type` are present
+4. the effect is modeled as target-side resource destruction, not as origin-side guessed bonus damage
+
+## Resolved Interaction Notes
+
+- Mana Burn is not inline with the base hit. The admitted auto-attack resolves first, then the
+  `on_hit` hook schedules the burn follow-up through the compiler's deferred PostDamage contract.
+- The mana destruction itself is authoritative on the target owner. The attacker never computes the
+  real burned amount for a remote target.
+- The bonus HP damage still goes through ordinary damage resolution after the resource mutation, so
+  shields, mitigation, reflection, and other downstream HP-side rules apply to that bonus packet
+  exactly as they would for any other damage event.
+- Mana Burn is resource manipulation, not crowd control. CC immunity / Unstoppable-style status
+  admission rules do not apply to it.
+- `resource_burn` is a general compiler surface, so the same mechanic can be authored on active
+  abilities too; this sketch simply attaches it to `on_hit`.

@@ -14,7 +14,7 @@ P-06 (Attached Kinematics) → P-07 (Entity-as-Kinematic-Volume) → P-09 (Shape
 
 - Caster entity
 - Target enemy entity (must be in range — the orbit anchor)
-- Detach direction (chosen by the player during the orbit)
+- Detach timing (player-controlled while the orbit is active)
 
 ## Observable Behavior
 
@@ -23,94 +23,94 @@ P-06 (Attached Kinematics) → P-07 (Entity-as-Kinematic-Volume) → P-09 (Shape
 3. Orbit speed is constant (e.g., 1 revolution per second)
 4. Enemies in the orbital path take damage as the caster passes through them
 5. The orbit anchor (target enemy) can still move — the orbit center moves with them
-6. After ~2 revolutions: the player can press the detach key
-7. On detach: caster slams to the ground at the current orbital position, AoE damage + stun around the landing point
+6. While the orbit is active: the player can press the detach key to end it early
+7. On detach: caster slams to the ground at the current orbital position, AoE damage + stun around
+   the landing point
 8. If the player doesn't detach: orbit continues for up to 4 revolutions then auto-detaches
 9. If the orbit anchor dies: caster auto-detaches at current position
 10. Visual: grappling hook swing, trail of energy, slam effect on detach
 
 ## Engine Primitives Required
 
-### Circular Orbital Movement
+Orbital Sweep is now a canonical `kinematic_sweep(mode = orbit_entity)` reference.
 
-This is a completely new movement type. The caster's position is calculated each tick as a function of the orbit:
+The recommended lowering is:
 
-```
-struct OrbitalState {
-    anchor_entity_id: EntityID,
-    orbit_radius: SimFixed,
-    angular_velocity: SimFixed,  // Radians per tick
-    current_angle: SimFixed,     // Current position on the circle
-    max_revolutions: SimFixed,
-    revolutions_completed: SimFixed,
-    pass_through_damage: SimFixed,
-    detach_aoe_damage: SimFixed,
-    detach_stun_ticks: u64,
-}
-```
+1. the opening cast starts one self-owned `kinematic_sweep` with:
+   - `target = self`
+   - `mode = orbit_entity`
+   - `anchor = targeted enemy`
+   - `duration_ticks = full orbit window`
+   - `collision_radius = body radius`
+   - `unique_hit_scope = entity_once_per_revolution`
+   - `on_hit_effects = pass-through damage payload`
+   - `orbit = {`
+     `radius = 3.0,`
+     `angular_velocity_per_tick = 1 revolution / 60 ticks,`
+     `max_revolutions = 4,`
+     `end_on_anchor_removed = true`
+     `}`
+   - `output_binding = orbit_position`
+2. author the detach slam as an ordinary same-slot follow-up through `ActivationModes`, reusing the
+   sweep's current `output_binding` position as the AoE center
+3. gate that follow-up behind a compiler-owned active-orbit predicate so the slot only detaches
+   while the orbit is live
+4. let sweep expiry or anchor loss end the orbit at the current committed position; the same
+   ordinary landing payload may be reused for auto-detach if the designer wants that behavior
 
-Each tick:
-1. Read the anchor entity's current position (the orbit center)
-2. `current_angle += angular_velocity`
-3. `caster.position = anchor.position + Vec2F::from_angle(current_angle) * orbit_radius`
-4. `revolutions_completed += angular_velocity / (2 * PI)`
-5. Check for entity collisions along the arc swept this tick (damage pass-through entities)
+This keeps the mechanic inside existing surfaces:
 
-The caster's position is DERIVED from the anchor's position + angle. The caster doesn't use normal movement — their position is overridden by the orbit formula.
-
-### Pass-Through Damage During Orbit
-
-As the caster sweeps through a circular arc each tick, enemies in the arc take damage. This requires:
-- Calculate the arc swept this tick (from old_angle to new_angle at orbit_radius around anchor)
-- Check for entity intersections with this arc
-- Apply pass-through damage to intersected entities (like SK-56 Knockback Projectile's pass-through)
-- Dedup: don't hit the same entity twice per revolution (hit list per revolution)
-
-### Orbit Anchored to Moving Entity
-
-The orbit center is the anchor ENTITY, not a fixed position. If the anchor moves (walks, dashes, is displaced), the orbit moves with them. Each tick, the orbit center updates to the anchor's current position.
-
-This means: if the anchor is dragged by SK-43, the orbiting caster follows. If the anchor blinks (SK-35), the caster snaps to the new orbit position. The caster's movement is entirely derived.
-
-### Detach With Directional Slam
-
-On detach:
-1. The caster's position becomes their actual position (no longer orbit-derived)
-2. AoE damage + stun at the caster's landing position
-3. The player chooses the detach timing (and thus the angular position = where they land)
-
-The detach direction is implicitly chosen by WHEN the player presses the button — different timing = different position on the circle = different landing spot.
+- derived orbit motion is the canonical `OrbitSweepBlock`
+- pass-through body hits are just sweep `on_hit_effects`
+- per-revolution dedup is the canonical `unique_hit_scope = entity_once_per_revolution`
+- manual detach reuses `ActivationModes` rather than introducing a new client input type
 
 ## Cross-Boundary Concerns
 
-TODO: The caster's position is derived from the anchor's position. If the anchor is near or across an Arbiter boundary:
+Orbital Sweep stays on the anchor's current owner.
 
-1. **Both on same Arbiter:** Simple. Orbit calculated locally.
-2. **Anchor is a Ghost:** The caster orbits around a Ghost's position. Ghost position is approximate (dead-reckoned). The orbit might be slightly off from the actual anchor position.
-3. **Caster's orbit crosses a boundary:** The orbit radius (3m) might extend across a boundary. Each tick, the caster's calculated position might alternate between "in this Arbiter's region" and "in the neighbor's region." This would cause constant handoff oscillation — very bad.
-
-The simplest solution: while orbiting, the caster stays on the anchor's Arbiter. If the anchor crosses a boundary, the caster is handed off WITH the anchor (atomic two-entity movement, similar to SK-34 Charge with a pinned entity but different topology).
+1. `orbit_entity` mode keeps the moving caster authoritative on the anchor's current owner instead
+   of handoff-oscillating every time the orbit radius crosses a seam.
+2. If the anchor hands off, the orbiting caster follows through the same co-located sweep handoff
+   path and the new owner continues deriving orbit motion from the anchor's live pose.
+3. Remote/Ghost targets struck by the sweeping body still resolve through the ordinary target-owner
+   relay path. The orbiting caster does not damage Ghost state locally.
+4. Manual detach runs on whichever owner currently holds the orbit sweep, using the same locally
+   authoritative `output_binding` position that ended the orbit.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (enemy), orbit radius (3m), orbit speed (1 rev/s), max revolutions (4), pass-through damage, detach action (AoE + stun), detach timing (player-controlled), anchor death → auto-detach. Compiler produces:
-- OrbitalState status effect with per-tick position derivation
-- Orbit formula: position = anchor.position + Vec2F::from_angle(angle) * radius
-- Arc-sweep collision detection for pass-through damage
-- Detach action: AoE + stun at current orbital position
-- Anchor death hook: auto-detach
+Designer specifies:
 
-The compiler needs to support **derived position** — an entity whose position is a function of another entity's position rather than its own movement input. This is a new movement category.
+- hostile anchor target
+- orbit radius
+- angular velocity
+- maximum revolutions / lifetime
+- pass-through hit filter and damage payload
+- detach landing payload
 
-## Open Questions
+Compiler emits:
 
-- Can the orbiting caster be CC'd during the orbit (stunned mid-orbit = fall off)?
-- Can the orbiting caster be targeted by enemies during the orbit?
-- Does the orbit inherit the anchor's Kinematic Dilation (slower orbit in dilated zones)?
-- Can the anchor use SK-35 Blink Strike — does the orbiting caster teleport with them?
-- If the anchor enters SK-44 Burrow (untargetable), does the orbit continue around the burrowed entity?
-- Can the orbiting caster use abilities during the orbit, or only the detach action?
-- Does the pass-through damage trigger on-hit procs (SK-09 Chain Lightning)?
-- Can two casters orbit the same anchor simultaneously?
-- How does the orbit interact with collision (does the caster pass through walls during orbit)?
-- If the caster has SK-08 Aura, does the aura sweep enemies during the orbit?
+- one self `kinematic_sweep(mode = orbit_entity)` with the authored orbit block
+- one sweep output binding exposing the current landing position
+- one same-slot `ActivationModes` detach follow-up that consumes the live orbit and resolves the
+  landing AoE / stun at the bound current position
+
+Compiler validates:
+
+1. `radius > 0`
+2. `angular_velocity_per_tick > 0`
+3. `max_revolutions > 0`
+4. `unique_hit_scope = entity_once_per_revolution` is only used with `mode = orbit_entity`
+5. manual detach is expressed through `ActivationModes` / runtime-state gating, not a bespoke orbit
+   input plane
+
+## Resolved Interaction Notes
+
+- If the anchor moves, dashes, or blinks, the orbit center updates with the anchor's current
+  authoritative position on the next tick.
+- The orbiting caster remains targetable unless some other authored status or protection changes
+  that; this sketch does not grant free untargetability during the swing.
+- Multiple casters may orbit the same anchor if separate casts admit successfully; each sweep keeps
+  its own orbit state and per-revolution hit ledger.
+- The detach landing point is chosen entirely by timing, not by a second direction cursor.

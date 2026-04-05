@@ -2,7 +2,10 @@
 
 ## Designer Intent
 
-During combat, a combo opportunity triggers. A combo wheel appears showing a SEQUENCE of ability types that the group must perform in ORDER: first a Fighter ability, then a Scout ability, then a Mage ability, then a Priest ability. Each player contributes their step when it's their role's turn. If the group completes the full sequence within the time limit, a powerful bonus effect triggers for the entire group.
+During combat, a combo opportunity triggers for the group. A shared combo wheel appears showing a
+sequence of required role-and-ability contributions in order: for example Fighter first, then
+Scout, then Mage, then Priest. Each player contributes their step when it is their turn. If the
+group completes the full sequence before the deadlines expire, a powerful group effect resolves.
 
 ## Primitive Composition
 
@@ -12,145 +15,127 @@ P-54 (Group Choice Aggregator) → P-42 (Stacking Counters w/ Decay)
 
 ## Inputs
 
-- Trigger event (specific ability, critical hit, or boss mechanic starts the combo)
-- Multiple player entities contributing abilities in sequence
-- Each step requires a specific ABILITY TYPE from a specific ROLE
+- An opening ability or combat event that starts the group combo
+- Multiple participants in the same `party` or `raid_subgroup`
+- One ordered sequence of required `group_role_id` plus `group_interaction_tags`
 
 ## Observable Behavior
 
-1. Combo opportunity triggers — all group members see the combo wheel
-2. Step 1: a Fighter must use a melee ability within 5 seconds
-3. If completed: Step 2 begins — a Scout must use a ranged ability within 5 seconds
-4. If completed: Step 3 begins — a Mage must use a spell ability within 5 seconds
-5. If completed: Step 4 begins — a Priest must use a heal ability within 5 seconds
-6. If all 4 steps completed in time: HEROIC OPPORTUNITY triggers — powerful group effect (e.g., massive AoE damage + group heal + damage buff for 10 seconds)
-7. If any step times out: combo FAILS — partial reward based on steps completed, or no reward
-8. Different sequences produce different rewards (offensive combo, defensive combo, balanced combo)
-9. Visual: shared combo wheel UI, each step highlights the active role, completion flash
+1. A combo opportunity opens and all eligible group members see the shared combo UI
+2. Step 1 requires a specific role and ability tag within a short time limit
+3. On success, the session advances immediately to the next step
+4. Each later step is resolved the same way until the sequence ends or a step times out
+5. Completing the full sequence resolves the authored success effect for the group
+6. If a step times out, the authored failure effect resolves if present; otherwise the combo ends
+   with no further result
+7. Different authored sequences can produce different success or failure outcomes
+8. Combat continues while the session is active; contributors still use ordinary abilities
 
 ## Engine Primitives Required
 
-### Shared Group State Machine
+Group Sequential Combo is now the canonical sequential `group_interaction` pattern.
 
-The combo is a STATE MACHINE shared across the entire group:
+### Group Session Definition
 
-```
-struct GroupComboState {
-    combo_id: UUID,
-    group_id: UUID,              // Which group/party this belongs to
-    sequence: Vec<ComboStep>,    // Required steps in order
-    current_step_index: u8,
-    current_step_deadline_tick: u64,
-    completed_steps: Vec<CompletedStep>,
-    status: ComboStatus,
-}
+The opening ability authors one `group_interaction` block with:
 
-struct ComboStep {
-    required_role: PlayerRole,        // Fighter, Scout, Mage, Priest
-    required_ability_type: AbilityType, // Melee, Ranged, Spell, Heal
-    time_limit_ticks: u64,
-}
+1. `participant_scope = party` or `raid_subgroup`
+2. `mode = sequential`
+3. `timeout_ticks`
+4. one `sequential.steps` list
+5. one `success_result`
+6. optional `failure_result`
 
-struct CompletedStep {
-    entity_id: EntityID,
-    ability_used: AbilityId,
-    completed_at_tick: u64,
-}
+Each `GroupSequenceStepDef` declares:
 
-enum ComboStatus {
-    Active,
-    Completed,
-    Failed,
-    TimedOut,
-}
-```
+- `required_role_id`
+- `required_ability_tag`
+- `time_limit_ticks`
 
-### Group-Wide Event Detection
+This is not a bespoke shared state machine invented per sketch. It is one bounded `P-54` session
+opened only after the starting ability commits successfully.
 
-The engine must detect: "a player in this group used an ability of the required type during the current step's window."
+### Advancement By Ordinary Ability Casts
 
-Each time a group member uses an ability:
-1. Check: is there an active GroupComboState for this entity's group?
-2. Check: is this entity's role the required role for the current step?
-3. Check: is this ability the required ability type for the current step?
-4. Check: is the current tick within the step's deadline?
-5. If all yes: ADVANCE the combo to the next step
-6. If the last step is completed: TRIGGER the combo reward
+Sequential contributions are ordinary admitted ability casts, not a new combo-input message type.
 
-```
-fn on_ability_used(entity: &Entity, ability: &AbilityDef) {
-    if let Some(combo) = get_active_group_combo(entity.group_id) {
-        let current_step = &combo.sequence[combo.current_step_index as usize];
-        if entity.role == current_step.required_role
-            && ability.ability_type == current_step.required_ability_type
-            && current_tick() <= combo.current_step_deadline_tick
-        {
-            advance_combo(combo, entity.entity_id, ability.ability_id);
-        }
-    }
-}
-```
+When any participant casts an ability:
 
-### Group State Ownership
+1. Stage 2 admits or rejects the ordinary cast first
+2. if the cast is admitted, the session owner checks the participant's `group_role_id`
+3. it then checks whether the ability's `group_interaction_tags` match the current step
+4. if both match before the deadline, the session advances immediately and records that
+   contribution
 
-Where does the GroupComboState live? Options:
-- **On one entity** (the group leader): simple, but requires cross-boundary checks if group members are on different Arbiters
-- **On the Arbiter** (shared state alongside entity data): scales with the group being co-located
-- **On the Controller** (centralized): handles cross-boundary groups but adds Controller dependency
+So the actual sequential combo is "who cast which tagged ability at the right time," not "who
+pressed a separate combo button."
 
-Since group members in combat are typically on the same Arbiter (fighting the same enemies), the combo state can live on the local Arbiter. If group members are split across Arbiters, the combo state must be synchronized or centralized.
+### Success, Failure, And Result Application
 
-### Ability Type and Role Classification
+If the final step completes in time, `success_result` resolves. If a step times out, `failure_result`
+resolves if authored.
 
-The compiler must classify:
-- Each ability with an `ability_type: AbilityType` (Melee, Ranged, Spell, Heal, etc.)
-- Each entity with a `role: PlayerRole` (Fighter, Scout, Mage, Priest, etc.)
+`GroupResultBlock.apply_to` determines whether the effects run:
 
-The combo sequence references these classifications. The lookup is: "did a Fighter use a Melee ability this step?"
+- once per participant with implicit `participant` bindings, or
+- once on the trigger owner
 
-### Combo Reward
-
-On successful completion, the reward is applied to ALL group members:
-- AoE buff centered on the combo trigger location (or on each group member)
-- Damage burst to enemies near the group
-- Group-wide heal
-- Buff with duration
-
-The reward is a predefined effect in SpellData, referenced by the combo sequence definition.
+The resulting buffs, heals, and damage still resolve on each relevant entity's authoritative owner
+through the ordinary relay rules.
 
 ## Cross-Boundary Concerns
 
-TODO: Group members might be on different Arbiters:
+This sketch uses the canonical cross-Arbiter `P-54` session-owner model.
 
-1. **All on same Arbiter**: Combo state is local. Ability detection is local. Simple.
-2. **Split across Arbiters**: When a group member on Arbiter B uses an ability, their Arbiter must check: is there an active combo for this group? If the combo state is on Arbiter A, Arbiter B must relay "player X used ability type Y for the combo."
+1. When the opening ability commits, one Arbiter becomes the session owner.
+2. If a participant on another Arbiter contributes a matching cast, that local owner admits the
+   ordinary cast first and then relays the contribution tuple to the session owner.
+3. Deadlines remain deterministic because every Arbiter shares the same authoritative tick.
+4. When the session resolves, any participant-scoped reward still applies on each participant's
+   authoritative owner through the normal relay path.
 
-The simplest approach: combo state lives on the Arbiter where the combo was triggered. Ability contributions from other Arbiters are relayed. The combo-owning Arbiter manages the state machine and applies rewards when complete.
-
-If the reward is a group-wide buff: relay buff application to all group members' Arbiters.
+The sequential combo is therefore cross-Arbiter safe without a Controller-owned combo state machine
+or a second client-input plane.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: combo trigger condition, sequence of steps (role + ability type per step), time limit per step, combo reward on completion, partial reward on failure, combo sequence variants (different sequences = different rewards). Compiler produces:
-- GroupComboState definition
-- Combo sequence definitions in SpellData (role × ability type per step)
-- Ability type classification on all abilities
-- Entity role classification
-- On-ability-used hook: check combo advancement
-- Reward definitions (group-wide buff/damage/heal)
-- Timeout logic per step
+Designer specifies:
 
-The compiler needs to support **group-level state machines** — shared state across multiple entities that advances based on contributions from different group members.
+- the participant scope
+- the session timeout
+- the ordered step list
+- the role required at each step
+- the ability tag required at each step
+- the success and optional failure results
 
-## Open Questions
+Compiler emits:
 
-- Can the same player contribute to multiple steps (Mage fills both step 3 and step 4 if they have a heal)?
-- Can two players of the same role compete for the same step (two Fighters both try to fill step 1)?
-- Does the combo state persist if the triggering entity dies?
-- Can enemies interfere with the combo (CC the player whose turn it is)?
-- Can multiple combos be active simultaneously for the same group?
-- Does the combo pause during SK-91 Stasis?
-- How are combo sequences defined — fixed patterns or randomized per trigger?
-- Can the group choose which combo sequence to attempt (offensive vs defensive)?
-- Does the combo reward scale with the speed of completion (faster = better)?
-- Performance: on-ability-used hook checked for every ability by every group member — bounded by group size × cast rate
+- one `group_interaction(mode = sequential)` directive on the opening ability
+- the ordered step definitions
+- any required `group_interaction_tags` on contributor abilities
+- one bounded session owner and relay contract using the existing `P-54` runtime
+
+Compiler validates:
+
+1. `timeout_ticks > 0`
+2. `steps` is non-empty
+3. every `time_limit_ticks > 0`
+4. referenced tags and roles are authored explicitly rather than inferred from class names or UI
+   text
+5. result effects are expressible as ordinary `GroupResultBlock` payloads
+
+## Resolved Notes
+
+- The same participant may satisfy multiple different steps if later steps also match that
+  participant's authored role and tagged ability choices.
+- If multiple eligible participants race for the same step, the first admitted matching cast for
+  that step wins. Later casts simply resolve as ordinary abilities after the step has already
+  advanced.
+- Combat does not pause during the session. Players can be interrupted, crowd-controlled, killed,
+  or otherwise denied from contributing because the combo uses ordinary real-time ability casts.
+- One admitted cast satisfies at most one sequential step. The runtime does not let one cast skip
+  multiple steps.
+- This sketch assumes one active Heroic Opportunity-style sequential session per opening trigger for
+  the group. Sequence variants are just different authored `group_interaction` definitions.
+- This sketch no longer requires new group-state machinery. The canonical `group_interaction`
+  sequential contract already covers it.

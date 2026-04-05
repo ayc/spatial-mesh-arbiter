@@ -78,7 +78,7 @@
 
 **Description:** Escalating a local event to the Mesh Controller for deterministic map-wide execution at a coordinated tick.
 
-**Sketches:** SK-05 (Global Strike), SK-95 (Mass Effect Detonation — if map-wide)
+**Sketches:** SK-05 (Global Strike), SK-95 (Mass Effect Detonation)
 
 **Engine layer:** `docs-core/`
 

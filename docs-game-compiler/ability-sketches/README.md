@@ -4,9 +4,14 @@ Scratch space for exploring ability designs and what it takes to implement them 
 
 These are not specs — they're test cases for validating that the compiler pipeline and engine actor model can express the kinds of abilities the game needs.
 
-See [COMPLETION_CHECKLIST.md](COMPLETION_CHECKLIST.md) for the explicit closure criteria and prioritized queue for turning primitive-covered sketches into designer-recreatable compiler references.
+See [COMPLETION_CHECKLIST.md](COMPLETION_CHECKLIST.md) for the explicit closure criteria and the
+historical completion log used to turn primitive-covered sketches into designer-recreatable
+compiler references. That file is now a closed historical artifact, not an active backlog.
 
-See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) and [COMPILER_GAP_REGISTER.md](COMPILER_GAP_REGISTER.md) for the full 125-sketch audit of current compiler compatibility and the grouped backlog of missing canonical compiler contracts.
+See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) and
+[COMPILER_GAP_REGISTER.md](COMPILER_GAP_REGISTER.md) for the full 125-sketch audit and the
+historical compiler-gap record. Both are now closed reference artifacts rather than active queue
+documents.
 
 ## Sketches
 
@@ -129,7 +134,7 @@ See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) a
 ### Melee/Assassin Inspired (Alarak / Butcher / Murky / Qhira / Zeratul)
 87. [SK-87: Conditional Counter](sk-87-conditional-counter.md) — Defensive stance that activates only if attacked during the window
 88. [SK-88: Positional Leash](sk-88-positional-leash.md) — Bounded movement area: free within radius, yanked back at the edge
-89. [SK-89: Respawn Anchor](sk-89-respawn-anchor.md) — Hidden placed entity that overrides respawn location on death
+89. [SK-89: Respawn Anchor](sk-89-respawn-anchor.md) — Hidden placed egg that grants a revocable one-use rebirth route
 90. [SK-90: Orbital Sweep](sk-90-orbital-sweep.md) — Circular orbital movement around a target entity
 91. [SK-91: Team-Agnostic Stasis](sk-91-team-agnostic-stasis.md) — AoE stasis affecting ALL entities regardless of team, with timer pause
 
@@ -138,7 +143,7 @@ See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) a
 93. [SK-93: Death Prevention](sk-93-death-prevention.md) — Buff on ally: if they would die, prevent death and heal to full
 94. [SK-94: Placed Potion](sk-94-placed-potion.md) — Healer places healing pickups, allies collect on their own timing
 95. [SK-95: Mass Effect Detonation](sk-95-mass-effect-detonation.md) — One button detonates all active caster effects across all targets
-96. [SK-96: Death Ghost](sk-96-death-ghost.md) — On death, persist as active ghost with healing abilities for 8 seconds
+96. [SK-96: Death Ghost](sk-96-death-ghost.md) — On lethal HP, enter a temporary heal-only ghost phase before true death
 97. [SK-97: Escalating Cost](sk-97-escalating-cost.md) — Each cast increases the mana cost of the next cast (self-stacking penalty)
 98. [SK-98: Mobile Transport](sk-98-mobile-transport.md) — Enterable vehicle that flies allies to a global destination
 
@@ -279,14 +284,14 @@ See [COMPILER_COMPATIBILITY_CHECKLIST.md](COMPILER_COMPATIBILITY_CHECKLIST.md) a
 | SK-86 Decoy | Active cast (self) | Illusory entity, per-team visual deception, fake HP bar, targeting confusion |
 | SK-87 Conditional Counter | Active cast (self) | Window-gated activation (if hit → counter), damage-received callback on status effect |
 | SK-88 Positional Leash | Active cast (melee target) | Bounded movement area, position clamping in kinematics, constrains all movement types |
-| SK-89 Respawn Anchor | Active cast (ground) | Death lifecycle override, hidden entity, respawn position/timer modification |
+| SK-89 Respawn Anchor | Active cast (ground) | One-use rebirth anchor, hidden placed entity, revocable post-terminal respawn reroute |
 | SK-90 Orbital Sweep | Active cast (target) | Circular derived position around target, arc-sweep collision, anchor-following orbit |
 | SK-91 Team-Agnostic Stasis | Active cast (ground) | TargetFilter::All (both teams), stasis with timer pause, per-entity time freeze |
 | SK-92 Anti-Heal | Active cast (ground AoE) | Heal resolution modifier, healing reduction/amplification debuff, affects all heal sources |
 | SK-93 Death Prevention | Active cast (ally) | Death check interception, conditional full heal on lethal damage, one-time consumption |
 | SK-94 Placed Potion | Active cast (ground) | Friendly consumable pickup, healer/recipient agency split, per-caster instance limit |
-| SK-95 Mass Effect Detonation | Active cast (global self) | Caster effect registry query, simultaneous multi-target detonation, fan-out relay |
-| SK-96 Death Ghost | Passive (on death) | Post-death active phase, dead-but-present entity state, limited abilities while dead |
+| SK-95 Mass Effect Detonation | Active cast (global self) | Mesh-wide status consumption, exact source-owned primer matching, coordinated detonation tick |
+| SK-96 Death Ghost | Passive (on lethal HP) | Non-terminal ghost phase, delayed kill credit, heal-only temporary ability set |
 | SK-97 Escalating Cost | Cost modifier | Self-stacking cost inflation, exponential mana cost growth, stack decay timer |
 | SK-98 Mobile Transport | Active cast (global) | Moving enterable vehicle, multi-boundary traversal, occupant storage during flight |
 | SK-99 Target-Tracking Zone | Active cast (target) | Zone follows enemy entity, speed-limited tracking, collateral AoE at zone position |

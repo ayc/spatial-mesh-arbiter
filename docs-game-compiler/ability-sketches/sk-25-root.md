@@ -2,7 +2,8 @@
 
 ## Designer Intent
 
-I snare an enemy's feet to the ground. They cannot move for 3 seconds, but they can still attack and cast abilities. They can be freed early by SK-15 Purify or by certain mobility abilities.
+I snare an enemy's feet to the ground. They cannot move for 3 seconds, but they can still attack
+and cast abilities. They can be freed early by `SK-15 Purify`.
 
 ## Primitive Composition
 
@@ -13,45 +14,87 @@ P-26 (Capability Bitmask) → P-41 (DR Tracker)
 ## Inputs
 
 - Caster entity
-- Target enemy entity (must be in range)
+- Target enemy entity
 
 ## Observable Behavior
 
-1. Ability lands on target — root is applied for 3 seconds
-2. Target cannot move (movement input ignored, velocity forced to zero)
-3. Target CAN attack (auto-attack functional if enemies are in range)
-4. Target CAN cast abilities (all non-movement abilities functional)
-5. Active movement abilities (dashes, blinks) are blocked while rooted
-6. Root does NOT interrupt channels
-7. Duration reduced by tenacity
-8. Diminishing returns apply (same system as SK-24 but may be in a separate DR category)
-9. Cleansable by SK-15 Purify
-10. Visual: vines/ice/chains around the target's feet
+1. The ability lands and applies root for 3 seconds.
+2. While rooted, the target cannot move.
+3. Auto-attacks remain available.
+4. Non-movement abilities remain available.
+5. Movement abilities are rejected because relocation abilities must require `can_move`.
+6. Root does not interrupt active channels in this reference.
+7. Duration is reduced by the target's `status_effect_resistance`.
+8. Cleansing the root removes it early.
+9. Diminishing returns follow the shared soft-disable DR policy rather than a sketch-local formula.
+10. Visual: vines, ice, chains, or other feet-binding FX on the target.
 
 ## Engine Primitives Required
 
-TODO: Root suppresses movement capability only — `can_move = false` but `can_attack = true`, `can_cast = true`. The Arbiter needs to distinguish "movement ability" from "non-movement ability" for casting suppression. A rooted entity that tries to cast a dash/blink should be rejected, but a rooted entity casting a fireball should succeed. How is "movement ability" classified — a tag on the ability definition? Does the compiler flag it?
+Root is authored through canonical `apply_cc`, not through a bespoke movement-lock subsystem.
 
-## Interaction With Other CC
+The runtime contract is:
 
-- **Stun (SK-24)** applied while rooted: stun takes over (fully disabled). When stun expires, does the remaining root duration continue, or is it consumed?
-- **Silence (SK-26)** applied while rooted: both apply simultaneously — can't move AND can't cast, but can still auto-attack. Effectively a stun but composed of two separate effects.
-- **Displacement (SK-01 Toss)** while rooted: does the root prevent displacement? Design choice — root could ground the entity (displacement blocked) or displacement could break the root.
+1. the ability emits `apply_cc { cc_type = root, category = soft_disable, duration_ticks = 180,
+   dr_category = soft_disable }`
+2. `apply_cc` lowers to a generated negative status carrying:
+   - `cc_behavior_profile = root`
+   - `cc_category = soft_disable`
+   - `duration_scaling = status_resistance`
+   - ordinary status metadata such as `is_cleansable`
+3. if admitted, that generated status suppresses `CAN_MOVE` only
+4. movement abilities are blocked because relocation abilities must already require `can_move` in
+   their authored `requirements`
+
+This keeps the mechanic inside existing canonical surfaces:
+
+- voluntary movement suppression is the built-in `root` behavior profile
+- duration reduction is the normal `status_resistance` path
+- DR comes from the shared target-side P-41 tracker, not a sketch-local counter
 
 ## Cross-Boundary Concerns
 
-TODO: Same relay pattern as SK-24. If the target is a Ghost, the root is relayed to the owning Arbiter. The rooted entity's movement is halted — Ghost updates will show velocity zero. Abilities cast by the rooted entity still go through the normal proposal path (they're not suppressed).
+Root uses the ordinary target-owner CC relay path.
+
+1. If the target is remote/Ghost, the caster owner relays the `apply_cc` payload to the target's
+   authoritative owner.
+2. The target owner performs immunity checks, duration scaling, DR application, and status insert
+   locally.
+3. While rooted, later movement proposals are rejected on the target owner through the ordinary
+   `CAN_MOVE` gate.
+4. If the target hands off while rooted, the active status transfers as ordinary SoftState.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: CC type (root — movement disable), duration (3s), capability suppression (move only), does NOT interrupt channels, DR category (soft CC? or shared with stun?), tenacity-reducible, cleansable. Compiler also needs to flag movement abilities as "blocked by root" in their ability definitions. This is a cross-cutting concern — every dash/blink ability needs to check for root status.
+Designer specifies:
 
-## Open Questions
+- hostile target filter and range
+- `cc_type = root`
+- root duration
+- whether the root is cleansable
+- the DR category for the effect
 
-- Are roots and stuns in the same DR category or separate categories?
-- Does root prevent ALL movement (including knockback from SK-01 Toss) or only voluntary movement?
-- Can a rooted entity use a ground-targeted ability at their own feet (SK-03 Terrain Wall)?
-- Does root affect summoned minions (SK-06) — are they rooted too, or only the caster?
-- How does root interact with SK-04 Tether distance check — if one partner is rooted and the other walks away, does the tether snap?
-- If a rooted entity is inside SK-08 Aura, does the root prevent them from leaving (they're stuck in the damage zone)?
-- Does root affect vertical displacement (SK-01 Toss airborne arc) or only horizontal movement?
+Compiler emits:
+
+- one canonical `apply_cc` payload with `cc_type = root`
+- one generated negative status entry using the canonical root behavior profile
+- target-side `duration_scaling = status_resistance` and the authored `dr_category`
+
+Compiler validates:
+
+1. `cc_type = root` pairs only with canonical `category = soft_disable`
+2. `duration_ticks > 0`
+3. the authored `dr_category` is a supported DR domain
+4. root remains a movement-only disable and does not silently widen into stun-like full lockout
+
+## Resolved Interaction Notes
+
+- Root does not stop forced displacement in this reference. Effects like Toss still move the target
+  because root suppresses voluntary movement, not external relocation.
+- Because the root profile does not interrupt channels, an already-active channel continues unless
+  some other effect breaks it.
+- Purify-style cleanse removes the generated negative status through the ordinary cleanse path.
+- If the rooted target is also silenced, the two statuses simply compose: `CAN_MOVE = false` from
+  root and `CAN_CAST = false` from silence.
+- Tether distance, zones, and other spatial mechanics continue updating normally while the target is
+  rooted. Root only stops the target from leaving under their own voluntary movement.

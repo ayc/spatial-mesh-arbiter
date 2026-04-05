@@ -8,7 +8,7 @@
 
 **Description:** Spatial intersection test — `is_inside_with_tolerance` for Box, Circle, Cone, and Donut/Ring geometries against entity positions.
 
-**Sketches:** SK-01 (Toss impact AoE), SK-16 (Holy Ground), SK-29 (Blizzard), SK-32 (Minefield trigger), SK-49 (Cone Strike), SK-64 (Mosh Pit), SK-85 (Ring Geometry), SK-95 (Mass Effect Detonation)
+**Sketches:** SK-01 (Toss impact AoE), SK-16 (Holy Ground), SK-29 (Blizzard), SK-32 (Minefield trigger), SK-49 (Cone Strike), SK-64 (Mosh Pit), SK-85 (Ring Geometry)
 
 **Engine layer:** `docs-core/`
 

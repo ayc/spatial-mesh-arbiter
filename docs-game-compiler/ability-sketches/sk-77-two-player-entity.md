@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-Two players share one body. Player A (Cho) controls movement and has melee/tank abilities. Player B (Gall) controls ranged/damage abilities but has no movement control. They share one HP pool, one position, and one entity — but each has their own ability bar, cooldowns, and input stream.
+Two players share one body. Player A controls movement and has tank or melee abilities. Player B
+controls ranged or damage abilities but has no movement control. They share one HP pool, one
+position, and one entity, but each has their own role-scoped ability access and input stream.
 
 ## Primitive Composition
 
@@ -12,96 +14,126 @@ P-30 (Input Multiplexing) → P-31 (Identity/Loadout Swap)
 
 ## Inputs
 
-- Two player sessions (two Edge Nodes)
+- Two player sessions
 - One shared entity
-- Player A: movement input + ability set A
-- Player B: ability set B (no movement input)
+- Role A: movement input plus role-A abilities
+- Role B: role-B abilities only
 
 ## Observable Behavior
 
-1. One entity exists on the map with a shared HP pool
-2. Player A controls movement — WASD/click-to-move
-3. Player A has tank abilities (stun, knockback, charge)
-4. Player B has damage abilities (skillshots, AoE, channel)
-5. Both players can use abilities simultaneously and independently
-6. Both players see through the same entity's position (shared camera)
-7. If the entity dies, both players die
-8. Both players respawn together at the same time
+1. One entity exists on the map with one shared HP pool and one world position
+2. Role A controls movement
+3. Role A can use the tank or melee ability subset
+4. Role B can use the ranged or damage ability subset
+5. Both players can submit legal proposals in the same tick
+6. Both players observe the same world position and die or respawn together with the shared entity
+7. Buffs, debuffs, crowd control, and incoming damage all land on the same shared body
+8. Movement from the non-movement role is rejected
 
 ## Engine Primitives Required
 
-### Two Sessions, One Entity
+Two-Players-One-Entity is now a canonical `many_to_one` control-topology pattern.
 
-SK-68 (Multi-Entity Control) breaks one-session-to-one-entity by mapping one session to three entities. Cho'Gall breaks it the OTHER direction: two sessions to one entity.
+### Shared Entity, Multiple Sessions
 
-```
-struct DualSessionBinding {
-    entity_id: EntityID,
-    session_a: SessionBinding,  // Cho — has movement + ability set A
-    session_b: SessionBinding,  // Gall — has ability set B only
-}
-```
+The game authors one `ControlTopologyDef` with:
 
-The Edge Node model must support:
-- Two clients connected to one entity
-- Input from both clients arriving at the same Arbiter for the same entity
-- Ability proposals from either client accepted and resolved independently
-- Movement input from only one client (Cho) accepted; movement from the other (Gall) rejected
+1. `mode = many_to_one`
+2. `input_policy = role_split`
+3. `elimination_policy = shared_entity_removed`
+4. one control member for each player-facing role
 
-### Input Multiplexing
+Each `ControlMemberDef` uses `control_scope` plus optional `loadout_profile_id` to define what that
+role is allowed to do:
 
-The Arbiter receives proposals from TWO Edge Nodes for the SAME entity. It must:
-1. Accept movement input from Session A only (reject movement from Session B)
-2. Accept ability proposals from Session A (ability set A) and Session B (ability set B)
-3. Validate abilities against the correct ability set per session
-4. Both ability sets share the entity's offensive/defensive stats
-5. Cooldowns are independent per ability set (Cho's stun cooldown is separate from Gall's skillshot cooldown)
+- Role A can be `full` with a loadout profile exposing movement and the tank subset
+- Role B can be `abilities_only` with a loadout profile exposing only the damage subset
 
-### Shared State, Independent Abilities
+The entity itself is still one ordinary entity. The topology only determines which session may send
+which kinds of proposals and which authored abilities are legal for each role.
 
-Both players share:
-- HP pool (one SoftState)
-- Position and movement
-- Buffs and debuffs applied to the entity
-- Defensive stats (both take damage through the same pool)
+### Shared Body, Role-Scoped Ability Access
 
-Each player owns independently:
-- Their ability set (different abilities)
-- Their cooldowns
-- Their ability-specific state (combo counters, charge counts, etc.)
+The shared entity owns:
 
-### Token Bucket Fairness
+- one HP pool
+- one position
+- one authoritative Arbiter owner
+- one status registry
+- one CC state
+- one incoming-damage and death lifecycle
 
-The per-entity token bucket limits proposals per entity. With two players sending proposals for one entity, the bucket depletes twice as fast. Should there be one bucket per entity (shared) or one per session (independent)?
+The roles own:
+
+- distinct input streams
+- distinct allowed control scopes
+- distinct allowed ability subsets through loadout profiles
+
+This is not two hidden entities fused together. It is one entity with many-to-one routing metadata.
+
+### Role-Based Proposal Admission
+
+Stage 1 tags proposals with their contributing session role before Stage 2 validation.
+
+That yields the intended behavior:
+
+1. movement proposals from Role A are legal
+2. movement proposals from Role B are rejected
+3. Role-A abilities are checked against Role A's allowed loadout subset
+4. Role-B abilities are checked against Role B's allowed loadout subset
+5. both proposal streams still resolve through the same shared entity state
+
+If both players submit legal proposals in the same tick, they are processed as ordinary routed
+proposals against the same entity. If two proposals conflict, the shared entity's normal cast,
+channel, movement, and capability rules decide which one commits or breaks.
 
 ## Cross-Boundary Concerns
 
-TODO: The entity is on one Arbiter, but TWO Edge Nodes connect to it. Both Edge Nodes send proposals to the same Arbiter. Both receive downstream payloads from the same Arbiter.
+This sketch uses the ordinary `many_to_one` routing contract.
 
-1. **Both Edge Nodes route to the same Arbiter:** Standard — both send to the entity's Arbiter.
-2. **Entity crosses a boundary:** Both Edge Nodes must be notified of the new Arbiter. Both redirect simultaneously.
-3. **Edge Node crash:** If Cho's Edge Node crashes, the entity can't move (no movement input). Gall can still cast. The entity is stranded but alive.
-4. **Edge Node disconnect:** Reconnection must restore the dual-session binding. Both players must reconnect to the same entity.
+1. Both player sessions route to the current authoritative owner of the shared entity.
+2. If the entity crosses a boundary, both sessions are redirected to the new owner together.
+3. The shared entity still has one authoritative Arbiter at a time; many-to-one does not create
+   dual authority.
+4. Reconnect re-installs the same static `control_topology` from the entity definition, so the role
+   binding survives handoff and reconnect boundaries.
+
+If one player disconnects, the entity does not die automatically. The remaining player keeps only
+their own role. There is no automatic role reassignment in this sketch.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: dual-player entity, per-player ability sets (A and B), movement restricted to player A, shared HP/stats, independent cooldowns per set. Compiler produces:
-- Entity definition with two ability sets and session-role assignments
-- Input routing rules: movement from role A only, abilities from respective roles
-- Dual-session spawn handshake (Meta creates one entity bound to two sessions)
-- Per-role ability validation in validate_intent hook
+Designer specifies:
 
-This likely requires `docs-core/` changes — the session model assumes one session per entity.
+- that the entity uses `many_to_one` control topology
+- the per-role control scopes
+- the per-role loadout profiles
+- the shared-entity elimination rule
 
-## Open Questions
+Compiler emits:
 
-- Can Cho and Gall cast abilities at the exact same tick (simultaneous proposals)?
-- If both cast abilities that conflict (Cho charges forward, Gall channels — channel requires immobility), who wins?
-- Does the entity count as one or two for Arbiter entity_count / split triggers?
-- Can SK-40 Mind Control affect Cho'Gall — does it override Cho's movement, Gall's abilities, or both?
-- Can SK-26 Silence affect only one player's abilities (silence Gall but not Cho)?
-- If one player disconnects, can the other player solo-pilot with reduced capabilities?
-- How does the spawn handshake work — does Meta create one entity or two sessions simultaneously?
-- Does each player have independent CC tracking (stun affects both, but DR tracks per-player or per-entity)?
-- Can SK-54 Entity Consumption swallow Cho'Gall (two players consumed together)?
-- Performance: two input streams for one entity — double the proposal rate, double the validation cost
+- one static `control_topology` definition with `mode = many_to_one`
+- one `members` list defining the participating roles
+- any referenced `loadout_profiles` needed to restrict ability access per role
+- Stage 1 routing metadata that attributes proposals to the correct role
+
+Compiler validates:
+
+1. `many_to_one` defines at least 2 members
+2. at most one member is marked primary
+3. at least one role provides movement or full control
+4. every referenced `loadout_profile_id` exists on the same entity definition
+5. the topology uses canonical `control_scope` restrictions rather than sketch-local role flags
+
+## Resolved Notes
+
+- The shared body counts as one entity for Arbiter load, split decisions, targeting, and KiDi.
+- The per-entity token bucket is shared because proposals still target one entity.
+- Crowd control, damage, buffs, and debuffs apply to the shared entity and therefore affect both
+  players' experience together.
+- Simultaneous casting is allowed when both routed proposals are legal under the shared body's
+  current state; otherwise ordinary validation or channel-break rules reject the conflicting action.
+- If Role A disconnects, movement stops unless another explicit game rule reassigns that role. If
+  Role B disconnects, the body still moves and Role A keeps their own role-scoped abilities.
+- This sketch no longer requires new `docs-core` session-model work. `many_to_one`,
+  `control_scope`, and role-scoped `loadout_profile_id` are already the canonical surface.

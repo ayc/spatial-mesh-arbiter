@@ -28,95 +28,71 @@ P-08 (Dynamic Collision Injection) → P-32 (Actor Spawning) → P-14 (Continuou
 
 ## Engine Primitives Required
 
-### Spatial Placement Prerequisite
+Build Zone is now a canonical `spawn_actor.coverage` provider/consumer reference.
 
-This is the first ability with a **placement restriction based on another placed entity's zone**. The turret placement validation must check:
+The recommended lowering is:
 
-```
-fn validate_turret_placement(position: Vec2F, pylons: &[PylonActor]) -> bool {
-    for pylon in pylons {
-        if pylon.is_alive && distance(position, pylon.position) <= pylon.power_radius {
-            return true;  // Within at least one pylon's field
-        }
-    }
-    false  // Not in any power field — placement denied
-}
-```
+1. pylon placement spawns one stationary provider actor that authors:
+   - `coverage = { mode = provider, network_id = pylon_power, radius = ..., member_filter = ... }`
+2. turret placement spawns one stationary consumer actor that authors:
+   - `coverage = { mode = consumer, network_id = pylon_power, require_for_spawn = true, unpowered_mode = dormant }`
+   - ordinary stationary summon AI / auto-attack behavior while powered
+3. the coverage registry handles:
+   - placement denial when no provider covers the requested spawn point
+   - repowering when a new provider appears
+   - depowering when the last covering provider disappears
 
-This validation runs during `validate_intent` for turret placement. The Arbiter needs to query all living pylons owned by the caster and check if the target position falls within any of their radii.
+This keeps the mechanic inside the canonical spawned-actor and coverage-network surfaces:
 
-### Dependency Tracking (Pylon → Turret)
-
-When a pylon dies, the engine must determine which turrets are affected:
-1. Find all turrets within the dead pylon's power radius
-2. For each affected turret: check if ANY other living pylon still covers it
-3. If no pylon covers it: deactivate the turret (change state to `Depowered`)
-4. If another pylon covers it: turret is unaffected
-
-This is a **dependency graph** between placed entities. Pylons are providers, turrets are consumers. The graph changes when:
-- A pylon is placed (new provider — reactivate turrets in its field)
-- A pylon is destroyed (lost provider — check if turrets lose coverage)
-- A turret is placed (new consumer — link to covering pylon)
-- A turret is destroyed (removed consumer)
-
-### Turret Activation State
-
-Turrets have a binary state: `Powered` or `Depowered`:
-- **Powered:** auto-attacks enemies, has shields (if applicable), fully functional
-- **Depowered:** stops attacking, loses shields, sits idle, can be re-powered
-
-Re-powering: if a new pylon is placed whose field covers a depowered turret, the turret reactivates. The engine must check turret coverage whenever a pylon is placed.
-
-### Autonomous Turret Entity
-
-The turret itself is an Arbiter-local NPC with simple AI:
-- Stationary (never moves)
-- Acquires nearest enemy in range
-- Auto-attacks at a fixed interval
-- Has HP, can be destroyed
-- Deactivates when depowered
-
-Similar to SK-06 Summon Swarm minions but stationary and with the pylon dependency.
+- pylons are just spawned provider actors
+- turrets are just spawned consumer actors
+- overlap safety is the ordinary "at least one admitted provider covers this consumer" rule
+- depowered behavior reuses canonical dormancy / suspension rather than a bespoke build graph
 
 ## Cross-Boundary Concerns
 
-TODO: Pylons and turrets are stationary structures. Cross-boundary concerns:
+Coverage is already defined as a single-authority cross-boundary registry.
 
-1. **Pylon near boundary:** The power field extends in a radius. Turrets on the other side of a boundary could be "within" the power field geometrically, but they're on a different Arbiter. Does the power field cross boundaries? If not, turrets must be on the same Arbiter as their powering pylon.
-
-2. **Pylon on Arbiter A, turret on Arbiter B:** If allowed, pylon death on A must notify B to deactivate the turret. Cross-boundary dependency.
-
-3. **Topology change:** If a split divides a pylon and its turrets onto different Arbiters, the dependency graph becomes cross-boundary.
-
-Simpler approach: require turrets and their powering pylon to be on the same Arbiter. The power field radius is small enough (similar to `max_spell_range`) that this is reasonable.
+1. Provider actors publish their coverage disc from their current position.
+2. Consumer owners evaluate powered state from local providers plus Ghost-backed provider poses with
+   the same `network_id`.
+3. A pylon near a seam may therefore still power a turret across the boundary without introducing a
+   shared mutable field object.
+4. On provider spawn, removal, handoff, or position change, consumer owners recompute powered state
+   through the canonical coverage contract.
 
 ## Compiler Requirements
 
-TODO: Designer specifies:
-- Pylon: placed structure, HP, power field radius, team-restricted
-- Turret: placed structure, HP, auto-attack stats, REQUIRES pylon coverage for placement and operation
-- Pylon death → coverage check → deactivate uncovered turrets
-- New pylon → coverage check → reactivate depowered turrets in range
+Designer specifies:
 
-Compiler produces:
-- PylonActor entity definition (HP, power_radius, team)
-- TurretActor entity definition (HP, attack stats, powered/depowered state, auto-attack AI)
-- Placement validation: turret requires pylon coverage
-- Pylon death hook: coverage recalculation for affected turrets
-- Pylon creation hook: coverage recalculation for depowered turrets
-- Dependency graph maintenance
+- pylon HP and coverage radius
+- turret HP and stationary attack behavior
+- whether turret spawn requires live coverage
+- whether unpowered turrets become `dormant` or `suspended`
 
-The compiler needs to support **inter-entity spatial dependencies** — placed entities whose operational state depends on proximity to other placed entities.
+Compiler emits:
 
-## Open Questions
+- one provider spawn profile for pylons
+- one consumer spawn profile for turrets
+- ordinary stationary summon AI for the powered turret
+- optional live-count caps if the design wants bounded pylon/turret counts per owner
 
-- Is there a maximum number of pylons and turrets per caster?
-- Can enemies see the power field boundaries (revealing where turrets can be placed)?
-- Can turrets be placed outside of combat (pre-positioning for defense)?
-- Do depowered turrets have reduced HP or become destructible more easily?
-- Can a depowered turret be manually destroyed by the owning caster (to reclaim a build slot)?
-- Does the turret inherit any of the caster's stats (damage scales with caster's offensive stats)?
-- Can the pylon itself be attacked while powered turrets are near it (turrets defend their pylon)?
-- How do pylons/turrets interact with SK-03 Terrain Wall (can you wall off a pylon fortress)?
-- Do pylons and turrets count toward entity_count for Arbiter split triggers?
-- Can the caster have pylons on multiple Arbiters (global building strategy)?
+Compiler validates:
+
+1. provider `radius > 0`
+2. provider `member_filter` is present
+3. turret placement uses `require_for_spawn = true` in this reference
+4. the powered/depowered rule is expressed through canonical coverage + dormancy/suspension, not a
+   bespoke dependency-graph subsystem
+
+## Resolved Interaction Notes
+
+- Overlapping pylons work automatically because any one covering provider keeps the turret powered.
+- Destroying one pylon only depowers a turret if no other provider in the same network still covers
+  it.
+- Re-power is automatic when a new pylon enters coverage; the turret does not need a second spawn
+  or rebuild step.
+- This reference uses `unpowered_mode = dormant`, so a depowered turret stops acting and its
+  powered passives/shields pause through the existing suspension contract.
+- Pylons and turrets remain ordinary spawned actors and therefore count toward the same spawned-actor
+  limits and entity-load considerations as other placed structures.

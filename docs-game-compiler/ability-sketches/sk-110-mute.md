@@ -28,87 +28,79 @@ P-26 (Capability Bitmask)
 
 ## Engine Primitives Required
 
-### New Capability Suppression: Passive Mute
+Mute is already one of the canonical `apply_cc` behavior profiles.
 
-Complete capability suppression matrix:
+The recommended lowering is:
 
-| Flag | Suppresses |
-|---|---|
-| `can_move: false` | Voluntary movement (Root SK-25) |
-| `can_attack: false` | Auto-attacks (Disarm SK-102) |
-| `can_cast: false` | Active ability casts (Silence SK-26) |
-| **`passives_active: false`** | **Passive abilities + item effects (Mute SK-110)** |
+1. apply one hostile CC with:
+   - `cc_type = mute`
+   - `category = mute`
+   - `duration_ticks = ...`
+   - `duration_scaling = status_resistance` or `fixed`, depending on the design
+2. let the generated negative status use the canonical mute profile:
+   - clear `PASSIVES_ACTIVE` while the status is present
+   - suspend passive statuses, aura pulses, passive item effects, and passive proc registrations
+   - resume them when the status ends instead of removing and rebuilding them from scratch
+3. if the design is Doom-style "mute plus silence," author a sibling `apply_cc(cc_type = silence, ...)`
+   instead of inventing a bespoke combined suppression type
 
-```
-status_effect: MuteDebuff {
-    expires_at_tick: u64,
-    also_silenced: bool,  // Doom: mute + silence combined
-}
-```
+This keeps the mechanic entirely inside the canonical CC / capability surface:
 
-When `passives_active: false`:
-- All passive status effects owned by the entity are SUSPENDED (not removed — they resume when mute ends)
-- SK-08 Aura: stops pulsing, enemies in range lose the aura debuff
-- SK-23 Thorns: stops triggering on being hit
-- SK-22 Damage Reflection: stops reflecting
-- Passive regen: stops regenerating HP/mana
-- Item on-hit effects: stop triggering
-- Item passive auras: stop applying
-- Any "always-on" effect: paused
-
-### Passive Suspension vs Removal
-
-Mute SUSPENDS passives — it doesn't REMOVE them. When mute expires:
-- All suspended passives resume from where they left off
-- SK-08 Aura immediately resumes pulsing
-- Item effects immediately reactivate
-
-This is different from SK-15 Purify (which REMOVES effects permanently). Mute pauses; Purify deletes.
-
-### Classification: What Is a "Passive"?
-
-The engine (and compiler) must classify every effect as:
-- **Active**: requires player input to trigger (ability casts, auto-attacks)
-- **Passive**: functions automatically without player input (auras, procs, regen, item effects)
-
-Mute disables passives. Silence disables actives. Both together = almost everything disabled.
-
-The compiler must tag every ability and effect with `is_passive: bool` at compile time. At runtime, the Arbiter checks: is the entity muted? If yes, skip all passive effect evaluations.
-
-### Per-Tick Passive Evaluation Skip
-
-Each tick, the Arbiter evaluates passive effects for each entity:
-- Tick auras (SK-08)
-- Check reactive procs (SK-23 Thorns, SK-22 Reflection)
-- Apply passive regen
-- Evaluate item effects
-
-When muted, the Arbiter SKIPS all of these for the affected entity. The skip is a single flag check at the start of passive evaluation.
+- mute is not a second passive-disable subsystem
+- passive suspension is driven by the canonical `PASSIVES_ACTIVE` bit
+- compile-time passive classification already exists through `StatusEffectDefinition.is_passive`
+- mute and silence remain separable because `mute` only suspends passives; it does not inherently
+  suppress active casts
 
 ## Cross-Boundary Concerns
 
-TODO: Mute is a status effect on the target's entity. All passive suppression is local to the target's Arbiter. No special cross-boundary handling beyond the initial debuff application relay.
+Mute follows the canonical target-owner CC contract.
 
-One concern: if the muted entity's SK-08 Aura was affecting Ghosts on neighboring Arbiters, muting the aura means those Ghosts stop receiving aura effects. The neighbors need to know the aura stopped. Does the aura cessation propagate via Ghost updates, or do neighbors continue applying a stale aura until the next Ghost update reveals the aura is gone?
+1. The target's current owner admits the mute status through the ordinary CC relay path.
+2. While the status is active, that owner clears `PASSIVES_ACTIVE` during passive evaluation and
+   stops emitting passive outputs from that entity.
+3. Remote observers and neighboring Arbiters do not need a second "mute passive off" protocol.
+   Aura loss, passive proc removal, and other downstream effects disappear through the same
+   authoritative status/output replication path that already carries passive state.
+4. If the target hands off mid-mute, the generated status transfers as ordinary SoftState and the
+   new owner continues the same passive-suspension behavior.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target debuff, duration, disable all passive abilities, disable all item passive effects, optionally also silence (disable active abilities), suspends (not removes) passives, resumes on expiry. Compiler produces:
-- MuteDebuff status effect with `passives_active: false`
-- Per-tick passive evaluation skip when muted
-- Passive/active classification on all abilities and effects at compile time
-- Suspension semantics (passives resume on mute expiry, not restart)
+Designer specifies:
 
-The compiler adds `is_passive: bool` to every ability and effect definition. The engine checks this flag during passive evaluation.
+- duration
+- whether mute is cleansable
+- whether it uses ordinary status-resistance duration scaling
+- whether a sibling silence is also applied
 
-## Open Questions
+Compiler emits:
 
-- Does mute disable passive stat bonuses from items (flat +damage from equipment) or only proc effects?
-- Does mute disable SK-37 Time Rewind's rolling buffer recording (it's a passive recording)?
-- Does mute disable SK-45 Essence Collection's passive pickup (walking over orbs)?
-- Does mute disable SK-100 Ally-Untargetable's permanent CC immunity (it's a permanent passive)?
-- If the muted entity has SK-70 Energy Shield active, does the Energy decay still happen (is decay a passive)?
-- Does mute affect summoned entities (SK-06 minions lose their AI while owner is muted)?
-- Can mute and silence be applied independently (mute passives but allow casting)?
-- Is mute subject to Tenacity/Diminishing Returns, or is it a unique debuff category?
-- Does SK-51 Unstoppable prevent mute (mute isn't CC — it's capability suppression)?
+- one hostile `apply_cc` with `cc_type = mute`
+- the generated negative status carrying canonical mute behavior metadata
+- any optional sibling silence application if the design wants Doom-style active-cast lockout too
+
+Compiler validates:
+
+1. `cc_type = mute` pairs only with `category = mute`
+2. the mechanic is expressed through canonical `apply_cc`, not a bespoke per-effect passive
+   blacklist
+3. passive suppression relies on `PASSIVES_ACTIVE` and compiled passive metadata, not on deleting
+   passive statuses from the registry
+
+## Resolved Interaction Notes
+
+- Base stats remain. Mute suspends passive statuses and passive item effects, not the entity's base
+  definition data.
+- Passive stat bonuses that are authored as passive statuses or passive item effects are suspended
+  while mute is active and resume afterward.
+- `SK-100 Ally-Untargetable` is authored as a permanent passive status, so its CC-immunity layer is
+  suspended while muted.
+- Mute does not automatically affect summoned entities owned by the target. It is a per-entity
+  status on the muted target, not an owner-wide pet command.
+- Mute and silence can be applied independently. Mute alone still allows active casting unless a
+  sibling silence or other cast suppression is also present.
+- Because mute is canonical CC in the `mute` category, Unstoppable / CC-immunity effects that block
+  `mute` reject it on admission the same way they reject other supported CC categories.
+- Duration scaling and DR are ordinary authored CC metadata for this reference; mute does not need
+  a bespoke duration system.

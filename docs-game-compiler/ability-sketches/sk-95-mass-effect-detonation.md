@@ -2,100 +2,127 @@
 
 ## Designer Intent
 
-I have two abilities that apply effects to enemies and allies. My trait is a DETONATOR — when I press D, every active instance of my effects across all targets simultaneously triggers a burst effect. Healing effects burst-heal, damage effects burst-damage + root. One button, every target, all at once.
+I apply persistent effects to multiple allies and enemies. When I activate my detonation trait, all
+matching active instances of those effects that I own burst simultaneously across the battlefield:
+healing primers burst-heal, offensive primers burst-damage and root, then the consumed primers are
+removed.
 
 ## Primitive Composition
 
-P-16 (Stat Layering) → P-09 (Shape Overlap Query) → P-64 (Combo Field × Finisher Matrix)
+P-46 (Global Event Scheduler) → P-66 (Status Effect Filter Mutation) → P-16 (Stat Layering)
 
 *See `ability-primitives/` for canonical definitions.*
 
 ## Inputs
 
 - Caster entity
-- No target (global — detonates ALL active instances of caster's effects)
+- No direct target; the detonate cast is a global self activation
+- One or more status IDs that this ability detonates
+- Per-status consume payloads (heal burst, damage burst, root, etc.)
 
 ## Observable Behavior
 
-1. Over time, I've applied Healing Pathogen to 4 allies and Weighted Pustule to 3 enemies
-2. Press D — ALL 7 effects detonate simultaneously
-3. Each Healing Pathogen: burst-heals the ally for a large amount, then the HoT is removed
-4. Each Weighted Pustule: burst-damages + roots the enemy for 1.5 seconds, then the slow is removed
-5. Effects that were about to expire still detonate (maximum value extraction)
-6. After detonation: all effects are consumed — targets are clean
-7. Visual: simultaneous burst effects on every affected target across the battlefield
+1. Over time, the caster applies `Healing Pathogen` to allies and `Weighted Pustule` to enemies
+2. When the caster presses the detonate ability, one coordinated global detonation tick is
+   scheduled
+3. At that execute tick, every Arbiter checks its OWN authoritative targets for matching status
+   instances from THIS caster and consumes them atomically
+4. On the immediately following simulation tick, each consumed `Healing Pathogen` instance resolves
+   its authored burst heal
+5. On the immediately following simulation tick, each consumed `Weighted Pustule` instance resolves
+   its authored burst damage + root
+6. Targets without matching status instances from this caster are unaffected
+7. After detonation, the consumed primer statuses are gone
+8. Visual: all qualifying targets burst in one coordinated battlefield-wide resolution window
 
 ## Engine Primitives Required
 
-### Global Effect Query by Caster
+Mass Effect Detonation is now a canonical mesh-wide status-consumption pattern. It does not need a
+source-side "caster effect registry."
 
-The detonation needs to find ALL active status effects owned by this caster across ALL targets. This requires either:
+### Canonical Authoring Shape
 
-**Option A: Caster-tracked effect registry**
-```
-struct CasterEffectRegistry {
-    active_effects: Vec<(EntityID, EffectId, EffectType)>,
-    // target_entity_id, effect_instance_id, type (for detonation behavior)
-}
-```
-The caster maintains a list of all effects they've applied. On detonation, iterate the list and trigger each one.
+The detonate ability should lower to:
 
-**Option B: Per-entity scan**
-On detonation, the Arbiter scans ALL entities for effects owned by this caster. Expensive but doesn't require a separate registry.
+- one `global_event` block with:
+  - `schedule_lead_ticks = 1`
+  - `geometry = whole_mesh`
+  - `target_class` and `filter` authored to include every entity type that may legally host the
+    relevant primer statuses
+- one `consume_status` effect per detonatable primer status, for example:
+  - `consume_status(target = target, status_id = healing_pathogen, source_entity = caster, on_consume_effects = [burst_heal ...])`
+  - `consume_status(target = target, status_id = weighted_pustule, source_entity = caster, on_consume_effects = [burst_damage ..., apply_cc root ...])`
 
-Option A is better — bounded cost, O(N) where N is the number of active effects.
+This keeps the mechanic target-side authoritative:
 
-### Simultaneous Multi-Target Resolution
+1. the target owner already has the active status registry
+2. each status instance already stores the original source/applier identity
+3. exact-match source filtering happens where the status actually lives
 
-The detonation triggers on multiple targets at the same tick. Each target's detonation resolves independently:
-- Ally with Healing Pathogen: burst heal
-- Enemy with Weighted Pustule: burst damage + root
+### Why No Caster-Owned Registry Is Needed
 
-All resolutions must happen in the same tick for the "simultaneous" feel. The Arbiter processes them sequentially (deterministic order) but they all resolve within one tick.
+The older sketch assumed the caster needed to track every active status instance across the mesh.
+That is no longer the preferred model.
 
-### Cross-Entity Effect Ownership
+Instead:
 
-Status effects must carry `caster_id` — who applied this effect. This is needed for:
-1. Detonation: only detonate effects from THIS caster
-2. Kill credit: damage from detonated effects credits the caster
-3. Proc attribution: detonation damage triggers the caster's on-hit procs
+1. the detonate cast schedules one coordinated `P-46` execute tick
+2. every Arbiter evaluates its local authoritative targets at that tick
+3. `consume_status` removes exact `(status_id, source_entity)` matches from the target's registry
+4. if any match was consumed, the authored consume payload is queued for the NEXT tick in that same
+   target context
 
-Most effects already carry `caster_id` for damage attribution. The detonation mechanic makes this field CRITICAL for the mass-query pattern.
+This avoids stale source-side membership tracking when targets hand off between Arbiters.
 
 ## Cross-Boundary Concerns
 
-TODO: The caster's effects may be active on targets across multiple Arbiters:
-- Ally on Arbiter A has Healing Pathogen
-- Enemy on Arbiter B has Weighted Pustule
-- Enemy on Arbiter C has Weighted Pustule
+The cross-boundary story is the ordinary `P-46` plus target-side status-ownership contract.
 
-On detonation, the caster's Arbiter must:
-1. Query the caster's effect registry
-2. For local targets: detonate directly
-3. For cross-boundary targets: relay "detonate effect X on entity Y" to the target's Arbiter
-
-This is a **fan-out detonation** — one command produces N relays to potentially N different Arbiters. Bounded by the number of active effects (typically < 10).
-
-The caster's effect registry must track which Arbiter each target is on. If a target crossed a boundary (entity handoff), the registry must update the Arbiter reference.
+1. The caster's owner does NOT fan out bespoke "detonate target X" relays to every Arbiter
+2. The detonate cast escalates once through `global_event`
+3. At execute time, each Arbiter evaluates only its OWN authoritative targets
+4. Handoffs before the execute tick are naturally handled because the status registry lives with the
+   target's current owner
+5. Source ownership still filters correctly because status instances preserve their original
+   source/applier identity even after handoff
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trait activation (detonate all active effects), per-effect-type detonation behavior (Pathogen: burst heal + remove, Pustule: burst damage + root + remove), global scope (all targets, any distance). Compiler produces:
-- Effect definitions with detonation behavior
-- CasterEffectRegistry for tracking active effect instances
-- Detonation action: query registry → trigger each effect's detonation behavior → remove effects
-- Cross-boundary relay for remote detonation
+Designer specifies:
 
-The compiler needs to support **effect detonation callbacks** — effects that have a "detonate" action in addition to their normal tick/expiry behavior.
+- the detonate ability activation
+- which status IDs are detonatable by this ability
+- the consume payload for each detonated status family
+- the execute scope/filter for the global event
 
-## Open Questions
+Compiler emits:
 
-- Does detonation count as "damage from caster" for SK-02 Poison Shot refresh and similar triggers?
-- Does the burst heal from detonated Pathogen go through SK-92 Anti-Heal?
-- Can the detonation be activated while the caster is CC'd (stunned, silenced)?
-- If a target with an active effect dies before detonation, is the effect removed from the registry?
-- Does detonation trigger on-hit procs per target (SK-09 Chain Lightning per enemy detonated)?
-- Can the caster detonate selectively (only Pathogens, only Pustules), or is it always all?
-- Does the root from Pustule detonation go through DR (SK-28)?
-- What happens if a detonated effect is on an entity in SK-91 Stasis (timers paused)?
-- If the caster has effects on 20 targets across 5 Arbiters, is the 5-way fan-out relay within acceptable traffic bounds?
+- one controller-escalated `global_event` for the detonate cast
+- one exact-match `consume_status` mutation per detonatable status family
+- status-consumption follow-up payloads in ordinary authored effect form
+- no sketch-local status registry or one-off relay subsystem
+
+Compiler validates:
+
+1. every referenced `status_id` exists
+2. duplicate `consume_status` entries against the same `(status_id, source_entity)` pair in one
+   ability are rejected
+3. the detonate ability's `global_event` target filter is compatible with the entity types expected
+   to carry the referenced statuses
+4. every consume payload is expressible as ordinary authored effects under the existing compiler
+   surface
+
+## Resolved Notes
+
+- Detonation only affects statuses applied by THIS caster because `consume_status` matches both
+  `status_id` and stored source identity
+- Detonation is not selective in this sketch. Activating the trait consumes every authored primer
+  family on every qualifying target
+- The burst heal and burst damage/root follow ordinary healing, damage, anti-heal, CC-immunity,
+  DR, kill-credit, and proc-attribution rules because they are just normal authored effects
+- Because `consume_status` is a Stage 11 registry mutation, the primer removal is committed on the
+  execute tick and the burst payload lands on the immediately following simulation tick
+- If a target dies or loses the relevant status before the execute tick, nothing detonates on that
+  target
+- This sketch's map-wide profile is why `P-46` is part of the canonical primitive chain here; a
+  local-radius variant could be authored differently, but this reference is explicitly whole-mesh

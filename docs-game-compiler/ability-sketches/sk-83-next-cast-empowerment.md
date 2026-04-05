@@ -30,67 +30,76 @@ P-16 (Stat Layering) → P-40 (On-Cast Intercept)
 
 ## Engine Primitives Required
 
-### Cross-Ability Modifier Buff
+Next-Cast Empowerment is now the canonical `consumption_window = cast_ability` pattern.
 
-This is the first ability where a **buff modifies OTHER abilities' resolution**. Existing buffs modify stats (attack speed, damage, movement speed) or suppress capabilities (CC). This buff modifies the BEHAVIOR of the next ability used.
+The recommended lowering is:
 
-```
-status_effect: EmpowermentBuff {
-    expires_at_tick: u64,
-    consumed: bool,
-    // Per-ability enhancement definitions:
-    q_enhancement: Option<AbilityModifier>,
-    w_enhancement: Option<AbilityModifier>,
-    e_enhancement: Option<AbilityModifier>,
-}
+1. the trait activation applies one positive `Empowered` status for 360 ticks
+2. that status authors:
+   - `consumption_window = {`
+     `consume_on = cast_ability,`
+     `allowed_abilities = [Q, W, E],`
+     `max_consumptions = 1,`
+     `consume_only_on_success = true,`
+     `ability_overrides = [`
+     `{ ability_id = Q, damage_multiplier = ..., radius_multiplier = ... },`
+     `{ ability_id = W, add_effects = [...] },`
+     `{ ability_id = E, replace_effects = [...] or add_effects = [...] }`
+     `]`
+     `}`
 
-enum AbilityModifier {
-    DamageMultiplier(SimFixed),
-    RadiusMultiplier(SimFixed),
-    AddEffect(StatusEffectDefinition),  // e.g., add stun to an ability that normally doesn't stun
-    ReplacePayload(ActionPayload),      // Completely different ability behavior
-}
-```
+This keeps the mechanic entirely inside the canonical status/consumption-window surface. The
+empowerment is not a bespoke cross-ability modifier subsystem. It is just a bounded status that:
 
-### Stage Execution Integration
-
-When the adapter processes an ability through its stage-execution path:
-1. Check: does the caster have an EmpowermentBuff?
-2. If yes: look up the enhancement for this specific ability
-3. Apply the modifier to the ability's resolution (bigger AoE, more damage, extra CC)
-4. Consume the buff (remove it, mark as used)
-5. If no: resolve normally
-
-The enhancement must be checked BEFORE the ability resolves — it modifies the resolution parameters, not the outcome.
-
-### Selective Enhancement
-
-Each ability (Q, W, E) has a DIFFERENT enhancement. The empowerment buff must carry per-ability modifier data. The compiler pre-defines what each ability looks like when empowered. At runtime, the Arbiter reads the modifier for the specific ability being cast.
-
-This is different from a flat damage buff (which affects all abilities equally). The empowerment is ability-specific and can fundamentally change behavior (add CC, change targeting, etc.).
+- watches for the next successful cast of one of the allowed abilities
+- applies the compiled override for that specific ability before the cast resolves
+- consumes itself after the first successful qualifying cast or on ordinary status expiry
 
 ## Cross-Boundary Concerns
 
-TODO: Minimal. The empowerment buff is on the caster's entity (local SoftState). When the caster casts an empowered ability targeting a Ghost (cross-boundary), the enhanced CombatContext is pre-rolled on the caster's Arbiter with the modifier applied, then relayed normally. The target's Arbiter doesn't need to know the ability was empowered.
+The cross-boundary story is the ordinary one for status-owned cast modification.
+
+1. The empowerment status lives on the caster's current authoritative owner.
+2. `consume_on = cast_ability` is checked there in Stage 2 after activation-mode selection but
+   before the consuming cast resolves.
+3. If the consuming cast targets a Ghost/remote entity, the empowered damage/radius/effect payload
+   is already compiled into that cast before any later hostile relay occurs.
+4. The remote target owner does not need a separate "empowered cast" contract; it simply resolves
+   the already-enhanced cast payload through ordinary defense / admission rules.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trait activation (applies empowerment buff), per-ability enhancements (Q: bigger AoE, W: extra targets, E: add stun), buff duration (6s), consumed on first ability cast, one empowerment per activation. Compiler produces:
-- EmpowermentBuff status effect with per-ability modifiers
-- Per-ability enhancement definitions (how each ability changes when empowered)
-- Stage execution logic: check for empowerment → apply modifier → consume
-- Two versions of each ability in SpellData: normal and empowered (or: one version with conditional modifier)
+Designer specifies:
 
-The compiler needs to support **ability modifiers** — data that transforms an ability's parameters at resolution time based on active buffs. This is a general mechanism that could support many "enhance next cast" patterns.
+- empowerment duration
+- which abilities are eligible to consume it
+- per-ability override payloads (damage/radius multipliers, added effects, or replacement effects)
+- whether the status is cleansable
 
-## Open Questions
+Compiler emits:
 
-- Can the empowerment be consumed by auto-attacks, or only Q/W/E abilities?
-- If SK-12 Spell Echo triggers, does the echo also benefit from the empowerment (consumed on first cast, echo is the second)?
-- Can enemies cleanse the empowerment buff (removing it before it's used)?
-- If the caster is silenced (SK-26) while empowered, does the timer keep ticking (wasting the empowerment)?
-- Can multiple empowerment buffs stack (activate trait twice quickly)?
-- Does the empowered ability have a different cooldown than the normal version?
-- How does the UI communicate which abilities are enhanced (all three glow? Or just a generic indicator)?
-- Can SK-67 Entity Clone use the empowerment (clone has the caster's buffs)?
-- Does the empowerment modify the ability BEFORE or AFTER other damage modifiers (SK-14 Execute Threshold)?
+- one positive empowerment status
+- one `consumption_window` on that status with `consume_on = cast_ability`
+- one compiled override table keyed by ability ID
+- one consume-on-success rule with `max_consumptions = 1`
+
+Compiler validates:
+
+1. every `ability_id` referenced in `ability_overrides` exists
+2. every `allowed_abilities` entry exists
+3. the empowerment is expressed through `consumption_window` rather than by duplicating empowered
+   shadow copies of every affected ability as separate public skills
+4. `max_consumptions = 1` for this sketch's one-shot empower semantics
+
+## Resolved Interaction Notes
+
+- Only the authored Q/W/E abilities consume the empowerment in this reference. Auto-attacks do not.
+- The empowerment is consumed on the first successful qualifying cast. Replay mechanics such as
+  Spell Echo do not consume a second stack because the status is already gone after the root cast.
+- The empowerment status is cleansable if the designer leaves the positive status cleansable.
+- Silence and other ordinary cast denial do not pause the 6-second timer. Only canonical timer-pause
+  states such as `stasis` do that.
+- This reference is non-stacking: reapplying the empowerment refreshes/replaces the existing one
+  rather than keeping multiple next-cast windows alive.
+- The override is applied before the consuming cast resolves, so all later damage / radius / proc
+  logic sees the empowered version of the cast as the base event.

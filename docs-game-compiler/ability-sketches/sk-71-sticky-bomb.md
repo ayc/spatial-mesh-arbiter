@@ -27,60 +27,85 @@ P-06 (Attached Kinematics) → P-45 (Delay Timer) → P-09 (Shape Overlap Query)
 
 ## Engine Primitives Required
 
-### Entity-Attached Delayed Effect
+Sticky Bomb is now a canonical projectile-attachment delayed detonation.
 
-Unlike SK-29 Blizzard (AoE at a fixed position) or SK-02 Poison Shot (DoT on a target), the Sticky Bomb is a **delayed AoE whose position is determined at detonation time, not at cast time**:
+The recommended lowering is:
 
-```
-status_effect: StickyBomb {
-    caster_id: EntityID,
-    detonation_tick: u64,
-    aoe_radius: SimFixed,
-    aoe_damage: SimFixed,
-    combat_context: CombatContext,  // Pre-rolled at cast time
-}
-```
+1. one ordinary targeted projectile spawn
+2. a projectile archetype with:
+   - `attachment_policy = {`
+     `delay_ticks = 120,`
+     `follow_attached_entity = true,`
+     `on_carrier_loss = last_known_position,`
+     `preserve_original_payload = true`
+     `}`
+   - a carried detonation payload that resolves one hostile radius query from the detonation center
+3. a hostile/direct-hit branch in that payload so the carrier takes the primary hit and nearby
+   hostile neighbors take the AoE splash
 
-The key difference from a DoT: a DoT applies damage directly to the carrier. The Sticky Bomb applies AoE damage at the carrier's position — affecting OTHER entities nearby. The bomb is both a debuff on the carrier AND a deferred AoE centered on a moving entity.
+The important point is that the bomb is not modeled as a generic cleansable debuff. It is an
+attached delayed projectile payload owned by the struck entity's current Arbiter. The carrier's
+movement, teleports, pulls, and ordinary handoffs simply move the future detonation center because
+`follow_attached_entity = true`.
 
-### Detonation Resolution
-
-On detonation tick:
-1. Read the carrier's current position
-2. Perform spatial query: all enemies within `aoe_radius` of carrier's position
-3. Apply damage to the carrier (guaranteed hit)
-4. Apply AoE damage to all other enemies in radius
-5. Remove the bomb effect
-
-This is a spatial query anchored to an entity's position at a future tick — not a fixed position. The carrier could be anywhere on the map by detonation time.
-
-### Interaction With Displacement
-
-The bomb creates emergent gameplay because the target is incentivized to move AWAY from allies. Displacement abilities interact interestingly:
-- SK-01 Toss: ally tosses the bombed enemy into the enemy team → the bomb detonates among enemies (combo play)
-- SK-43 Drag: drag the bombed enemy toward you → bomb detonates on your team (anti-combo)
-- SK-35 Blink Strike: bombed enemy blinks away from allies → solo detonation
+At expiry, the carrier owner reads the carrier's CURRENT position, resolves the authored hostile
+AoE from there, applies the primary hit to the carrier when the carrier is still present, and then
+removes the attached payload.
 
 ## Cross-Boundary Concerns
 
-TODO: The bomb effect lives on the carrier's entity (their Arbiter). On detonation, the AoE spatial query is local to the carrier's Arbiter + Ghosts. If the carrier moved cross-boundary since the bomb was attached, the detonation happens on their current Arbiter — not the caster's. The CombatContext carries the caster's offensive stats (pre-rolled), so damage is resolved correctly regardless of which Arbiter the detonation occurs on.
+Sticky Bomb follows the canonical attachment-owner model.
 
-The caster doesn't need to be involved at detonation — the bomb is a self-contained delayed effect on the carrier.
+1. The initial projectile impact attaches on the struck entity's CURRENT owner.
+2. If the carrier later hands off, the attached timed payload hands off with the carrier as ordinary
+   authoritative SoftState.
+3. At detonation time, the carrier's CURRENT owner performs the local radius query and resolves the
+   hostile payload from the carrier's CURRENT position.
+4. The original caster does not need to stay involved. Offensive payload and source identity were
+   already baked into the carried projectile payload when the impact attached.
+5. If the carrier dies or is otherwise removed before detonation, `on_carrier_loss =
+   last_known_position` means the explosion still resolves once at the carrier's last authoritative
+   position instead of silently fizzling.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (enemy), attachment (follows target movement), detonation delay (2s), AoE radius, AoE damage, target takes full damage, cleansable (yes/no). Compiler produces:
-- Status effect with detonation timer + AoE parameters + CombatContext
-- On-expiry hook: spatial query at carrier's current position → AoE damage
-- Pre-rolled CombatContext at cast time (epoch-pinned)
+Designer specifies:
 
-## Open Questions
+- hostile target admit
+- detonation delay
+- whether the payload follows the attached carrier
+- primary-hit damage and splash payload
+- splash radius and hostile filter
+- carrier-loss rule
 
-- Can the bomb be cleansed by SK-15 Purify? If yes, the bomb is removed without detonating.
-- Does the detonation AoE damage allies of the bomber (the caster's team) — i.e., is it enemy-only?
-- Can the bomb be applied to untargetable entities (SK-44 Burrow)? If the target burrows after being bombed, does it detonate underground?
-- If the carrier dies before detonation, does the bomb detonate at the death position or fizzle?
-- Does the bomb damage trigger on-hit procs for the caster (SK-09 Chain Lightning)?
-- Can multiple sticky bombs be on the same target simultaneously?
-- Does the AoE damage hit the caster if they're near the target at detonation?
-- How does the bomb interact with SK-54 Entity Consumption — if the carrier is consumed, does the bomb detonate inside the consumer?
+Compiler emits:
+
+- one targeted projectile spawn
+- one projectile archetype with canonical `attachment_policy`
+- one attached delayed payload owned by the carrier's CURRENT owner
+- one expiry-time hostile radius query centered on the carrier's CURRENT position
+- one fallback detonation-at-last-known-position rule for carrier loss
+
+Compiler validates:
+
+1. `delay_ticks > 0`
+2. the projectile impact path is attachment-driven rather than a bespoke per-target timer subsystem
+3. any carrier-loss fallback is one of the canonical `attachment_policy.on_carrier_loss` modes
+4. the splash payload uses ordinary hostile filters and effect lists rather than sketch-local
+   "sticky bomb" special casing
+
+## Resolved Interaction Notes
+
+- This reference is not cleansable. The bomb is an attached projectile payload, not a negative
+  status participating in generic `cleanse`.
+- The explosion is hostile-relative-to-caster, so it damages the carrier and nearby enemies of the
+  bomber. It does not damage the bomber's allies unless a different filter is authored.
+- If the carrier later becomes untargetable, suspended, or otherwise harder to affect, the attached
+  payload still expires on schedule. Ordinary target-side immunity / admission rules still apply to
+  the final direct hit and splash at detonation time.
+- If the carrier dies before expiry, the reference behavior is still one last explosion at the
+  carrier's last authoritative position.
+- Multiple sticky bombs may coexist on one carrier unless the game authors an additional live-limit
+  or replacement rule elsewhere.
+- The detonation payload is an ordinary hostile effect list, so normal downstream procs and kill
+  credit follow the same rules as other authored AoE payloads.

@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "memory-bank/README.md",
+                "file": "memory-bank/ENGINE_ROADMAP.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "README"
+              "title": "ENGINE_ROADMAP"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "memory-bank/README.md",
+                "file": "memory-bank/ENGINE_ROADMAP.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for README"
+              "title": "Backlinks for ENGINE_ROADMAP"
             }
           },
           {
@@ -113,12 +113,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "memory-bank/README.md",
+                "file": "memory-bank/ENGINE_ROADMAP.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from README"
+              "title": "Outgoing links from ENGINE_ROADMAP"
             }
           },
           {
@@ -156,13 +156,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "memory-bank/README.md",
+                "file": "memory-bank/ENGINE_ROADMAP.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of README"
+              "title": "Outline of ENGINE_ROADMAP"
             }
           }
         ]
@@ -185,41 +185,41 @@
   },
   "active": "ef25a393f2f7d85c",
   "lastOpenFiles": [
-    "memory-bank/ENGINE_ROADMAP.md",
     "memory-bank/DECISIONS.md",
     "memory-bank/ACTIVE_WORK.md",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "docs-game-compiler/ability-sketches/COMPILER_GAP_REGISTER.md",
-    "docs-game-compiler/ability-sketches/COMPILER_COMPATIBILITY_CHECKLIST.md",
-    "docs-game-compiler/ability-sketches/COMPLETION_CHECKLIST.md",
+    "memory-bank/SUMMARY.md",
+    "memory-bank/SESSION_HANDOFF.md",
+    "memory-bank/README.md",
+    "memory-bank/ENGINE_ROADMAP.md",
+    "memory-bank/work-log/2026-04-05.md",
+    "adr/README.md",
+    "adr/compiler/ADR-0007-target-side-status-consumption-for-mass-detonation.md",
+    "adr/compiler/ADR-0006-control-projection-teardown-callbacks.md",
+    "adr/compiler/ADR-0005-combo-field-replacement-sequencing.md",
+    "adr/compiler/ADR-0004-late-bound-actor-transit.md",
+    "adr/compiler/ADR-0003-category-scoped-cleanse.md",
+    "adr/compiler/ADR-0002-shield-absorb-resource-offense-loop.md",
+    "adr/compiler/ADR-0001-bounded-projectile-carry-roster.md",
+    "adr/engine",
+    "adr/compiler",
+    "adr/ADR-0007-target-side-status-consumption-for-mass-detonation.md",
+    "adr/ADR-0006-control-projection-teardown-callbacks.md",
+    "adr/ADR-0005-combo-field-replacement-sequencing.md",
+    "adr/ADR-0004-late-bound-actor-transit.md",
+    "adr/ADR-0003-category-scoped-cleanse.md",
+    "adr/ADR-0002-shield-absorb-resource-offense-loop.md",
+    "memory-bank/work-log/README.md",
+    "adr/ADR-0001-bounded-projectile-carry-roster.md",
+    "adr",
+    "memory-bank/work-log",
+    "docs-game-compiler/ability-sketches/sk-91-team-agnostic-stasis.md",
+    "docs-game-compiler/ability-sketches/sk-16-holy-ground.md",
+    "docs-game-compiler/ability-sketches/sk-13-counter-strike.md",
     "memory-bank/SESSION_HANDOFF.md.tmp.5248.1775302263021",
     "docs/0-getting-started/02-implementation-phases.md.tmp.5248.1775302199994",
     "target/debug/deps/shared_types-aa28e5080d9e1f2c",
     "target/debug/deps/shared_types-aa28e5080d9e1f2c.tmp1d16c91",
     "target/debug/deps/rustcvUOKPW/symbols.o",
-    "target/debug/deps/rustcvUOKPW/raw-dylibs",
-    "target/debug/deps/rustcvUOKPW",
-    "target/debug/incremental/shared_types-22pdmaaj0vdli/s-hhaid5ksyw-1ojbq2r-bahz7mzjnweqryb8rwb3to0kk/work-products.bin",
-    "target/debug/incremental/shared_types-22pdmaaj0vdli/s-hhaid5ksyw-1ojbq2r-bahz7mzjnweqryb8rwb3to0kk/query-cache.bin",
-    "target/debug/incremental/shared_types-22pdmaaj0vdli/s-hhaid5ksyw-1ojbq2r-bahz7mzjnweqryb8rwb3to0kk/exc92o1c67wyarfy7up7a4mob.o",
-    "GEMINI.md",
-    "memory-bank/SUMMARY.md",
-    "memory-bank/README.md",
-    "memory-bank/SESSION_HANDOFF.md",
-    "docs-game-compiler/ability-primitives/03-combat-resolution.md",
-    "docs-game-compiler/ability-primitives/02-targeting-query.md",
-    "docs-game-compiler/ability-primitives/01-spatial-kinematic.md",
-    "docs-core/04-3-version-line-transition-contract.md",
-    "docs-core/05-1-conformance-test-matrix.md",
-    "docs-core/05-2-core-conformance-scenario-catalog.md",
-    "docs-core/PRIMITIVE_IMPACT_ASSESSMENT.md",
-    "docs-core/00-scope-and-principles.md",
-    "docs-core/00-1-core-baseline-profile.md",
-    "docs-game-compiler/02-schema-and-validation.md",
-    "docs-game-compiler/01-designer-language.md",
-    "docs-game-compiler/01-3-lua-conformance-test-matrix.md",
-    "docs-game-compiler/01-2-lua-whitelisted-api.md",
-    "docs-game-compiler/01-1-lua-subset-profile.md"
+    "target/debug/deps/rustcvUOKPW/raw-dylibs"
   ]
 }

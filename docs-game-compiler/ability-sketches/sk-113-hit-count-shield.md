@@ -28,89 +28,66 @@ P-19 (Instance Barrier)
 
 ## Engine Primitives Required
 
-### Charge-Based Shield (Not HP-Based)
+Hit-Count Shield is already the canonical `apply_shield(shield_type = instance)` path.
 
-SK-17 Sacrifice Shield absorbs based on DAMAGE AMOUNT (shield_hp). Hit-Count Shield absorbs based on HIT COUNT (charges):
+The recommended lowering is:
 
-```
-struct HitCountShield {
-    remaining_charges: u8,
-    max_charges: u8,
-    expires_at_tick: u64,
-}
-```
+1. apply one self shield with:
+   - `shield_type = instance`
+   - `charges = 6`
+   - `duration_ticks = ...`
+   - optional lifecycle hooks if the design wants break/expiry effects
+2. let the runtime consume one charge for each admitted damage event and negate the entire residual
+   hit value for that event
+3. let the shield remove itself automatically when charges reach zero or the duration expires
 
-On incoming damage:
-```
-fn apply_damage_with_hit_shield(entity: &mut Entity, damage: SimFixed) {
-    if let Some(shield) = entity.find_effect::<HitCountShield>() {
-        if shield.remaining_charges > 0 {
-            shield.remaining_charges -= 1;
-            if shield.remaining_charges == 0 {
-                entity.remove_effect(shield.effect_id);  // Shield breaks
-            }
-            return;  // ENTIRE hit absorbed, regardless of amount
-        }
-    }
-    // Normal damage resolution
-    entity.hp -= damage;
-}
-```
+This keeps the mechanic entirely inside the canonical shield surface:
 
-### Shield Ordering With HP-Based Shields
-
-If an entity has BOTH a Hit-Count Shield and an HP-Based Shield (SK-17), which is checked first?
-- **Hit-Count first**: the hit is absorbed by a charge, HP-shield is untouched. Optimal for the defender.
-- **HP-Shield first**: the HP-shield absorbs damage, Hit-Count charge is NOT consumed. Suboptimal.
-
-Design choice: typically Hit-Count shields are checked BEFORE HP-based shields (they're more valuable per-charge for large hits).
-
-### What Counts As "One Hit"?
-
-The definition of "one instance of damage" matters:
-- Single auto-attack: 1 hit (1 charge consumed)
-- SK-29 Blizzard pulse: 1 hit per pulse (1 charge per second)
-- SK-09 Chain Lightning: 1 hit per chain bounce that reaches this entity (1 charge)
-- SK-02 Poison Shot DoT tick: 1 hit per tick (1 charge per tick — DoTs shred the shield fast)
-- SK-10 Crit Explosion: 1 hit (the explosion is one damage event)
-
-DoTs are particularly effective against Hit-Count shields — a 5-tick DoT consumes 5 charges (one per tick), while dealing minimal damage per tick. This is intentional counterplay.
-
-### Interaction With Damage Resolution Pipeline
-
-The Hit-Count Shield check should happen EARLY in Phase 2 — before mitigation, before HP-shields, before reflection:
-1. Check Hit-Count Shield → if charges remain, absorb entirely, skip everything else
-2. If no Hit-Count Shield (or no charges): proceed with normal resolution (block check, shield absorption, mitigation, etc.)
-
-This means a blocked hit doesn't trigger:
-- SK-22 Damage Reflection (no damage to reflect)
-- SK-23 Thorns (debatable — entity was "hit" but took no damage)
-- SK-87 Conditional Counter (entity was hit — does the counter trigger?)
-- SK-70 Energy Shield (no damage absorbed by HP-shield, so no Energy gain)
+- hit-count shielding is not a second bespoke barrier type outside `apply_shield`
+- `P-19` already fixes ordering ahead of absorption barriers (`shield_type = absorption`)
+- one charge maps to one damage event, not to raw damage magnitude
+- charge depletion and removal are ordinary shield lifecycle behavior
 
 ## Cross-Boundary Concerns
 
-TODO: The Hit-Count Shield is a local status effect on the entity's Arbiter. All damage resolution (including charge consumption) is local. No special cross-boundary handling.
+Hit-Count Shield is target-owner authoritative.
+
+1. The shield instance lives on the protected entity's current owner.
+2. Local and relayed damage events both reach that owner, which alone decides whether a charge is
+   consumed and the hit is fully negated.
+3. If the protected entity hands off, the remaining-charge count transfers with the shield instance
+   as ordinary shield SoftState.
+4. No special cross-boundary protocol is needed beyond the ordinary target-owner combat path.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: self-cast, charges (6), blocks one hit per charge regardless of damage amount, duration (17s), breaks when charges = 0. Compiler produces:
-- HitCountShield status effect with charge counter
-- Damage interception: consume charge, negate entire hit
-- Shield ordering rule (before HP-based shields)
-- Expiry on timer or charge depletion
+Designer specifies:
 
-The compiler adds a new shield type alongside HP-based shields. The damage resolution pipeline must support both types with explicit ordering.
+- charge count
+- duration
+- optional priority and lifecycle effects
 
-## Open Questions
+Compiler emits:
 
-- Does a blocked hit consume a charge from BOTH Hit-Count Shield AND SK-17 HP-Shield (if both active)?
-- Do DoT ticks each consume a charge (making DoTs effective counters)?
-- Does SK-114 Piercing Execute ignore Hit-Count Shield (pierces everything)?
-- Does a blocked hit trigger SK-87 Conditional Counter (entity was "hit" even though no damage)?
-- Does a blocked hit trigger SK-23 Thorns (entity was "hit by melee")?
-- Does SK-92 Anti-Heal interact (anti-heal affects healing, not hit absorption)?
-- Can the shield be purged by enemies (SK-15 Purify in reverse)?
-- Does each hit from a multi-hit ability (SK-52 Combo Strike) consume one charge per hit?
-- Does the shield block damage from SK-109 Movement Damage (each tick of movement damage = one charge)?
-- Does the shield work against true/pure damage?
+- one canonical `apply_shield(shield_type = instance, charges = ...)`
+- ordinary shield instance state tracking remaining charges
+- standard break/expiry removal when charges hit zero or the timer ends
+
+Compiler validates:
+
+1. `shield_type = instance` uses `charges`, not `amount`
+2. `charges > 0`
+3. the mechanic uses canonical `apply_shield`, not a bespoke "next N hits ignored" interceptor
+
+## Resolved Interaction Notes
+
+- Instance barriers are checked before absorption shields, so a consumed hit-count charge leaves any
+  HP-based shield untouched.
+- DoT ticks and multi-hit abilities consume one charge per damage event, which is the canonical
+  "one hit" definition for `P-19`.
+- If an instance barrier consumes a charge and negates the hit, the event does not continue into
+  ordinary damage resolution, so later HP-shield absorb hooks do not see that hit.
+- Movement-damage ticks are still damage events, so they consume charges one tick at a time while
+  the barrier lasts.
+- Pure/true-damage amounts are still fully negated by the instance barrier unless the effect uses a
+  bypass-marked prevention path such as a `P-24` bypass execute.

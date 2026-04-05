@@ -10,7 +10,7 @@ There are three documentation directories with a strict precedence hierarchy:
 
 1. **`docs-core/`** (highest authority) — The game-agnostic engine contract. Reusable runtime rules for time, space, topology, transport, and conformance. This layer is fully mature with zero TODOs or placeholders.
 
-2. **`docs-game-compiler/`** — Designer-facing game definition model and compiler toolchain. Targets `docs-core/` contracts. The Lua authoring specs (01-x files) and ability-primitives catalog are production-quality. The compilation pipeline specs (02-05) are substantial drafts near production. Only `06-version-line-cutover-and-rollback.md` and `07-tooling-workflow.md` are skeletal. The 125 ability sketches systematically lack Cross-Boundary Concerns and Compiler Requirements sections (~290 TODOs).
+2. **`docs-game-compiler/`** — Designer-facing game definition model and compiler toolchain. Targets `docs-core/` contracts. The Lua authoring specs (01-x files) and ability-primitives catalog are production-quality. The compilation pipeline specs (02-05) are substantial drafts near production. Only `06-version-line-cutover-and-rollback.md` and `07-tooling-workflow.md` are skeletal. The 125 ability sketches have now been closed as designer-facing references; the completion and gap files under `docs-game-compiler/ability-sketches/` are historical closed artifacts rather than an active backlog.
 
 3. **`docs/`** (reference implementation) — An ARPG (Diablo-style MMO) built on the framework. The original monolithic spec from which the other two layers are being extracted. 17/30 tracked gaps resolved, 12 in review, 1 deferred (see `docs/6-spec-drafts/GAPS_CHECKLIST.md`).
 
@@ -59,9 +59,11 @@ Attacker and defender may exist on different physical Arbiters, so combat is asy
 
 ## Project Tracking
 
-**`memory-bank/`** contains project-level coordination files — progress status, architecture decisions, implementation roadmap, and session handoff context. Start with `memory-bank/SUMMARY.md` for a quick orientation on where the project stands. See `memory-bank/README.md` for file descriptions and update guidelines.
+**`memory-bank/`** contains project-level coordination files — progress status, implementation roadmap, active queues, live handoff context, and historical session logs. Start with `memory-bank/SUMMARY.md` for a quick orientation on where the project stands. See `memory-bank/README.md` for file descriptions and update guidelines.
 
 **`memory-bank/` is not implementation authority.** Agents must still read the relevant spec documents before proposing architecture, explaining contracts, or writing code. Use `docs-core/` first, then `docs-game-compiler/` or `docs/` as applicable to the task.
+
+**Tracking split:** `memory-bank/SESSION_HANDOFF.md` is the live checkpoint only; chronological history belongs in `memory-bank/work-log/`. `memory-bank/DECISIONS.md` is the working decision index, and durable architecture rationale should be promoted into `adr/compiler/` or `adr/engine/`. ADRs are explanatory and do not override the layered specs.
 
 **Keep `memory-bank/` current.** At the end of each turn, if your work changed project state (resolved a gap, wrote code, made a decision, shifted priorities), update the relevant `memory-bank/` file. At minimum: `ACTIVE_WORK.md` for progress changes, `DECISIONS.md` for architectural choices, `SESSION_HANDOFF.md` at the end of significant sessions.
 

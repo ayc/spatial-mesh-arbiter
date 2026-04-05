@@ -2,7 +2,10 @@
 
 ## Designer Intent
 
-I permanently control three independent characters simultaneously — not as a temporary ability, but as my core gameplay identity. Each character has its own HP, position, abilities, and can die independently. I can select one, two, or all three to issue commands. I can split them across the map to soak multiple lanes.
+I permanently control three independent characters simultaneously, not as a temporary summon spell
+but as my core gameplay identity. Each character has its own HP, position, abilities, and respawn
+state. I can select one, multiple, or all of them to issue commands, and I can split them across
+the map.
 
 ## Primitive Composition
 
@@ -13,122 +16,129 @@ P-30 (Input Multiplexing) → P-32 (Actor Spawning)
 ## Inputs
 
 - One player session
-- Three entities (e.g., Olaf, Baleog, Erik)
-- Selection input: select individual, select group, select all
-- Each selected entity receives movement and ability input independently
+- Three controlled entities
+- Selection input: select individual member, selected subset, or all members
+- Movement and ability commands routed only to the currently selected members
 
 ## Observable Behavior
 
-1. Player starts the game with 3 entities, each at the spawn point
-2. Each entity has its own HP pool, movement speed, and one unique ability
-3. Player can select one entity: movement and ability commands apply to that entity only
-4. Player can select all three: movement commands move all three (formation/group movement)
-5. Entities can be split across the map — sent to different locations independently
-6. Each entity can die independently. Dead entities respawn after a timer.
-7. The player is only eliminated when all three are dead simultaneously
-8. If one entity levels up or gains a buff, only that entity benefits (no sharing)
-9. Visual: three distinct characters with individual health bars and selection indicators
+1. The player starts with three independently targetable entities
+2. Each entity has its own HP pool, position, movement, abilities, buffs, and debuffs
+3. Selecting one entity routes commands only to that member
+4. Selecting multiple or all members routes the command to that selected subset
+5. The entities can split across the map and operate independently
+6. Each entity can die and respawn independently
+7. The player is eliminated only when all controlled members are removed under the authored group
+   elimination rule
+8. Buffs, heals, crowd control, and damage target individual members rather than an abstract shared
+   player body
+9. Visual: separate health bars, separate selection indicators, ordinary per-entity world presence
 
 ## Engine Primitives Required
 
-### One Session, Multiple Entities
+Multi-Entity Control is now a canonical static `control_topology` pattern, not a sketch-local
+"break the one-session-to-one-entity rule" proposal.
 
-The fundamental assumption across the entire engine is: **one Edge Node session maps to one entity**. Multi-Entity Control breaks this.
+### Persistent One-To-Many Control Topology
 
-The Edge Node (`ProxyActor`) currently has:
-- `entity_id: EntityID` (singular)
-- `authoritative_mesh_node: IPAddress` (one Arbiter)
-- Input processing maps input → one entity's proposals
+The game authors one `ControlTopologyDef` with:
 
-Multi-Entity Control requires:
-```
-struct MultiEntitySession {
-    entities: Vec<EntitySessionBinding>,
-    selected: Vec<usize>,  // Indices into entities, currently receiving input
-}
+1. `mode = one_to_many`
+2. `input_policy = adapter_routed`
+3. `selection_mode = multiple`
+4. `elimination_policy = all_members_removed`
+5. one primary controller member plus additional controlled members
 
-struct EntitySessionBinding {
-    entity_id: EntityID,
-    arbiter_address: IPAddress,
-    is_alive: bool,
-}
-```
+Each `ControlMemberDef` declares the controlled archetype and the member's routing role. This is
+static entity-definition metadata installed at spawn, reconnect, and handoff, not an ability-local
+runtime patch.
 
-The Edge Node must:
-1. Maintain multiple entity bindings
-2. Route input to selected entities only
-3. Receive downstream payloads from multiple Arbiters (if entities are split)
-4. Handle death/respawn per entity independently
+### Spawn And Session Shape
 
-### Split Across Arbiters
+The game-mode or adaptation layer materializes the three controlled entities as ordinary spawned or
+placed entities, then installs the shared `one_to_many` topology. The engine does not create one
+special three-body kernel actor. It creates three ordinary entities plus one bounded routing group.
 
-The three entities can be on three different Arbiters simultaneously. This means:
-- The Edge Node sends proposals to up to 3 different Arbiters
-- The Edge Node receives downstream state updates from up to 3 different Arbiters
-- The client renders 3 different viewports (or switches camera between them)
+That means:
 
-This is a **persistent multi-Arbiter session** — not a temporary cross-boundary relay, but an ongoing data flow between one Edge Node and multiple Arbiters.
+1. each entity has its own `entity_id`
+2. each entity keeps its own HP, cooldowns, buffs, and positions
+3. each entity is targeted, healed, crowd-controlled, and killed independently
+4. the topology only changes which proposals the player session may route to which members
 
-### Selection and Input Routing
+### Selection And Routed Commands
 
-The player selects which entities to command. The Edge Node must:
-1. Track the current selection (1, 2, or 3 entities)
-2. When one entity is selected: send movement/ability input to that entity's Arbiter
-3. When all are selected: send movement input to all three Arbiters (group move)
-4. Handle per-entity ability usage (entity A has ability X, entity B has ability Y)
+This sketch uses `adapter_routed` rather than unconditional mirroring.
 
-The Arbiter doesn't need to know about the multi-entity session — it just receives proposals for the entities it hosts. The multi-entity routing is an Edge Node concern.
+The player's current selection is session-owned routing state. When the player issues a command:
 
-### Group Movement
+1. Stage 1 input routing resolves the currently selected members
+2. the engine routes the proposal only to those members
+3. each receiving entity then validates and resolves the proposal independently on its own owner
 
-When all three are selected and the player issues a move command:
-- All three entities receive the same destination
-- They move independently (different speeds, different paths)
-- The Edge Node sends three separate movement proposals
+Selecting all members and issuing a move command therefore becomes "route the same move intent to
+all selected members," not "invent formation movement in the kernel." Any formation offsets or
+client-side convenience behavior are outside the core routing contract.
 
-Formation movement (triangle, line, etc.) is a client-side convenience — the Arbiter just sees individual movement commands.
+### Independent Death And Elimination
 
-### Death and Respawn Per Entity
-
-Each entity has an independent death/respawn lifecycle:
-- Entity A dies → respawn timer starts for A. B and C continue.
-- All three dead simultaneously → player is eliminated (game-level death)
-- Each entity's respawn is a mini-spawn-handshake with Meta
+Each controlled member dies, respawns, and re-enters the topology as an ordinary entity. The
+topology's `elimination_policy = all_members_removed` means the grouped player identity is only
+considered out once all members are gone at the same time. Per-member respawn timing remains a
+game-mode concern layered on top of the ordinary spawn and death contracts.
 
 ## Cross-Boundary Concerns
 
-TODO: This is the most boundary-intensive pattern in the entire sketch set:
+Multi-Entity Control uses the canonical `P-30` coordinator model.
 
-1. **Three entities on three Arbiters:** The Edge Node maintains connections to up to 3 Arbiters simultaneously. Proposals go to different destinations. Downstream payloads arrive from different sources.
-
-2. **Dynamic Arbiter mapping:** As entities move, they may cross boundaries. Each entity's Arbiter mapping changes independently. The Edge Node must handle topology updates per entity.
-
-3. **Spawn across map:** Entities can be sent to completely different parts of the map. They may have no spatial relationship to each other. The Edge Node's "area of interest" is the union of all three entities' surroundings.
-
-4. **Death on one Arbiter, respawn on another:** Entity A dies on Arbiter X. Respawn might place it at a spawn point on Arbiter Y. The Edge Node's binding for entity A changes.
+1. The topology is re-installed from static `control_topology` metadata whenever a member spawns,
+   reconnects, or hands off.
+2. If selected members live on different Arbiters, the routing coordinator relays proposals to the
+   current owners of those members; each owner still resolves its member locally.
+3. When one member crosses a boundary, only that member's authority changes. The rest of the group
+   continues normally.
+4. The player's effective area of interest is the union of the controlled members' surroundings,
+   but that is an observer/session concern rather than a new combat-authority exception.
+5. Respawning one dead member simply re-materializes that member and re-attaches it to the same
+   topology; it does not require rebuilding the whole group.
 
 ## Compiler Requirements
 
-TODO: This isn't really a "compiled ability" — it's a **game mode / hero archetype** that the game adapter must support. The compiler needs to express:
-- Hero definition with N entities (not just 1)
-- Per-entity stat blocks and ability sets
-- Session binding: one Edge session → N entities
-- Selection/input routing rules
-- Death condition: all N dead simultaneously
-- Respawn: per-entity independent
+Designer specifies:
 
-The engine needs to support this at the adapter level — the game adapter must tell the engine "this player session controls 3 entities" during the spawn handshake.
+- the member roster for the controlled group
+- each member's archetype
+- the allowed selection model
+- the grouped elimination policy
+- any game-mode respawn or progression policy layered on top of the group
 
-## Open Questions
+Compiler emits:
 
-- How does the Edge Node handle receiving downstream payloads from 3 Arbiters simultaneously?
-- Does each entity have its own token bucket for ingress fairness, or is there one per session?
-- How does the camera/viewport work — can the player see all three simultaneously (minimap only)?
-- Can other players heal/buff individual Vikings, or do they always target "the Vikings player"?
-- Do all three entities share XP/level, or level independently?
-- How does SK-65 Taunt interact — taunted Viking must attack the taunter, but the other two are free?
-- Can SK-54 Entity Consumption swallow one Viking while the others continue?
-- How does SK-04 Tether work — tether to one Viking?
-- Does the spawn handshake (Meta → Controller → Arbiter) happen once for all three or three times?
-- Performance: one player generating 3× the proposals, 3× the downstream payloads, 3× the entity updates
-- Does this require changes to `docs-core/` (the session model assumes one entity per session)?
+- one static `control_topology` definition with `mode = one_to_many`
+- one authored `members` list describing the controlled roster
+- Stage 1 routing metadata that survives spawn, reconnect, and handoff
+- no bespoke multi-character kernel type beyond the existing multiplex group
+
+Compiler validates:
+
+1. `members` count is within `max_multiplex_group_size`
+2. `one_to_many` defines exactly one primary member
+3. member entries are unique
+4. each referenced `entity_type_id` exists
+5. the topology uses canonical `selection_mode` and `elimination_policy` values rather than
+   sketch-local flags
+
+## Resolved Notes
+
+- Each controlled member keeps its own per-entity token bucket. Proposal fairness is still enforced
+  per entity, not per grouped player session.
+- Other players target, heal, buff, crowd-control, or consume individual members normally because
+  they are ordinary separate entities.
+- XP sharing, level progression, camera layout, and UI selection presentation are game-mode/client
+  concerns outside this sketch's routing contract.
+- Taunt, tether, containment, and similar mechanics apply to whichever controlled member they
+  actually target; they do not automatically affect the whole group.
+- The grouped spawn flow may be orchestrated together by the game-mode layer, but the runtime state
+  remains "three entities plus one topology," not one composite actor.
+- This sketch no longer requires new `docs-core` session-model work. `ControlTopologyDef` and the
+  existing `P-30` coordinator model are already sufficient.

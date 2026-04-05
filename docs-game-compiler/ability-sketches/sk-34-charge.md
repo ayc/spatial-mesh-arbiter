@@ -30,57 +30,80 @@ P-07 (Entity-as-Kinematic-Volume) → P-02 (Forced Displacement)
 
 ## Engine Primitives Required
 
-TODO: This introduces several new concepts:
+Charge is the canonical `kinematic_sweep` + `capture_first` pattern.
 
-### Caster as Projectile
-The caster's own entity moves at charge speed, overriding normal movement input. The Arbiter needs to:
-1. Lock the caster's movement to the charge vector (ignore player input)
-2. Apply charge velocity each tick via `apply_kinematics`
-3. Run collision detection against the caster's moving hitbox — both against entities (capture check) and static geometry (wall impact check)
+The compiler lowers it as one `kinematic_sweep` on the charging entity with:
 
-This is different from normal entity movement because the speed exceeds normal movement caps and the caster is treated as a moving collision source, not just a receiver.
+1. `mode = toward_position`
+2. bounded `duration_ticks`
+3. authored `collision_radius`
+4. `hit_filter = enemy_alive`
+5. `on_entity_hit = capture_first`
+6. `capture.carry_offset_distance` for the pinned target
+7. `on_hit_effects` for the first pin and any later incidental hits
+8. `world_impact_effects` for wall-slam damage / self-stun
+9. optional `self_cc_immunity_during_cast` if the design wants the charge to be push-immune or
+   full-super-armor while active
 
-### Entity Pinning
-When the caster hits an enemy, the enemy is "attached" to the caster:
-1. Enemy's position is locked to caster's position (offset by collision geometry)
-2. Enemy's movement input is suppressed (effectively a specialized stun)
-3. Enemy moves wherever the caster moves — they share a physics body temporarily
-4. The pin is a status effect on the enemy with a reference to the caster's EntityID
+The important runtime rule is that the moving entity remains the sole authoritative actor. The
+first admitted hit installs a transient `P-06` attachment from the captured target to the charger;
+the pinned enemy is carried by ordinary attached kinematics, not by shared authority or a bespoke
+"pin state." Subsequent enemies can still receive authored `on_hit_effects`, but only the first
+admitted target is captured.
 
-How is this represented? A status effect that overrides the entity's position each tick to match the caster's position plus an offset?
-
-### Wall Impact Detection
-The charge needs to detect "caster hit static geometry" as a distinct event that triggers:
-1. Stop the charge
-2. Apply wall-slam damage to the pinned enemy
-3. Apply self-stun to the caster
-4. Release the pinned enemy
-
-This is different from normal collision (which just prevents movement through walls). Here, wall collision is a gameplay trigger, not just a physics boundary.
+World collision is already a first-class sweep outcome. `world_impact_effects` fires when the
+sweep stops on static geometry, which is the canonical place to apply wall-slam damage to the
+captured target and a recovery/self-stun effect to the charger.
 
 ## Cross-Boundary Concerns
 
-TODO: The caster is moving at high speed, potentially crossing Arbiter boundaries during the charge. Two scenarios:
+Charge uses the ordinary `P-07` / `P-06` handoff model.
 
-1. **Caster crosses boundary alone (no pinned enemy yet):** Normal entity handoff, but mid-ability. The charge state (direction, speed, remaining duration) must transfer with the entity. The new Arbiter continues the charge.
-
-2. **Caster crosses boundary WITH a pinned enemy:** Two entities must hand off simultaneously. The pinned enemy's position is derived from the caster's — they can't be on different Arbiters. Does the engine support atomic two-entity handoffs? If not, there's a brief window where the caster is on the new Arbiter and the pinned enemy is still on the old one.
-
-Additionally: at charge speed, the caster might cross multiple boundaries in quick succession. Each crossing is a handoff.
+1. If the charger crosses a boundary before any capture, the sweep state transfers with the moving
+   entity and the destination owner continues the charge.
+2. If a target has already been captured, the carried entity follows through the ordinary
+   co-located attached-kinematics handoff path. The compiler docs already define this as temporary
+   attachment, not as a second authority owner.
+3. Multiple boundary crossings during one charge are just repeated handoffs of the same bounded
+   sweep state; there is no special two-entity atomic teleport rule beyond the existing attached
+   motion contract.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: charge speed, charge direction (requested aim direction/facing), max duration/distance, collision behavior (pin first enemy, knock aside others), wall impact damage, self-stun on wall hit without pin, CC immunity during charge. Compiler produces: self-displacement state machine + entity capture mechanic + wall collision trigger + damage payloads. This is a complex multi-phase ability with conditional branching (hit enemy → pin → find wall vs. hit wall alone vs. charge expires).
+Designer specifies:
 
-## Open Questions
+- charge destination/direction
+- charge duration or max path length
+- collision radius
+- first-hit capture behavior
+- incidental hit payload for non-captured targets
+- wall-impact payloads
+- optional self-CC immunity while the charge is active
 
-- Can the charge be interrupted by hard CC (stun, sleep), or is the caster unstoppable?
-- If the caster is rooted (SK-25) before charging, does root prevent the charge?
-- What happens if the pinned enemy is cleansed (SK-15 Purify) mid-charge — are they released?
-- Can the caster charge through SK-03 Terrain Wall, or does it count as a wall for impact purposes?
-- If the pinned enemy is a Ghost (owned by another Arbiter), how does the pin work? Does the Ghost become a real entity on the caster's Arbiter?
-- Does the charge interact with SK-31 Vortex — can a charging caster be pulled off course?
-- Can the caster charge off map edges or into deep terrain?
-- What happens if the caster charges into SK-29 Blizzard — do they take damage while charging through?
-- Does the knocked-aside damage (non-pinned enemies) trigger on-hit procs?
-- Can two chargers collide head-on? What happens — both stop? One wins? Mutual stun?
+Compiler emits:
+
+- one `kinematic_sweep` with `capture_first`
+- one `SweepCaptureBlock` for the carried target
+- ordinary `on_hit_effects`, `world_impact_effects`, and `on_complete_effects`
+- optional cast-time CC-immunity metadata when the charge should be unstoppable
+
+Compiler validates:
+
+1. the sweep is bounded (`duration_ticks > 0`)
+2. capture is only authored with `on_entity_hit = capture_first`
+3. world-impact consequences live in `world_impact_effects`, not in bespoke collision code
+4. any unstoppable behavior is authored explicitly through the existing self-immunity surface
+
+## Resolved Interaction Notes
+
+- Charge itself does not imply free implicit CC immunity. If the design wants the move to be
+  unstoppable, it authors that through `self_cc_immunity_during_cast`.
+- Root or other movement-preventing states stop the charge from being admitted unless the charge's
+  authored immunity/profile overrides them.
+- The pinned target is carried by temporary attachment, so release conditions follow the capture
+  block and ordinary attached-kinematics cleanup rather than a bespoke cleanse-only rule.
+- Static blocking geometry, including authored terrain walls, counts as world impact for the sweep
+  and therefore drives `world_impact_effects`.
+- The charge path is still ordinary world space. Environmental hazards or zones along the route are
+  resolved by the existing targeting/damage contracts; the sweep does not create a separate physics
+  world.

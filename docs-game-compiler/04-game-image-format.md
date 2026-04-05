@@ -191,7 +191,7 @@ AbilityIREntry {
     cast_time_ticks:        u32,
     targeting_type:         u8,         // TargetingType enum
     self_cc_immunity_during_cast: u8,   // CcImmunityTier enum (0 = none)
-    flags:                  u8,         // Bitfield: bit 0 = can_counter_vulnerability_window, bit 1 = can_be_counterspelled, bit 2 = requires_concentration, bits 3-7 reserved (zero)
+    flags:                  u8,         // Bitfield: bit 0 = can_counter_vulnerability_window, bit 1 = can_be_counterspelled, bit 2 = requires_concentration, bit 3 = has_channel_policy, bit 4 = has_concentration_policy, bit 5 = has_global_event_policy, bits 6-7 reserved (zero)
     combo_finisher:         u8,         // ComboFinisherType enum (0 = none)
     _padding:               [u8; 3],    // Alignment padding
     input_mode:             InputMode_Wire, // Inline fixed-size subrecord
@@ -207,17 +207,58 @@ AbilityIREntry {
     param_data_size:        u16,        // Total bytes for all param blocks
 
     // Inline arrays follow in order:
-    // 1. ActivationMode_Wire[activation_mode_count]
-    // 2. IRInstruction[instruction_count]
-    // 3. IRDirective[directive_count]
-    // 4. BindingSlot[binding_count]
-    // 5. ParamData[param_data_size] (variable-length parameter payloads)
+    // 1. Optional: ChannelPolicy_Wire          — if has_channel_policy flag (§3.3)
+    // 2. Optional: ConcentrationPolicy_Wire    — if has_concentration_policy flag (§3.4)
+    // 3. Optional: GlobalEventPolicy_Wire      — if has_global_event_policy flag (§3.5)
+    // 4. ActivationMode_Wire[activation_mode_count]
+    // 5. IRInstruction[instruction_count]
+    // 6. IRDirective[directive_count]
+    // 7. BindingSlot[binding_count]
+    // 8. ParamData[param_data_size] (variable-length parameter payloads)
 }
 ```
 
 `ActivationModes` redirect the public/root ability entry to hidden compiler-generated variant
 entries. Hidden variants are serialized as ordinary `AbilityIREntry` records and count toward the
 same table/index limits as public abilities.
+
+The fixed header stores the BASE resource pool/cost only. Any `resource_cost.escalation`
+authoring lowers into `P-51` param blocks inside this entry's `ParamData`. Likewise,
+`modify_resource` and shield `on_absorb_effects` lower into ordinary effect param blocks inside
+`ParamData`; only status-owned `resource_stat_links` receive a dedicated counted subrecord below.
+Likewise,
+`vulnerability_window` lowers into a `P-65` directive payload rather than a dedicated fixed header
+field. `channel`, `concentration`, and `global_event` authoring lower into the optional policy
+subrecords below, with geometry/filter refs still living in `ParamData` where they share the same
+compact selector encodings as other targeting payloads. `group_interaction` likewise lowers into a
+`P-54` directive payload plus ordinary session/result tables in `ParamData`; this format version
+does not add a dedicated fixed header for group interaction sessions.
+Likewise, `link`, `damage_redirect`, `heal_mirror_ratio`, `event_clone`, `origin_override`, and
+declarative `despawn_entity` lower into ordinary directive/effect param payloads inside `ParamData`;
+this format version adds no dedicated fixed-header fields for those policies. `zone`
+mobility / persistence / continuous-force authoring, `displacement.flight_policy`,
+`inject_geometry`, `polyline_zone`, `kinematic_sweep`, `enter_container`, `exit_container`,
+`fork_instance`, `split_form`, and `spawn_actor.portal_anchor` likewise lower into ordinary `P-32`
+/ `P-44` / `P-14` / `P-08` / `P-57` / `P-07` / `P-58` / `P-56` / `P-30` param blocks inside
+`ParamData`. The same is true for ability-local `spawn_actor.placement`, `spawn_actor.autonomy`,
+`spawn_actor.interaction`, `spawn_actor.coverage`, `spawn_actor.instance_limit`,
+`spawn_actor.loadout_projection`, `spawn_actor.control_projection`,
+`spawn_actor.respawn_anchor`, `start_actor_transit`, and `cycle_split_form`: they
+serialize as ordinary spawn/routing-behavior param payloads, not as new fixed headers on
+`EntityDefinition_Wire`, because two abilities may spawn the same archetype with different
+formation offsets, live limits, proximity payloads, coverage-network IDs, projected source
+snapshots, split-form member bindings, owner-body return policy, or rebirth-anchor delay. Only status-owned
+`zone_relation_gate` and `movement_constraint` receive dedicated status subrecords below. Static `container_profile`
+metadata remains on `EntityDefinition_Wire`, because capacity, entry range, and occupant cast
+policy are archetype setup rather than ability-instance payload. The same is true for
+`revive_corpse`, `restore_phase`, `consume_corpse`, and `swap_identity.source = {
+corpse_snapshot: ... }`: they lower into ordinary lifecycle/resource `ParamData` payloads and
+runtime-state selectors rather than introducing new fixed headers on `AbilityIREntry`.
+Combo-matrix rows likewise serialize ordinary effect-list blobs; contextual selectors such as
+`combo_field_entity`, `combo_field_owner`, `combo_field_position`, `finisher_position`,
+`projected_actor`, `projected_actor_position`, `transit_actor`, and
+`transit_actor_position` are just additional compact `EntityRef` /
+`PositionRef` selector values inside those blobs.
 
 ```
 InputMode_Wire {
@@ -231,7 +272,65 @@ InputMode_Wire {
 // Fixed size: 20 bytes
 ```
 
-### 3.3 Serialized ActivationMode
+### 3.3 Serialized ChannelPolicy
+
+Present when the `has_channel_policy` flag is set. Serializes
+`02-schema-and-validation.md` §5.8.
+
+```
+ChannelPolicy_Wire {
+    execution_mode:               u8,     // 0=complete_only, 1=tick_while_active
+    movement_lock:                u8,     // 0=none, 1=root
+    continuous_input:             u8,     // 0=none, 1=steer_aim, 2=steer_target_movement
+    flags:                        u8,     // bit 0 = allow_other_abilities, bit 1 = break_on_displacement, bit 2 = break_on_target_invalid
+    tick_interval_ticks:          u16,    // 0 when execution_mode = complete_only
+    _padding:                     [u8; 2],
+    interrupt_damage_threshold:   i64,    // I32F32; 0 = no damage-threshold break
+    partial_cooldown_refund:      i64,    // I32F32 in [0, 1]
+}
+// Fixed size: 24 bytes
+```
+
+### 3.4 Serialized ConcentrationPolicy
+
+Present when the `has_concentration_policy` flag is set. Serializes
+`02-schema-and-validation.md` §5.9.
+
+```
+ConcentrationPolicy_Wire {
+    check_formula:         u8,     // 0=standard_half_damage_floor_10
+    flags:                 u8,     // bit 0 = allow_manual_cancel, bit 1 = replace_existing
+    _padding:              [u8; 2],
+    max_duration_ticks:    u32,    // 0 = unbounded
+}
+// Fixed size: 8 bytes
+```
+
+If `requires_concentration` is set but `has_concentration_policy` is clear, the runtime uses the
+canonical defaults from `02-schema-and-validation.md` §5.9.
+
+### 3.5 Serialized GlobalEventPolicy
+
+Present when the `has_global_event_policy` flag is set. Serializes
+`02-schema-and-validation.md` §5.10.
+
+```
+GlobalEventPolicy_Wire {
+    schedule_lead_ticks:     u32,
+    pulse_interval_ticks:    u32,    // 0 = one-shot
+    duration_ticks:          u32,    // 0 = one-shot
+    target_class:            u8,     // 0=all_entities, 1=heroes_only, 2=structures_only
+    geometry_type:           u8,     // 0=whole_mesh, 1=circle, 2=ring
+    flags:                   u8,     // bit 0 = cancel_if_owner_removed
+    _padding:                u8,
+}
+// Fixed size: 16 bytes
+```
+
+`filter`, `epicenter`, `radius`, and `ring_inner` stay in ordinary `ParamData`, because they reuse
+the same selector/reference encodings as other targeting and geometry payloads.
+
+### 3.6 Serialized ActivationMode
 
 ```
 ActivationMode_Wire {
@@ -244,7 +343,7 @@ ActivationMode_Wire {
 // Fixed size: 12 bytes
 ```
 
-### 3.4 Serialized IRInstruction
+### 3.7 Serialized IRInstruction
 
 ```
 IRInstruction_Wire {
@@ -271,7 +370,7 @@ Runtime-state references and state-backed payload selectors inside `ParamData` s
 pre-hashed `u32` `state_id` values plus compact selector enums, matching the `RuntimeStateTable`
 defined in §7.4.
 
-### 3.5 Serialized IRDirective
+### 3.8 Serialized IRDirective
 
 ```
 IRDirective_Wire {
@@ -284,7 +383,7 @@ IRDirective_Wire {
 // Fixed size: 8 bytes
 ```
 
-### 3.6 Bounds
+### 3.8 Bounds
 
 | Constraint | Limit | Source |
 |-----------|-------|--------|
@@ -314,7 +413,7 @@ EntityDefinition_Wire {
     passive_count:      u16,        // Number of passive status effect references
     combo_field_type:   u8,         // P-64 combo field tag (0 = none)
     _padding:           u8,         // Alignment
-    flags:              u16,        // Bitfield: bit 0 = has_stagger_bar, bit 1 = has_downed_state, bit 2 = has_projectile_config, bits 3-15 reserved (zero)
+    flags:              u16,        // Bitfield: bit 0 = has_stagger_bar, bit 1 = has_downed_state, bit 2 = has_projectile_config, bit 3 = has_block_defense, bit 4 = has_loadout_profiles, bit 5 = has_control_topology, bit 6 = has_targetability_policy, bit 7 = has_observer_presentation, bit 8 = has_container_profile, bit 9 = has_corpse_profile, bit 10 = has_ghost_phase, bits 11-15 reserved (zero)
 
     // Variable-length inline data:
     // 1. StatEntry_Wire[stat_count]
@@ -324,8 +423,21 @@ EntityDefinition_Wire {
     // 5. Optional: StaggerBarDef_Wire          — if has_stagger_bar flag (§4.3)
     // 6. Optional: DownedStateDef_Wire         — if has_downed_state flag (§4.4)
     // 7. Optional: ProjectileConfigDef_Wire         — if has_projectile_config flag (§4.5)
+    // 8. Optional: BlockDefenseDef_Wire        — if has_block_defense flag (§4.6)
+    // 9. Optional: LoadoutProfileTable_Wire    — if has_loadout_profiles flag (§4.7)
+    // 10. Optional: ControlTopologyDef_Wire    — if has_control_topology flag (§4.8)
+    // 11. Optional: TargetabilityPolicy_Wire   — if has_targetability_policy flag (§4.9)
+    // 12. Optional: ObserverPresentation_Wire  — if has_observer_presentation flag (§4.10)
+    // 13. Optional: ContainerProfileDef_Wire   — if has_container_profile flag (§4.10.1)
+    // 14. Optional: CorpseProfileDef_Wire      — if has_corpse_profile flag (§4.4.1)
+    // 15. Optional: GhostPhaseDef_Wire         — if has_ghost_phase flag (§4.4.2)
 }
 ```
+
+Static `loadout_profiles` and `control_topology` serialize here because they are entity-setup
+metadata. By contrast, authored `swap_identity` and `borrow_ability_slot` effects lower into
+ability-local `P-31` param blocks inside `AbilityIREntry.ParamData`, while `control_override`
+lowers into a pending Stage 1 routing mutation payload.
 
 #### 4.2 Entity Subrecord Wire Types
 
@@ -355,6 +467,13 @@ PassiveRef_Wire {
     status_id:  u32,    // References StatusEffectDefinitions entry
 }
 // Fixed size: 4 bytes
+
+ResourceScalarEntry_Wire {
+    pool_id:    u32,    // Pre-hashed pool name
+    _padding:   [u8; 4],
+    value:      i64,    // I32F32 scalar
+}
+// Fixed size: 16 bytes
 ```
 
 #### 4.3 StaggerBarDef_Wire
@@ -380,35 +499,259 @@ Present when the `has_downed_state` flag is set. Serializes `02-schema-and-valid
 DownedStateDef_Wire {
     downed_hp_ratio:            i64,    // I32F32: fraction of max HP for downed pool
     downed_movement_speed_ratio: i64,   // I32F32: fraction of base movement speed while downed
+    rally_hp_ratio:             i64,    // I32F32: fraction of base max HP restored on rally
     rally_channel_ticks:        u32,    // Ticks to channel self-rally
     finish_channel_ticks:       u32,    // Ticks to channel finish on a downed enemy
     downed_ability_count:       u16,    // Number of ability refs available while downed
-    _padding:                   [u8; 2],
+    phase_flags:                u16,    // bit 0 = self_rally_on_kill
     // Inline: AbilityRef_Wire[downed_ability_count]
 }
-// Fixed header size: 28 bytes + variable ability refs
+// Fixed header size: 32 bytes + variable ability refs
+```
+
+#### 4.4.1 CorpseProfileDef_Wire
+
+Present when the `has_corpse_profile` flag is set. Serializes
+`02-schema-and-validation.md` §7.2.2.
+
+```
+CorpseProfileDef_Wire {
+    persist_ticks:            u32,    // Lifetime of corpse-registry entry
+    corpse_flags:             u16,    // bit 0 = retain_effective_stats, bit 1 = retain_loadout_snapshot
+    _padding:                 [u8; 2],
+}
+// Fixed size: 8 bytes
+```
+
+#### 4.4.2 GhostPhaseDef_Wire
+
+Present when the `has_ghost_phase` flag is set. Serializes
+`02-schema-and-validation.md` §7.2.1.
+
+```
+GhostPhaseDef_Wire {
+    ghost_duration_ticks:       u32,
+    respawn_delay_credit_ticks: u32,
+    ghost_ability_count:        u16,
+    phase_flags:                u16,    // bit 0 = clear_statuses_on_enter
+    // Inline: AbilityRef_Wire[ghost_ability_count]
+}
+// Fixed header size: 12 bytes + variable ability refs
 ```
 
 #### 4.5 ProjectileConfigDef_Wire
 
-Present when the `has_projectile_config` flag is set. Serializes the projectile/trap behavior fields from `02-schema-and-validation.md` §6.7.1-6.7.2.
+Present when the `has_projectile_config` flag is set. Serializes the projectile/trap behavior
+fields from `02-schema-and-validation.md` §6.7.1-6.7.5.1.
 
 ```
 ProjectileConfigDef_Wire {
     speed:                      i64,    // I32F32: velocity in units/tick
     turn_rate:                  i64,    // I32F32: max angular change per tick (0 = non-homing)
     pierce:                     u8,     // Targets passed through before stopping
-    homing:                     u8,     // 0 = false, 1 = true
-    arming_delay_ticks:         u32,    // Ticks before detonation-capable triggers arm
-    // DetonationPolicy (inline)
-    manual_trigger_enabled:     u8,     // 0 = false, 1 = true
-    proximity_trigger_radius:   i64,    // I32F32: 0 = disabled, >0 = armed proximity radius
+    flags:                      u8,     // bit 0 = homing, bit 1 = manual_trigger_enabled, bit 2 = has_travel_scalars, bit 3 = has_return_policy, bit 4 = has_bounce_policy, bit 5 = has_attachment_policy, bit 6 = has_carry_policy
     entity_impact_behavior:     u8,     // Enum: 0=Ignore, 1=Stop, 2=Detonate, 3=DetonateAfterPierceExhausted
     world_impact_behavior:      u8,     // Enum: 0=Ignore, 1=Bounce, 2=Stop, 3=Detonate
     expiry_behavior:            u8,     // Enum: 0=Despawn, 1=Detonate
-    _padding:                   [u8; 2], // Alignment to 4-byte boundary
+    _padding0:                  [u8; 3],
+    arming_delay_ticks:         u32,    // Ticks before detonation-capable triggers arm
+    proximity_trigger_radius:   i64,    // I32F32: 0 = disabled, >0 = armed proximity radius
+    // Optional inline subrecords:
+    // 1. ProjectileTravelScalars_Wire  — if has_travel_scalars flag
+    // 2. ProjectileReturnPolicy_Wire   — if has_return_policy flag
+    // 3. ProjectileBouncePolicy_Wire   — if has_bounce_policy flag
+    // 4. ProjectileAttachmentPolicy_Wire — if has_attachment_policy flag
+    // 5. ProjectileCarryPolicy_Wire    — if has_carry_policy flag
 }
-// Fixed size: 36 bytes
+// Fixed header size: 36 bytes + optional subrecords
+
+Projectile travel mutation, return-flight, bounce counters, and attachment delay are all
+archetype-owned projectile behavior. By contrast, `displacement.flight_policy` remains
+ability-local and lowers into ordinary `P-02` / `P-07` param blocks inside
+`AbilityIREntry.ParamData`; it does not add new fixed entity-definition headers.
+
+```
+ProjectileTravelScalars_Wire {
+    radius_growth_per_unit:     i64,    // I32F32
+    payload_scale_per_unit:     i64,    // I32F32
+    max_scaled_radius:          i64,    // I32F32: 0 = uncapped / disabled
+}
+// Fixed size: 24 bytes
+```
+
+```
+ProjectileReturnPolicy_Wire {
+    trigger:                    u8,     // 0=max_range, 1=manual_recall, 2=world_impact
+    track_mode:                 u8,     // 0=source_entity_current, 1=source_entity_last_known_on_loss
+    flags:                      u8,     // bit 0 = allow_repeat_hits_on_return, bit 1 = preserve_speed
+    _padding:                   u8,
+    despawn_radius:             i64,    // I32F32
+}
+// Fixed size: 12 bytes
+```
+
+```
+ProjectileBouncePolicy_Wire {
+    max_bounces:                u8,
+    flags:                      u8,     // bit 0 = preserve_speed
+    _padding:                   [u8; 2],
+}
+// Fixed size: 4 bytes
+```
+
+```
+ProjectileAttachmentPolicy_Wire {
+    delay_ticks:                u32,
+    on_carrier_loss:            u8,     // 0=last_known_position, 1=fizzle
+    flags:                      u8,     // bit 0 = follow_attached_entity, bit 1 = preserve_original_payload
+    _padding:                   [u8; 2],
+}
+// Fixed size: 8 bytes
+```
+
+```
+ProjectileCarryPolicy_Wire {
+    max_carried_targets:        u8,
+    _padding0:                  [u8; 7],
+    carry_offset_distance:      i64,    // I32F32
+    lateral_spacing:            i64,    // I32F32
+}
+// Fixed size: 24 bytes
+```
+```
+
+#### 4.6 BlockDefenseDef_Wire
+
+Present when the `has_block_defense` flag is set. Serializes
+`02-schema-and-validation.md` §7.3.
+
+```
+BlockDefenseDef_Wire {
+    chance_stat_id:          u16,    // Pre-hashed stat name
+    applies_to:              u8,     // 0=direct_hits, 1=weapon_hits_only, 2=all_damage_events
+    flags:                   u8,     // bit 0 = negates_non_damage_effects
+    dr_penalty_per_block:    i64,    // I32F32
+    dr_decay_interval_ticks: u32,
+    max_dr_stacks:           u16,    // 0 = uncapped
+    _padding:                [u8; 2],
+}
+// Fixed size: 20 bytes
+```
+
+#### 4.6.1 ContainerProfileDef_Wire
+
+Present when the `has_container_profile` flag is set. Serializes
+`02-schema-and-validation.md` §7.3.1.
+
+```
+ContainerProfileDef_Wire {
+    max_capacity:            u16,
+    occupant_cast_policy:    u8,    // 0=none, 1=basic_attacks_only, 2=all
+    occupant_storage_mode:   u8,    // 0=attached_visible, 1=off_world_stored
+    flags:                   u8,    // bit 0 = occupant_can_be_targeted, bit 1 = allow_manual_exit, bit 2 = eject_on_removed
+    _padding:                [u8; 3],
+    allowed_filter_id:       u32,   // Pre-hashed filter identifier
+    entry_range:             i64,   // I32F32
+}
+// Fixed size: 20 bytes
+```
+
+#### 4.7 LoadoutProfileTable_Wire
+
+Present when the `has_loadout_profiles` flag is set. Serializes
+`02-schema-and-validation.md` §7.4.
+
+```
+LoadoutProfileTable_Wire {
+    profile_count:    u16,
+    _padding:         [u8; 2],
+    // Inline: LoadoutProfileDef_Wire[profile_count]
+}
+// Fixed header size: 4 bytes + variable profile data
+
+LoadoutProfileDef_Wire {
+    profile_id:                 u32,    // Pre-hashed profile name
+    ability_count:              u16,
+    passive_count:              u16,
+    resource_multiplier_count:  u16,
+    stat_multiplier_count:      u16,
+    stat_override_count:        u16,
+    flags:                      u16,    // bit 0 = has_max_hp_multiplier, bit 1 = has_movement_speed_multiplier, bit 2 = has_appearance_id, bit 3 = inherit_abilities, bit 4 = inherit_passives
+    // Variable-length inline data:
+    // 1. Optional: max_hp_multiplier(i64)           — if has_max_hp_multiplier
+    // 2. Optional: movement_speed_multiplier(i64)   — if has_movement_speed_multiplier
+    // 3. Optional: appearance_id(u32)               — if has_appearance_id
+    // 4. AbilityRef_Wire[ability_count]             — omitted if inherit_abilities
+    // 5. PassiveRef_Wire[passive_count]             — omitted if inherit_passives
+    // 6. ResourceScalarEntry_Wire[resource_multiplier_count]
+    // 7. StatEntry_Wire[stat_multiplier_count]
+    // 8. StatEntry_Wire[stat_override_count]
+}
+```
+
+If `inherit_abilities` or `inherit_passives` is set, the corresponding count MUST be zero and the
+parent `EntityDefinition_Wire` arrays remain in force for that profile. If the inherit flag is
+clear, a zero count means the profile deliberately exposes none of that category.
+
+#### 4.8 ControlTopologyDef_Wire
+
+Present when the `has_control_topology` flag is set. Serializes
+`02-schema-and-validation.md` §7.5-§7.6.
+
+```
+ControlTopologyDef_Wire {
+    mode:               u8,     // 0=one_to_many, 1=many_to_one
+    input_policy:       u8,     // 0=mirror, 1=role_split, 2=adapter_routed
+    selection_mode:     u8,     // 0=single, 1=multiple, 2=all
+    elimination_policy: u8,     // 0=all_members_removed, 1=primary_removed, 2=shared_entity_removed
+    member_count:       u16,
+    _padding:           [u8; 2],
+    // Inline: ControlMemberDef_Wire[member_count]
+}
+// Fixed header size: 8 bytes + variable member data
+
+ControlMemberDef_Wire {
+    role_id:            u32,    // Pre-hashed role name
+    entity_type_id:     u32,    // 0 when this member addresses the shared entity in many-to-one mode
+    loadout_profile_id: u32,    // 0 = none
+    control_scope:      u8,     // 0=full, 1=movement_only, 2=abilities_only, 3=observer_only
+    flags:              u8,     // bit 0 = is_primary
+    _padding:           [u8; 2],
+}
+// Fixed size: 16 bytes
+```
+
+`member_count` MUST respect the core `max_multiplex_group_size` bound. `many_to_one` entries
+serialize the shared entity once in the parent `EntityDefinition_Wire`; member rows describe role
+inputs and optional `loadout_profile_id` restrictions rather than distinct spawned archetypes.
+
+#### 4.9 TargetabilityPolicy_Wire
+
+Present when the `has_targetability_policy` flag is set. Serializes
+`02-schema-and-validation.md` §9.11.
+
+```
+TargetabilityPolicy_Wire {
+    flags:   u8,   // bit 0 = hostile_effects, bit 1 = allied_beneficial_effects, bit 2 = allied_harmful_effects, bit 3 = self_effects, bit 4 = affected_by_area_effects, bit 5 = collidable_for_skillshots, bit 6 = collidable_for_pathing
+    _padding:[u8; 3],
+}
+// Fixed size: 4 bytes
+```
+
+#### 4.10 ObserverPresentation_Wire
+
+Present when the `has_observer_presentation` flag is set. Serializes
+`02-schema-and-validation.md` §9.12.
+
+```
+ObserverPresentation_Wire {
+    visibility_flags:      u8,    // bit 0 = visible_to_enemies, bit 1 = visible_to_allies, bit 2 = visible_to_self
+    appearance_source:     u8,    // 0=self, 1=mirror_entity
+    enemy_hp_presentation: u8,    // 0=authoritative, 1=full, 2=mirror_source_percent
+    ally_marker:           u8,    // 0=none, 1=decoy_indicator
+    source_entity_ref:     u32,   // 0 when appearance_source = self
+}
+// Fixed size: 8 bytes
 ```
 
 ---
@@ -423,7 +766,8 @@ Serialized buff/debuff/CC definitions from `02-schema-and-validation.md` §9.
 StatusEffectDef_Wire {
     status_id:          u32,        // Numeric status ID
     max_stacks:         u8,
-    flags:              u8,         // Bitfield: bit 0 = is_passive, bit 1 = is_cleansable, bit 2 = has_periodic_effects, bit 3 = has_on_expire_effects, bit 4 = has_consumption_window, bits 5-7 reserved (zero)
+    _reserved0:         u8,
+    flags:              u16,        // Bitfield: bit 0 = is_passive, bit 1 = is_cleansable, bit 2 = has_periodic_effects, bit 3 = has_on_expire_effects, bit 4 = has_consumption_window, bit 5 = has_damage_accumulator, bit 6 = has_deferred_ledger, bit 7 = has_hp_floor, bit 8 = has_death_prevention, bit 9 = has_movement_damage, bit 10 = has_targetability_policy, bit 11 = has_observer_presentation, bit 12 = has_suspension, bit 13 = has_projectile_intercept, bit 14 = has_zone_relation_gate, bit 15 = has_movement_constraint
     polarity:           u8,         // StatusPolarity enum: 0=neutral, 1=positive, 2=negative
     status_application_immunity: u8, // StatusApplicationImmunity enum: 0=none, 1=negative, 2=positive, 3=all
     cc_category:        u8,         // CcCategory enum: 0=none, 1=displacement, 2=hard_disable, 3=soft_disable, 4=forced_movement, 5=target_override, 6=mute
@@ -432,14 +776,27 @@ StatusEffectDef_Wire {
     cc_immunity_mask:   u8,         // Bitmask over CcCategory values; 0 = none
     duration_ticks:     u32,
     modifier_count:     u16,        // Stat modifiers
+    resource_stat_link_count: u16,  // Status-owned resource-to-stat overlays
     capability_flags:   u16,        // P-26 capability bitmask: bit 0=CAN_MOVE, bit 1=CAN_CAST, bit 2=CAN_ATTACK, bit 3=CAN_USE_ITEMS, bit 4=PASSIVES_ACTIVE, bits 5-15 reserved
     snapshot_recorder_state_id: u32, // 0 = none; references RuntimeStateTable entry of kind snapshot_buffer
 
     // Variable-length inline data:
     // 1. StatModifier[modifier_count]  — { stat_id: u16, op: u8, value: i64 }
-    // 2. Optional: PeriodicBlock_Wire          — if has_periodic_effects flag
-    // 3. Optional: ConsumptionWindowBlock_Wire — if has_consumption_window flag
-    // 4. Optional: OnExpireEffects             — if has_on_expire_effects flag
+    // 2. ResourceStatLink_Wire[resource_stat_link_count]
+    // 3. Optional: PeriodicBlock_Wire          — if has_periodic_effects flag
+    // 4. Optional: ConsumptionWindowBlock_Wire — if has_consumption_window flag
+    // 5. Optional: DamageAccumulatorDef_Wire   — if has_damage_accumulator flag
+    // 6. Optional: DeferredLedgerDef_Wire      — if has_deferred_ledger flag
+    // 7. Optional: HpFloorDef_Wire             — if has_hp_floor flag
+    // 8. Optional: DeathPreventionDef_Wire     — if has_death_prevention flag
+    // 9. Optional: MovementDamageDef_Wire      — if has_movement_damage flag
+    // 10. Optional: TargetabilityPolicy_Wire    — if has_targetability_policy flag
+    // 11. Optional: ObserverPresentation_Wire  — if has_observer_presentation flag
+    // 12. Optional: SuspensionDef_Wire         — if has_suspension flag
+    // 13. Optional: ProjectileInterceptDef_Wire — if has_projectile_intercept flag
+    // 14. Optional: ZoneRelationGateDef_Wire   — if has_zone_relation_gate flag
+    // 15. Optional: MovementConstraintDef_Wire — if has_movement_constraint flag
+    // 16. Optional: OnExpireEffects            — if has_on_expire_effects flag
 }
 ```
 
@@ -452,6 +809,24 @@ set `cc_category` and `cc_immunity_mask` for CC-admission and immunity-window pu
 `snapshot_recorder_state_id`, when non-zero, requests the engine's canonical `P-05 Historical
 State Buffer` behavior for the referenced runtime-state slot. This is a status-owned recorder flag,
 not a separate timer callback.
+
+`damage_accumulator.bind_total_as` is a compiler-local binding name only, so it is NOT serialized
+here. The wire format carries only the runtime behavior flags for the accumulator policy.
+
+`resource_stat_links` serialize as a counted inline array rather than consuming another flag bit,
+because the 16-bit status `flags` field is already fully allocated. A zero
+`resource_stat_link_count` means the status has no live resource-backed stat overlays.
+
+```
+ResourceStatLink_Wire {
+    pool_id:      u32,    // Pre-hashed pool name
+    stat_id:      u16,    // Pre-hashed stat name
+    operation:    u8,     // 0=add_flat, 1=add_percent, 2=multiply
+    _padding:     u8,
+    coefficient:  i64,    // I32F32
+}
+// Fixed size: 16 bytes
+```
 
 ```
 ConsumptionWindowBlock_Wire {
@@ -466,6 +841,90 @@ ConsumptionWindowBlock_Wire {
     // 2. AbilityOverride_Wire[override_count]
     // 3. Effect_Wire[on_consume_effect_count]
 }
+```
+
+```
+DamageAccumulatorDef_Wire {
+    flags:        u8,    // bit 0 = include_absorbed_damage
+    _padding:     [u8; 3],
+}
+// Fixed size: 4 bytes
+```
+
+```
+DeferredLedgerDef_Wire {
+    flags:        u8,    // bit 0 = freeze_observer_hp
+    remove_policy:u8,    // 0=resolve_immediately, 1=discard
+    _padding:     [u8; 2],
+}
+// Fixed size: 4 bytes
+```
+
+```
+HpFloorDef_Wire {
+    min_hp:       i64,   // I32F32
+}
+// Fixed size: 8 bytes
+```
+
+```
+DeathPreventionDef_Wire {
+    restore_hp_ratio: i64, // I32F32
+    flags:            u8,  // bit 0 = consume_on_trigger, bit 1 = bypass_anti_heal
+    _padding:         [u8; 7],
+}
+// Fixed size: 16 bytes
+```
+
+```
+MovementDamageDef_Wire {
+    damage_per_unit:   i64, // I32F32
+    max_damage_per_tick: i64, // I32F32; ignored unless flags bit 0 is set
+    damage_type:       u8,  // Game-defined damage-type enum
+    flags:             u8,  // bit 0 = has_damage_cap
+    _padding:          [u8; 6],
+}
+// Fixed size: 24 bytes
+```
+
+```
+SuspensionDef_Wire {
+    mode:              u8,   // 0=suspended, 1=dormant, 2=stasis
+    flags:             u8,   // bit 0 = invulnerable, bit 1 = pause_status_timers, bit 2 = pause_ability_cooldowns, bit 3 = interrupt_active_casts, bit 4 = interrupt_active_channels, bit 5 = exclude_from_payloads
+    _padding:          [u8; 2],
+}
+// Fixed size: 4 bytes
+```
+
+```
+ProjectileInterceptDef_Wire {
+    mode:                     u8,   // 0=reflect_to_source
+    max_redirect_generations: u8,
+    fallback_target:          u8,   // 0=last_known_source_position, 1=despawn
+    flags:                    u8,   // bit 0 = preserve_original_payload
+}
+// Fixed size: 4 bytes
+```
+
+```
+ZoneRelationGateDef_Wire {
+    zone_state_id:             u32,   // References RuntimeStateTable entry of kind bookmark
+    flags:                     u8,    // bit 0 = require_target_inside, bit 1 = require_hostile_source_inside, bit 2 = reject_damage, bit 3 = reject_hostile_effects
+    _padding:                  [u8; 3],
+}
+// Fixed size: 8 bytes
+```
+
+```
+MovementConstraintDef_Wire {
+    anchor_state_id:           u32,   // References RuntimeStateTable entry of kind bookmark
+    max_distance:              i64,   // I32F32
+    damage_per_unit:           i64,   // I32F32; 0 unless mode = damage
+    mode:                      u8,    // 0=clamp, 1=reverse, 2=damage
+    flags:                     u8,    // bit 0 = apply_to_forced_movement, bit 1 = apply_to_teleports
+    _padding:                  [u8; 2],
+}
+// Fixed size: 24 bytes
 ```
 
 ```
@@ -520,8 +979,8 @@ ComboMatrixTable {
 ComboMatrixEntry {
     field_type:     u8,         // ComboFieldType enum
     finisher_type:  u8,         // ComboFinisherType enum
-    effect_offset:  u16,        // Offset into inline effect data
-    effect_size:    u16,        // Size of the serialized effect
+    effects_offset: u16,        // Offset into inline serialized EffectList data
+    effects_size:   u16,        // Size of the serialized EffectList blob
 }
 ```
 

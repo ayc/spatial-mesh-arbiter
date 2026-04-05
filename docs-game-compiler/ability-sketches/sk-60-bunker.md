@@ -6,7 +6,7 @@ I deploy a bunker at a target position. Allies can right-click the bunker to ent
 
 ## Primitive Composition
 
-P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-20 (Damage Redirection)
+P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-06 (Attached Kinematics)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -31,89 +31,94 @@ P-32 (Actor Spawning) → P-58 (Container/Vehicle Logic) → P-20 (Damage Redire
 
 ## Engine Primitives Required
 
-### Enterable Structure Entity
+Bunker is now a canonical stationary `attached_visible` container shell.
 
-This is a completely new entity type — a **structure that contains other entities**:
+The recommended lowering is:
 
-```
-struct BunkerActor {
-    bunker_id: EntityID,
-    position: Vec2F,
-    hp: SimFixed,
-    max_hp: SimFixed,
-    expires_at_tick: u64,
-    max_occupants: u8,
-    occupants: Vec<EntityID>,  // Entities currently inside
-    owner_team: TeamId,        // Only this team can enter
-}
-```
+1. one `spawn_actor` bunker shell at the ground-targeted position
+2. one bunker archetype with:
+   - HP and ordinary enemy targetability
+   - `container_profile = {`
+     `max_capacity = 4,`
+     `entry_range = ... ,`
+     `allowed_filter = ally_alive,`
+     `occupant_storage_mode = attached_visible,`
+     `occupant_can_be_targeted = false,`
+     `occupant_cast_policy = basic_attacks_only,`
+     `allow_manual_exit = true,`
+     `eject_on_removed = true`
+     `}`
+   - pathing / projectile collision authored like an ordinary destructible structure
 
-The bunker is:
-- A targetable, destructible entity (enemies can attack it)
-- A spatial obstacle (blocks pathing like SK-03 Terrain Wall)
-- A container for multiple entities (like SK-54 Entity Consumption, but voluntary and multi-occupant)
-- An enabler (occupants can still auto-attack out)
+This uses the canonical bunker/vehicle branch of `P-58`:
 
-### Occupant State
+- occupants remain spatially attached to the bunker through the `attached_visible` container mode
+- occupants are not directly targetable while inside
+- occupants may still basic-attack, but cannot use arbitrary abilities because
+  `occupant_cast_policy = basic_attacks_only`
+- bunker destruction or expiry force-ejects all occupants automatically through `eject_on_removed`
 
-Entities inside the bunker need a modified state:
-- Position: locked to bunker position (no movement)
-- Untargetable: excluded from targeting queries (like SK-44 Burrow)
-- Can auto-attack: yes, but with modified range (firing port range, shorter than normal)
-- Can use abilities: no (most abilities blocked, like SK-26 Silence)
-- Can exit: voluntary action at any time
-
-This is a unique capability combination — untargetable + can attack + can't move + can't cast. No existing sketch has this exact set.
-
-### Enter/Exit Interaction
-
-Entering the bunker is an **interact action** — the ally right-clicks the bunker and their entity enters. This is similar to SK-45 Essence Collection (proximity interaction) but with a different outcome (entity enters the structure rather than collecting a pickup).
-
-The Arbiter must:
-1. Validate the interact: is the ally in range? Is the bunker full? Is the ally on the correct team?
-2. Remove the ally from the spatial world (like SK-54 consumption, but voluntary)
-3. Add the ally to the bunker's occupant list
-4. Enable firing-port auto-attack for the occupant
-
-Exit is the reverse — the ally's entity re-enters the spatial world at the bunker's position.
-
-### Firing Port Attacks
-
-Occupants can auto-attack from inside the bunker. The attack originates from the bunker's position (not the occupant's original position). The occupant's offensive stats are used. The target must be within firing port range. The attack goes through normal Phase 1 → Phase 2 resolution.
-
-Can occupants' auto-attacks trigger on-hit procs (SK-09 Chain Lightning)? Probably yes — the occupant is performing an auto-attack.
+So the sketch does not need a separate damage-redirection subsystem. The bunker shell simply takes
+the damage because it is the targetable body; the occupants are protected by container policy.
 
 ## Cross-Boundary Concerns
 
-TODO: The bunker is a stationary entity on one Arbiter. Cross-boundary concerns:
+Bunker follows the ordinary stationary-container authority model.
 
-1. **Allies from neighboring Arbiter entering:** An ally Ghost interacts with the bunker. The ally's Arbiter must hand off the entity to the bunker's Arbiter (the ally enters the bunker = their entity moves to the bunker's Arbiter). This is an entity handoff triggered by interaction, not by movement.
-
-2. **Firing port attacks on Ghost targets:** Occupants auto-attack enemies that might be Ghosts. Standard damage relay.
-
-3. **Bunker near boundary:** The bunker blocks pathing — neighbors need to know about it for their entities' collision. Does the bunker appear in the neighbor's static_grid? Or as a Ghost-like obstacle?
-
-4. **Bunker destroyed, occupants ejected:** All occupants materialize at the bunker's position. If the bunker was near a boundary, some ejected entities might need handoff to a neighbor.
+1. The bunker shell is a stationary spawned actor with one authoritative owner based on its current
+   position.
+2. If an ally enters from another Arbiter, `enter_container` commits on the bunker shell's current
+   owner. The occupant then follows the bunker through the canonical `attached_visible` container
+   path rather than remaining independently authoritative elsewhere.
+3. Occupant auto-attacks still originate from the bunker shell's current position and use the
+   occupant's own combat path. Remote/Ghost targets are handled through ordinary hostile relays.
+4. If the bunker is near a seam, the shell's pathing / projectile collision is mirrored through the
+   same boundary-obstacle / Ghost admission model used by other targetable structures.
+5. If the bunker is destroyed or expires near a seam, the eject happens on the bunker shell's owner
+   at the bunker position, and any newly ejected occupant that belongs in a neighbor region then
+   follows ordinary post-eject handoff rules.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: bunker HP, duration, max occupants (4), team-restricted entry, occupant state (untargetable, can auto-attack with reduced range, can't move/cast), enter/exit interaction, destruction ejects all, blocks pathing. Compiler produces:
-- BunkerActor entity definition with HP, occupant list, pathing obstruction
-- Occupant state modification (untargetable + attack-only + immobile)
-- Enter/exit interaction definitions
-- Firing port attack range override
-- On-destroy/on-expire: eject all occupants
-- Linked lifecycle between bunker and occupant states
+Designer specifies:
 
-## Open Questions
+- bunker shell position / lifetime / HP
+- max occupants
+- ally-only entry filter
+- entry range
+- occupant cast policy
+- structure collision / pathing policy
 
-- Can the caster enter their own bunker?
-- Can enemies enter the bunker (contested bunker)?
-- Can occupants use healing abilities on each other while inside?
-- Do occupants share the bunker's damage (bunker takes 100 damage, each occupant takes 25)?
-- Can the bunker be healed/repaired by allies?
-- Does SK-31 Vortex pull entities out of the bunker?
-- Can SK-01 Toss throw an enemy INTO the bunker (forced entry)?
-- Does the bunker block projectiles (SK-02 Poison Shot can't pass through)?
-- Can SK-54 Entity Consumption swallow the entire bunker (with occupants inside)?
-- How does the bunker interact with Arbiter split/merge — it's a stationary multi-entity container?
+Compiler emits:
+
+- one bunker shell spawned actor
+- one bunker entity archetype with canonical `container_profile`
+- ordinary `enter_container` / `exit_container` interaction paths
+- force-eject-on-removal behavior through `eject_on_removed = true`
+
+Compiler validates:
+
+1. `max_capacity > 0`
+2. `entry_range > 0`
+3. `occupant_storage_mode = attached_visible`
+4. `occupant_cast_policy = basic_attacks_only`
+5. the mechanic is expressed through canonical `container_profile` and container entry/exit effects,
+   not a bespoke bunker-only occupant list subsystem
+
+## Resolved Interaction Notes
+
+- The caster may enter their own bunker because the entry filter is ally-based and includes the
+  owner's team.
+- Enemies cannot enter this reference bunker because the container profile's `allowed_filter` is
+  `ally_alive`.
+- Occupants cannot cast healing or other ordinary abilities while inside, because the cast policy is
+  `basic_attacks_only`.
+- Incoming damage is applied to the bunker shell only. Occupants do not share bunker damage in this
+  reference.
+- The bunker may be healed/repaired by allies through ordinary beneficial targeting if the bunker
+  archetype leaves allied beneficial effects enabled.
+- Occupants are container-attached, so outside displacement effects such as Vortex do not pull them
+  out. Entry is voluntary `enter_container`; forced hostile throws do not automatically become valid
+  bunker entry.
+- Projectile blocking is an ordinary bunker-shell archetype choice. This reference assumes the
+  shell blocks both pathing and hostile projectiles like a small destructible structure.

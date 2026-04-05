@@ -29,81 +29,70 @@ P-23 (Floor Clamping) → P-45 (Delay Timer)
 
 ## Engine Primitives Required
 
-### HP Floor During Damage Resolution
+Death Immunity is now a canonical `hp_floor` reference.
 
-This is a new modifier in the damage resolution pipeline. After all damage is calculated and applied:
+The recommended lowering is:
 
-```
-fn apply_damage(entity: &mut Entity, damage: SimFixed) {
-    entity.hp = entity.hp - damage;
+1. apply one positive `death_immunity` status to the caster for 240 ticks
+2. that status authors:
+   - `hp_floor = { min_hp = 1 }`
+   - optional presentation-only visuals / UI state
+3. do NOT pair the status with `death_prevention`; this sketch is the sustained floor window, not the
+   one-shot lethal intercept pattern
 
-    // Death Immunity check — AFTER damage, BEFORE death check
-    if entity.has_death_immunity() && entity.hp < SimFixed::ONE {
-        entity.hp = SimFixed::ONE;
-    }
+This keeps the mechanic entirely inside the canonical `P-23` floor-clamp contract:
 
-    // Normal death check
-    if entity.hp <= SimFixed::ZERO {
-        trigger_death(entity);
-    }
-}
-```
-
-The key: death immunity modifies the RESULT of damage, not the damage itself. The full damage amount is "dealt" (for purposes of SK-46 Adaptation accumulator, SK-22 Reflection, etc.), but HP is floored at 1.
-
-### New Entity State: Death Immune
-
-```
-status_effect: DeathImmunity {
-    expires_at_tick: u64,
-}
-```
-
-When active: `is_death_immune = true`. The damage pipeline checks this flag after applying damage and before checking for death.
-
-### Distinct From Other Defensive States
-
-| State | Takes damage? | Can die? | Can be CC'd? | Can be targeted? |
-|---|---|---|---|---|
-| Normal | Yes | Yes | Yes | Yes |
-| Invulnerable (SK-44) | No | No | Depends | Depends |
-| Unstoppable (SK-51) | Yes | Yes | No | Yes |
-| **Death Immune (SK-73)** | **Yes** | **No** | **Yes** | **Yes** |
-
-Death Immunity is the most permissive defensive state — everything works normally EXCEPT dying. You take damage, you can be CC'd, you can be targeted. You just can't reach 0 HP.
-
-### Interaction Cascade
-
-Death Immunity creates extreme edge cases with other abilities:
-- **SK-02 Poison Shot DoT:** DoT keeps ticking, HP keeps hitting 1, each tick triggers the "heals caster" drain. The poison caster gets infinite drain healing from a death-immune target.
-- **SK-46 Adaptation:** Death-immune entity takes massive damage, accumulates it all, then heals for 100% when Adaptation expires. Combined with Death Immunity, you can take 10,000 damage and heal it all back.
-- **SK-70 Energy Shield:** Shield absorbs while death-immune, generating Energy. Then shield breaks, HP goes to 1, but death immunity prevents death. Maximum Energy from maximum damage absorption.
-- **SK-11 On-Kill Cascade:** Enemies can't die from cascade while death-immune, preventing the chain.
+- incoming damage is still resolved through the ordinary pipeline
+- the entity remains targetable and CC-able
+- Stage 10 clamps final HP to `1` while the status is active
+- no death event is emitted unless the floor is gone and a later lethal event commits terminal death
 
 ## Cross-Boundary Concerns
 
-TODO: Minimal cross-boundary complexity. Death Immunity is a local flag on the entity's Arbiter. Incoming damage (local or relayed) is applied normally — the HP floor check is local. The entity's owning Arbiter manages the flag.
+Death Immunity is target-owner authoritative.
 
-The only concern: if damage is relayed cross-boundary and the attacker expects a kill (for on-kill procs like SK-11), the kill doesn't happen. The attacker's Arbiter might have predicted a kill based on Ghost HP data, but the actual HP floor prevents it. This is a prediction mismatch, not a correctness issue.
+1. Incoming damage, including cross-boundary prepared-hit relays, still resolves on the defended
+   entity's current owner.
+2. The same owner applies the generated `hp_floor` status and therefore decides whether HP is
+   clamped to `1` instead of committing terminal death.
+3. Because `PlayerDied` is emitted only if terminal death actually commits, attacker-side kill
+   consumers simply do not fire while the floor is active. No extra relay path is needed beyond the
+   ordinary hostile-hit contract.
+4. If the defended entity hands off while the window is active, the status transfers as ordinary
+   SoftState and the new owner continues the same Stage 10 floor check.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: self-cast, duration (4s), HP floor at 1 (cannot die), all damage still applies, all other mechanics still function. Compiler produces:
-- Status effect with `is_death_immune: true` flag
-- Damage pipeline modification: after damage application, floor HP at 1 if flag is active
-- Death check bypass: skip death trigger while flag is active
-- Duration expiry removes the flag (no special on-expiry behavior)
+Designer specifies:
 
-The compiler needs to place this check at the correct point in the damage resolution pipeline — AFTER all damage is applied (so damage numbers, procs, and accumulators see the real damage) but BEFORE the death check.
+- self-cast duration
+- minimum HP floor
+- whether the positive status is cleansable/purgeable
 
-## Open Questions
+Compiler emits:
 
-- Can Death Immunity be purged/cleansed by enemies (removing it to enable the kill)?
-- Does the HP floor prevent execution effects (SK-14 Execute Threshold — bonus damage still applies, but the kill portion doesn't trigger)?
-- If HP is at 1 and the entity takes 10,000 damage: is the damage "dealt" 10,000 (for Adaptation, Reflection) or is it clamped to "damage that would bring HP to 1"?
-- Does Death Immunity prevent SK-53 HP Swap from setting HP to a value that would be 0?
-- Can Death Immunity stack with SK-44 Burrow (invulnerable + death immune — redundant but valid)?
-- Does the 4-second window have any interaction with SK-37 Time Rewind (rewind to a higher HP during death immunity)?
-- Is there any visual/audio cue when damage is "prevented" by the floor (HP would have gone to 0 but was held at 1)?
-- Does Kinematic Dilation affect the 4-second window?
-- Can AI NPCs (SK-06 summons) receive Death Immunity?
+- one positive status
+- one canonical `hp_floor` block on that status
+- no `death_prevention` block and no expiry payload
+
+Compiler validates:
+
+1. `min_hp > 0`
+2. this sketch's reference version uses `min_hp = 1`
+3. the behavior is authored through `hp_floor`, not through invulnerability or a one-shot
+   death-prevention rewrite
+4. any purge interaction is expressed through ordinary status cleansability, not through a bespoke
+   "turn off death immunity" hook
+
+## Resolved Interaction Notes
+
+- This reference still takes full incoming damage through the ordinary mitigation / shield path. The
+  special rule is only the final minimum-HP clamp.
+- Execute-style threshold checks may still qualify for bonus damage, but a non-bypassing execute
+  does not kill through the active floor.
+- If the beneficial status is purged early and the entity is still at lethal HP, the next lethal
+  damage event kills normally; purge does not retroactively emit a death for already-resolved hits.
+- Death Immunity may coexist with other defensive layers such as shields. Those layers resolve in
+  their ordinary order before the Stage 10 floor check.
+- Kinematic Dilation does not alter the authored 240-tick window. The status lasts for 240
+  simulation ticks unless some other canonical timer-pause state says otherwise.

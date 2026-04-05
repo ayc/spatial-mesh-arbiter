@@ -2,7 +2,9 @@
 
 ## Designer Intent
 
-A buff or passive that reflects a percentage of incoming damage back to the attacker. When I take 100 damage and have 30% reflection, I take the full 100 but the attacker also takes 30 damage. The reflected damage uses the attacker's own defensive stats for mitigation.
+A buff or passive that reflects a percentage of incoming damage back to the attacker. When I take
+100 damage and have 30% reflection, I take the full 100 but the attacker also takes 30 damage. The
+reflected damage uses the attacker's own defensive stats for mitigation.
 
 ## Primitive Composition
 
@@ -12,48 +14,86 @@ P-36 (On-Damage-Received Hook)
 
 ## Inputs
 
-- Incoming damage event (any source)
-- Defender's reflection percentage (from buff, item, or passive)
-- Attacker entity (damage source)
+- Incoming damage event
+- Defender's reflection percentage
+- Attacker entity
 
 ## Observable Behavior
 
-1. Attack lands on me — normal damage is applied
-2. Reflection calculates: reflected_amount = incoming_damage * reflection_percentage
-3. Reflected damage is sent back to the attacker as a new damage event
-4. Attacker's defensive stats mitigate the reflected damage independently
-5. Reflection damage type matches the original damage type (fire reflected as fire)
-6. Reflected damage can trigger procs on the attacker (they are "taking damage")
-7. Visual: mirror/shimmer effect on the defender, reflected damage number on the attacker
+1. I take qualifying incoming damage normally.
+2. After my branch resolves, reflection computes `reflected_amount = committed_damage_taken *
+   reflection_ratio`.
+3. One reactive reverse damage packet is emitted against the triggering attacker.
+4. The attacker mitigates that reflected hit through their own shields, block, resistances, and
+   later mitigation rules.
+5. In this reference, the reflected packet mirrors the triggering branch's damage type.
+6. Fully negated hits reflect zero because no committed damage reached the defender.
+7. Visual: mirror/shimmer response on the defender and reflected damage feedback on the attacker.
 
 ## Engine Primitives Required
 
-TODO: Reflection is evaluated during Phase 2 AFTER the damage amount is known (post-mitigation on the defender? or pre-mitigation?). The reflected damage becomes a new outgoing damage event from the defender to the attacker. This reverse damage event needs to go through Phase 2 on the ATTACKER's Arbiter. How is this different from SK-23 Thorns — reflection scales with incoming damage, thorns is flat.
+Damage Reflection is now a canonical passive `on_damage_received` reverse-hit reference using the
+bounded trigger-local fallback surface.
 
-## Interaction With Other Defensive Mechanics
+The recommended lowering is:
 
-Ordering within Phase 2 is critical:
-- **Block (SK-21)** — if blocked, incoming damage is zero, so reflected amount is zero. No reflection on blocked hits.
-- **Evasion** — if evaded, no hit occurred, no reflection.
-- **Shield (SK-17)** — is reflection calculated on pre-shield or post-shield damage? If the shield absorbs 80 of 100 damage, is reflection 30% of 100 or 30% of 20?
-- **Guardian Angel (SK-19)** — if 50% of damage is redirected to the guardian, does the ward reflect 30% of their 50%, the guardian reflects 30% of their 50%, or reflection is calculated on the full 100 before redirect?
-- **Thorns (SK-23)** — reflection and thorns both send damage back. Are they additive? Do they trigger independently?
+1. apply one passive/status-owned `on_damage_received` trigger to the defender
+2. when that trigger fires, read the triggering branch's committed damage amount and damage type
+   from the current P-36 event context
+3. emit one reactive reverse damage packet to the triggering attacker with:
+   - `amount = damage_received * reflection_ratio`
+   - `damage_type = triggering_damage_type`
+4. carry the canonical reactive-depth safety bound on that reverse packet
+
+This keeps the mechanic inside existing surfaces:
+
+- the percentage scales from committed damage already resolved on the defender branch
+- the return hit is ordinary damage against the attacker, not a bespoke reflection subsystem
+- the implementation stays inside `on_damage_received` plus one bounded trigger-local calculation
 
 ## Cross-Boundary Concerns
 
-TODO: The reflected damage is a reverse relay. The defender's Arbiter calculates the reflected amount during Phase 2, then sends a damage event back to the attacker's Arbiter for Phase 2 resolution against the attacker's defenses. Same reverse relay pattern as SK-13 Counter-Strike. Can the reflected damage itself be reflected (attacker also has reflection → infinite loop)? Must be bounded by proc_depth.
+Reflection follows the ordinary reverse-relay story for defender-side reactive damage.
+
+1. The defender's current owner computes the committed-damage amount in Stage 9 after the local
+   branch has already finished protection and mitigation.
+2. If the attacker is remote, the reflected prepared-hit packet relays back to the attacker's
+   current owner and resolves there on the next tick.
+3. If the original hit was split by other mechanics, reflection is branch-local: each target
+   reflects only the committed damage that actually landed on that branch.
+4. The canonical reactive-depth bound prevents reflected damage from opening a fresh reflection or
+   thorns ping-pong tree.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: reflection percentage, damage type matching, what it calculates from (pre or post mitigation). Compiler produces: Phase 2 hook that calculates reflected amount and emits a reverse damage event. The compiler needs to ensure the reverse event is tagged to prevent infinite reflection loops (proc_depth or a "reflected" flag that prevents re-reflection).
+Designer specifies:
 
-## Open Questions
+- reflection ratio
+- which incoming damage classes qualify
+- whether the reflected packet mirrors the triggering damage type or uses a fixed authored type
+- whether the effect is passive, buff-owned, or item-owned
 
-- Is reflection calculated on pre-mitigation or post-mitigation damage?
-- Can reflected damage crit?
-- Can reflected damage trigger on-hit procs on the attacker (SK-09 Chain Lightning)?
-- Can reflected damage be reflected back again (attacker also has reflection)? If so, how is this bounded?
-- Does reflection apply to DoT ticks (SK-02 Poison) — each tick reflects a portion back to the DoT caster?
-- Does reflection apply to AoE damage (SK-10 Crit Explosion) — is it reflected to the original caster or the explosion source?
-- Can reflection percentage exceed 100% (reflecting more than received)?
-- How does reflection interact with damage that has multiple sources (e.g., SK-04 Tether shared damage — who gets the reflection)?
+Compiler emits:
+
+- one passive/status-owned `on_damage_received` trigger
+- one bounded trigger-local calculation from the committed damage amount
+- one reactive reverse damage payload to the triggering attacker
+
+Compiler validates:
+
+1. `reflection_ratio` is in `[0, 1]` for this reference
+2. the sketch keys from committed received damage, not from pre-mitigation attacker-side state
+3. the return packet remains reactive and therefore inherits the canonical reactive-depth bound
+
+## Resolved Interaction Notes
+
+- This reference reflects committed damage taken on the defender branch. Blocked hits, fully negated
+  barrier hits, or zero-damage branches reflect zero.
+- Guardian Angel and similar split mechanics are branch-local here: the ward reflects only what the
+  ward actually took, and the guardian reflects only what the guardian actually took.
+- Reflection may apply to any qualifying committed damage source in this reference, including DoT or
+  AoE branches, as long as there is an attributed attacker/source entity to receive the reverse hit.
+- Reflected damage is a reactive reverse packet, not a fresh attack roll. It does not crit in this
+  reference.
+- Under the canonical default reactive-depth bound, reflected damage does not start a fresh
+  `on_damage_received` / `on_hit` proc tree of its own.

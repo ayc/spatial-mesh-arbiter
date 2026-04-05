@@ -27,70 +27,76 @@ P-16 (Stat Layering)
 
 ## Engine Primitives Required
 
-### Heal Resolution Modifier
+Anti-Heal is now a canonical stat-layering reference.
 
-All existing mechanics modify the DAMAGE pipeline (block, reflect, absorb, etc.). Anti-heal modifies the HEAL pipeline. The engine needs a heal resolution path that checks for modifiers:
+The recommended lowering is:
 
-```
-fn resolve_heal(target: &Entity, base_heal: SimFixed) -> SimFixed {
-    let mut effective_heal = base_heal;
+1. resolve one ground-targeted AoE using the same relation-branching pattern as `SK-48`
+2. on hostile hits:
+   - deal ordinary AoE damage
+   - apply one negative `healing_blocked` status with:
+     - `stat_modifiers = [{ stat = healing_received_multiplier, op = mul, value = 0.0 }]`
+     - `duration_ticks = 120`
+     - `is_cleansable = true`
+3. on allied hits:
+   - resolve one ordinary AoE heal
+   - apply one positive `healing_amplified` status with:
+     - `stat_modifiers = [{ stat = healing_received_multiplier, op = mul, value = 1.25 }]`
+     - `duration_ticks = 120`
+     - `is_cleansable = true`
 
-    // Check for healing modifiers
-    for effect in target.active_effects.iter() {
-        match effect {
-            HealingReduction { percentage } => {
-                effective_heal = effective_heal * (SimFixed::ONE - *percentage);
-            },
-            HealingAmplification { percentage } => {
-                effective_heal = effective_heal * (SimFixed::ONE + *percentage);
-            },
-            _ => {}
-        }
-    }
+This keeps the mechanic inside existing surfaces:
 
-    effective_heal = max(SimFixed::ZERO, effective_heal);
-    effective_heal
-}
-```
-
-Every heal source must pass through this resolution: SK-16 Holy Ground pulses, SK-02 Poison Shot drain, SK-18 Resurrect revival HP, SK-46 Adaptation burst heal — ALL heals are affected.
-
-### Dual-Effect AoE
-
-The grenade is a SK-48 Death Coil-style dual-mode ability but as an AoE: enemies receive damage + anti-heal debuff, allies receive heal + amplification buff. The single AoE applies different effects based on target allegiance.
-
-### Interaction With Every Heal Source
-
-Anti-heal must affect ALL healing:
-- Direct heals (SK-16 Holy Ground, SK-94 Placed Potion)
-- Drain heals (SK-02 Poison Shot drain to caster)
-- Passive heals (SK-44 Burrow self-heal)
-- Shield-to-heal conversions (if any)
-- SK-46 Adaptation burst heal
-- SK-93 Death Prevention full heal
-- SK-37 Time Rewind HP restoration (is this a "heal" or an HP overwrite? Design choice)
+- incoming-heal modification is ordinary `P-16` stat layering on the canonical incoming-heal
+  effectiveness stat
+- the grenade's mixed ally/enemy behavior is just relation-branching AoE resolution
+- no bespoke heal-hook system is needed because ordinary heal resolution already reads the target's
+  current compiled stats
 
 ## Cross-Boundary Concerns
 
-TODO: Standard AoE application with relay to Ghost targets. The anti-heal debuff is a status effect on the target's Arbiter. All heal resolution happens locally on the target's Arbiter, so the anti-heal check is local. No special cross-boundary handling beyond initial debuff application.
+Anti-Heal is target-owner authoritative after admission.
+
+1. The grenade owner runs the AoE query using local and Ghost poses, then relays admitted remote
+   targets through the ordinary target-owner path.
+2. Each target owner applies the local damage / heal payload and admits the matching anti-heal or
+   amplification status there.
+3. Every later incoming heal on that target is already local to the target owner, so the
+   `healing_received_multiplier` check is completely local after the status has been admitted.
+4. HP overwrites or other non-heal rewrites are unaffected because they do not use the ordinary heal
+   pipeline.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: AoE ground-targeted, enemies (damage + anti-heal 100% for 2s), allies (heal + amplification 25% for 2s), cleansable. Compiler produces:
-- Dual-effect AoE (SK-48 dual-mode pattern)
-- HealingReduction status effect definition
-- HealingAmplification status effect definition
-- Heal resolution hook: check for healing modifiers before applying any heal
+Designer specifies:
 
-The compiler needs to add heal modifiers to the status effect system and insert a heal resolution check wherever heals are applied.
+- target position
+- AoE radius
+- hostile damage amount
+- hostile healing reduction amount and duration
+- allied heal amount
+- allied healing amplification amount and duration
+- whether the statuses are cleansable
 
-## Open Questions
+Compiler emits:
 
-- Does anti-heal affect SK-37 Time Rewind HP restoration (it's an overwrite, not technically a "heal")?
-- Does anti-heal affect SK-93 Death Prevention's full heal (death prevention → heal → anti-healed to 0 → entity dies anyway)?
-- Does anti-heal affect lifesteal/drain from SK-02 Poison Shot?
-- Can healing reduction exceed 100% (healing becomes damage — "heal" deals damage)?
-- Do multiple anti-heal debuffs stack (two Ana grenades = 200% reduction)?
-- Does anti-heal affect shield generation (SK-70 Energy Shield, SK-17 Sacrifice Shield)?
-- Is healing amplification applied before or after healing reduction (order matters if both are active)?
-- Does anti-heal affect self-healing differently from external healing?
+- one relation-branching area effect
+- one negative anti-heal status definition using `stat_modifiers`
+- one positive healing-amplification status definition using `stat_modifiers`
+
+Compiler validates:
+
+1. the anti-heal multiplier is clamped into the ordinary non-negative heal-resolution range
+2. incoming-heal modification is expressed through canonical stat modifiers, not a bespoke
+   "on_heal" callback path
+3. the hostile and allied branches remain deterministic relation filters on the same AoE event
+
+## Resolved Interaction Notes
+
+- Lifesteal, drain, HoTs, direct heals, and pickup heals are all affected because they use the
+  ordinary heal pipeline.
+- `restore_from_state` and other HP overwrite mechanics are not heals and therefore are unaffected.
+- `death_prevention` bypasses anti-heal by default unless that status explicitly opts out of the
+  bypass.
+- This reference assumes one non-stacking anti-heal and one non-stacking amplification status per
+  source application. Designers who want stacking author it explicitly through ordinary status rules.

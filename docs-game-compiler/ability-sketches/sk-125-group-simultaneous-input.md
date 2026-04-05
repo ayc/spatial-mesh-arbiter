@@ -2,7 +2,10 @@
 
 ## Designer Intent
 
-A fellowship maneuver triggers during combat. ALL group members see a selection wheel with 4 colors: Red (damage), Blue (power restore), Green (heal), Yellow (buff). Each player SIMULTANEOUSLY and INDEPENDENTLY selects a color within a 10-second window. Once all players have selected (or the timer expires), the COMBINATION of all selections determines the outcome. All Red = maximum damage. All Green = massive heal. Specific patterns unlock special named effects with unique bonuses.
+A fellowship maneuver triggers during combat. All group members see a selection wheel with a small
+set of options, such as Red (damage), Blue (power restore), Green (heal), and Yellow (buff). Each
+player independently chooses one option within a shared time window. Once all choices are in, or
+the timer expires, the combination of selections determines the final group effect.
 
 ## Primitive Composition
 
@@ -12,182 +15,123 @@ P-54 (Group Choice Aggregator)
 
 ## Inputs
 
-- Trigger event (specific ability or boss mechanic)
-- Each player selects one option from a set (Red, Blue, Green, Yellow)
-- All selections are collected and evaluated together
+- An opening ability or combat event that starts the maneuver
+- A bounded option list
+- One selection from each participant in the scoped group
 
 ## Observable Behavior
 
-1. Fellowship maneuver triggers — all group members see the selection UI
-2. Each player independently selects a color (no communication needed, but coordination helps)
-3. 10-second window for all players to select
-4. Players who don't select in time: assigned a default (weakest option, or random)
-5. Once all selections are in (or timer expires): combination is evaluated
-6. Example outcomes for a 4-player group:
-   - R-R-R-R: "Might of the Shire" — massive AoE damage burst
-   - G-G-G-G: "Grace of the Elves" — full group heal + HoT
-   - R-G-B-Y: "Harmony" — moderate damage + moderate heal + power restore + buff
-   - R-R-G-G: "Balanced Assault" — AoE damage + group heal
-   - Y-Y-Y-Y: "Fellowship's Resolve" — massive group damage buff for 30 seconds
-7. Specific ORDERED patterns (R-B-G-Y in that exact order by player position) unlock SPECIAL named effects more powerful than generic combinations
-8. Visual: selection wheel UI, color choice per player, dramatic combined effect on resolution
+1. A fellowship maneuver opens and all eligible participants see the selection UI
+2. Each participant chooses one option independently within the shared time window
+3. Combat continues while the selection window is open
+4. Missing participants are filled with the authored default option at deadline
+5. When the session resolves, the runtime checks for special ordered patterns first
+6. If no ordered pattern matches, the runtime checks generic count-based patterns
+7. The matched result applies the authored group effect
+8. Visual: shared wheel UI, local choice feedback, dramatic combined resolution effect
 
 ## Engine Primitives Required
 
-### Synchronous Multi-Player Input Collection
+Group Simultaneous Input is now the canonical simultaneous `group_interaction` pattern.
 
-This is the first mechanic requiring the engine to COLLECT INPUT FROM MULTIPLE PLAYERS and evaluate it as a SINGLE COMBINED ACTION:
+### Simultaneous Group Session
 
-```
-struct GroupInputCollection {
-    collection_id: UUID,
-    group_id: UUID,
-    options: Vec<InputOption>,         // Available choices (Red, Blue, Green, Yellow)
-    deadline_tick: u64,
-    selections: HashMap<EntityID, InputOption>,  // Player → their choice
-    expected_count: u8,                // How many players should select
-    default_option: InputOption,       // For players who don't select
-    resolved: bool,
-}
+The opening ability authors one `group_interaction` block with:
 
-enum InputOption {
-    Red,    // Damage
-    Blue,   // Power
-    Green,  // Heal
-    Yellow, // Buff
-}
-```
+1. `participant_scope = party` or `raid_subgroup`
+2. `mode = simultaneous`
+3. `timeout_ticks`
+4. one `simultaneous.options` list
+5. one `default_option_id`
+6. optional `allow_reselection`
+7. optional `ordered_patterns`
+8. required `count_patterns`
 
-### Input Collection Flow
+This is not a special "meta-input" transport. It is one bounded `P-54` session opened after the
+triggering ability commits.
 
-1. **Trigger**: A game event starts the input collection. All group members are notified.
-2. **Selection**: Each player's Edge Node sends a "select option X" proposal to their Arbiter.
-3. **Collection**: The combo-owning Arbiter collects all selections.
-4. **Resolution**: When all selections are in (or timer expires), evaluate the combination.
+### Selections Are Temporary Public Option Abilities
 
-```
-fn on_player_selection(entity: &Entity, selection: InputOption) {
-    if let Some(collection) = get_active_input_collection(entity.group_id) {
-        if !collection.resolved && current_tick() <= collection.deadline_tick {
-            collection.selections.insert(entity.entity_id, selection);
+The canonical surface does not add a second input lane beside combat. Instead, while the session is
+active, the runtime exposes one temporary public option ability per authored option.
 
-            if collection.selections.len() == collection.expected_count as usize {
-                resolve_input_collection(collection);
-            }
-        }
-    }
-}
+That means:
 
-fn on_tick_check_deadline(collection: &mut GroupInputCollection) {
-    if !collection.resolved && current_tick() > collection.deadline_tick {
-        // Fill in defaults for missing selections
-        for member in get_group_members(collection.group_id) {
-            if !collection.selections.contains_key(&member) {
-                collection.selections.insert(member, collection.default_option);
-            }
-        }
-        resolve_input_collection(collection);
-    }
-}
-```
+1. selecting Red, Blue, Green, or Yellow is implemented as casting a temporary option ability
+2. Stage 2 admits or rejects that selection through the normal intent path
+3. if `allow_reselection = true`, the last admitted option before the deadline overwrites the
+   participant's earlier choice
+4. if `allow_reselection = false`, later submissions are rejected after the first admitted choice
 
-### Combination Evaluation
+### Pattern Evaluation Order
 
-The outcome is determined by a LOOKUP based on the combination of all selections:
+When the window resolves, the session owner evaluates patterns in fixed order:
 
-```
-struct CombinationMatrix {
-    // Unordered evaluation (just counts)
-    generic_results: HashMap<SelectionCounts, GroupEffect>,
-    // Ordered evaluation (specific patterns by player position)
-    special_patterns: HashMap<Vec<InputOption>, GroupEffect>,
-}
+1. `ordered_patterns` first, against the authored `participant_order`
+2. if no ordered pattern matches, `count_patterns` against the completed option counts
 
-struct SelectionCounts {
-    red: u8,
-    blue: u8,
-    green: u8,
-    yellow: u8,
-}
-```
+Missing participants are filled with `default_option_id` before either pattern pass runs.
 
-Evaluation priority:
-1. Check ordered patterns first (specific sequences = special effects)
-2. If no ordered match: evaluate by count distribution (3R+1G = damage-heavy combo)
-3. Apply the resulting group effect
+This gives the intended behavior:
 
-### Ordered vs Unordered Patterns
-
-Two layers of pattern matching:
-- **Unordered (by count)**: "3 Red + 1 Green" = damage combo regardless of which player chose which. Simpler, more common.
-- **Ordered (by player position)**: "Player 1=Red, Player 2=Blue, Player 3=Green, Player 4=Yellow" in THAT specific order = special named combo. Harder to coordinate, more powerful reward.
-
-Player position/order must be deterministic — sorted by entity_id, group join order, or party slot index.
-
-### Combat During Selection
-
-While the selection window is open:
-- Combat CONTINUES (unlike turn-based games, this is real-time)
-- Players must fight AND make their selection
-- The selection UI is an overlay — players can still move, attack, and use abilities
-- The selection is a META-INPUT alongside normal combat input
-
-This means the Edge Node must support: normal gameplay input (movement, abilities) + selection input (choose a color) simultaneously.
-
-### Group Effect Application
-
-The resolved combination produces a GROUP EFFECT applied to all members:
-- AoE damage to enemies near the group
-- Group heal (all members healed)
-- Group buff (applied to all members)
-- Power restore (mana/resource restored to all members)
-- Or: a combination of the above, scaled by the selection distribution
-
-The effect is broadcast to all group members' Arbiters for application.
+- exact ordered sequences can unlock named special results
+- generic distributions like three Red and one Green can still map to a fallback effect
 
 ## Cross-Boundary Concerns
 
-TODO: Group members might be on different Arbiters:
+This sketch uses the canonical `P-54` session-owner relay contract.
 
-1. **Selection relay**: Each player sends their selection to their local Arbiter. If the collection state is on Arbiter A, selections from players on Arbiter B must relay to A.
+1. The opening ability assigns one Arbiter as the session owner.
+2. Each participant's local owner admits their temporary option-ability cast first.
+3. Admitted selections are relayed to the session owner as contribution tuples.
+4. The deadline is deterministic because it is measured against the shared authoritative tick.
+5. When the result resolves, any participant-scoped heal, buff, damage, or resource restore still
+   applies on the relevant authoritative owners through the ordinary relay rules.
 
-2. **Timeout synchronization**: The deadline tick must be consistent across Arbiters. Since all Arbiters use the same Shard Tick (Metronome synchronized), the deadline is deterministic.
-
-3. **Effect application**: The resolved group effect must be relayed to all members' Arbiters. If the effect is a group heal, each member's Arbiter applies the heal locally.
-
-4. **Missing players**: If a group member disconnected or is on a crashed Arbiter, their selection defaults. The collection continues with available players.
+So the maneuver is cross-Arbiter safe without needing a new controller-managed vote service.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trigger condition, selection options (Red/Blue/Green/Yellow), time window (10s), combination matrix (count-based generic results + ordered special patterns), default for non-selectors, group effect per combination. Compiler produces:
-- GroupInputCollection state definition
-- Selection options enum
-- CombinationMatrix lookup table in SpellData
-- Per-player selection input handling
-- Deadline management + default filling
-- Combination evaluation (ordered patterns first, then count-based)
-- Group effect application to all members
+Designer specifies:
 
-The compiler needs to support **multi-player input collection and combination evaluation** — a new input paradigm where N players contribute to a single combined outcome.
+- participant scope
+- timeout
+- option IDs
+- default option
+- whether reselection is allowed
+- ordered special patterns
+- count-based fallback patterns
+- the `GroupResultBlock` for each pattern
 
-### docs-core/ Impact
+Compiler emits:
 
-This likely requires `docs-core/` consideration:
-- The messaging plane must support "meta-input" (selection choices) alongside normal gameplay input
-- The Edge Node must handle overlay UI input that doesn't conflict with normal ability input
-- Group state management (which Arbiter owns the collection state)
+- one `group_interaction(mode = simultaneous)` directive on the opening ability
+- compiler-generated temporary option abilities for the active session
+- the ordered and count-pattern tables
+- participant-order metadata for ordered matching
 
-## Open Questions
+Compiler validates:
 
-- Can players change their selection before the deadline (switch from Red to Green)?
-- Can players see what others have selected in real-time (coordination vs blind choice)?
-- Does combat pause during the selection window, or does it continue in real-time?
-- Can enemies interrupt the fellowship maneuver (CC the trigger player)?
-- Can the selection window be extended by abilities or items?
-- What happens if only 2 of 6 players select (the rest default)?
-- Are the special ordered patterns predefined in SpellData or dynamically generated?
-- Does the trigger frequency have a cooldown (prevent spamming fellowship maneuvers)?
-- Can the outcome be amplified by buffs (SK-83 empowerment on the group effect)?
-- Does Kinematic Dilation affect the selection window timer?
-- How does the selection UI interact with SK-40 Mind Control (controlled player can't select?) or SK-24 Stun (stunned player can't select?)?
-- Performance: collecting N inputs across potentially N Arbiters, evaluating combination — bounded by group size
+1. `timeout_ticks > 0`
+2. `options` is non-empty and unique
+3. `default_option_id` is one of the declared options
+4. `count_patterns` is non-empty
+5. every `ordered_patterns.option_sequence` entry references a declared option
+6. every `count_patterns.required_counts.option_id` references a declared option
+
+## Resolved Notes
+
+- Combat continues during the selection window. The session is an overlay on ordinary real-time
+  play, not a pause state.
+- Because selections are temporary public option abilities, ordinary crowd control and capability
+  rules can stop a participant from making or changing a choice.
+- If `allow_reselection = true`, later admitted choices overwrite earlier ones until deadline. If
+  it is false, the first admitted choice sticks.
+- Missing participants default at deadline; the session does not wait forever for disconnected or
+  incapacitated members.
+- Ordered patterns use the authored `participant_order` (`party_slot`, `raid_subgroup_slot`, or
+  stable `entity_id` order). They are not inferred from join timing or network arrival order.
+- The session timeout is an authoritative tick deadline owned by the group session, not a
+  participant-local dilated timer.
+- This sketch no longer requires a new "meta-input" transport. The canonical simultaneous
+  `group_interaction` contract already covers it.

@@ -28,31 +28,79 @@ P-57 (Polyline Collision Generator) → P-14 (Continuous Proximity Monitor) → 
 
 ## Engine Primitives Required
 
-TODO: This is fundamentally different from circular zones. The geometry is a **polyline with width** — a series of connected line segments, each with a timestamp. The Arbiter needs to:
-1. Record the caster's position at regular intervals (every N ticks) to build the polyline
-2. Create trail segments between consecutive positions
-3. Each segment has its own expiry timer
-4. Per tick: check if any enemy entity intersects any active trail segment
-5. Apply damage/ignite on intersection
+Trail of Fire is the canonical `polyline_zone` pattern.
 
-How is this represented? A list of `TrailSegment { start: Vec2F, end: Vec2F, width: SimFixed, created_tick: u64 }`? Is collision detection a series of capsule checks (line segment + radius)?
+The compiler lowers it to one bounded `P-57` corridor generator keyed to the caster's committed
+movement path, with:
+
+1. `source = caster`
+2. authored `width`
+3. `duration_ticks` for the generator's own hard cap
+4. `segment_ttl_ticks = 240` for the four-second trailing persistence window
+5. authored `sample_interval_ticks` for how often the path is sampled
+6. hostile `filter`
+7. authored contact payloads through `pulse_effects` and/or `enter_effects`
+
+This is not a stack of detached mini-zones and not a client-side breadcrumb effect. The runtime
+owns one corridor-local ring buffer of sampled points and active segments. After each movement
+commit, the current authoritative source position is sampled, appended to the corridor, and old
+segments expire FIFO by `segment_ttl_ticks`.
+
+Damage and ignite are ordinary authored effects, not special trail-only logic. A designer may tune
+the contact cadence with `pulse_interval_ticks`; a short ignite DoT is just an ordinary negative
+status applied by the trail's contact payload.
 
 ## Cross-Boundary Concerns
 
-TODO: If the caster moves along an Arbiter boundary, the trail is deposited in one Arbiter's region but may need to be visible/collidable in the neighbor's. Trail segments near a boundary: are they replicated as Ghost-like objects? If the caster crosses a boundary, do trail segments behind them (in the old Arbiter) persist? Who owns them — the caster's current Arbiter or the Arbiter where they were deposited?
+`polyline_zone` samples committed source motion, not client intent, so the trail follows the same
+authoritative path already used by kinematics and handoff.
+
+1. While the caster is local, the current owner appends new samples after movement commit.
+2. Trail collision and pulse effects use the active corridor geometry from that authoritative path.
+3. If hostile targets near the corridor are Ghosts, trail effects use the ordinary target-owner
+   relay path; the trail owner does not mutate Ghost state locally.
+4. If the caster hands off, the corridor generator continues from the same authoritative path on the
+   new owner rather than being recomputed from client movement guesses.
+
+So Trail of Fire is not a special boundary object. It is one canonical corridor effect tied to the
+source entity's authoritative motion history.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: trail width, segment lifetime (4s), damage on contact, ignite DoT (2s, fire damage), caster immunity, sampling rate (how often to record positions). Compiler produces: a movement-tracking hook on the caster + trail segment spawning logic + per-segment lifecycle + capsule collision definition + damage/DoT payload. This is unlike any other ability — it's driven by movement, not by casting.
+Designer specifies:
 
-## Open Questions
+- the tracked source entity
+- trail width
+- segment lifetime (`240` ticks for the four-second trail)
+- optional total generator duration
+- sampling cadence
+- hostile admission filter
+- contact payloads (fire damage and ignite status)
+- whether the source is ignored by the corridor
 
-- How frequently are positions sampled to build the trail — every tick (60Hz) or less? More segments = more collision checks.
-- Is the trail one continuous ZoneActor or many independent segment actors?
-- What happens if the caster stands still — no new trail deposited, existing trail fades normally?
-- Can the trail go through walls, or does it respect static geometry?
-- Does the trail interact with SK-31 Vortex — enemies pulled through a trail take damage?
-- Performance: a fast-moving caster in a 4-second window could create hundreds of trail segments. Is there a segment cap?
-- If the caster is displaced (SK-01 Toss), does the trail appear along the arc?
-- Can enemies destroy trail segments?
-- Does the trail block projectile pathing like SK-03 Terrain Wall, or is it passable (damage only)?
+Compiler emits:
+
+- one `polyline_zone` effect bound to the caster
+- corridor-local occupancy / pulse behavior instead of detached segment actors
+- one compiled ignite `StatusEffectDefinition` if the trail applies a burn DoT
+
+Compiler validates:
+
+1. `width > 0`
+2. `segment_ttl_ticks > 0`
+3. `sample_interval_ticks > 0`
+4. at least one blocking or effect payload is present
+5. the ignite payload uses ordinary negative-status authoring rather than sketch-local trail logic
+
+## Resolved Interaction Notes
+
+- The trail follows committed movement only. Standing still deposits no new segments unless the
+  designer explicitly enables `sample_on_stationary`.
+- Segment expiry is FIFO by authored TTL, so old sections fade from back to front without bespoke
+  cleanup code.
+- The trail is passable by default; blocking movement or projectiles is only enabled if the
+  designer explicitly authors those `polyline_zone` flags.
+- Being displaced still paints the actual committed path. The mechanic keys off the source's final
+  movement result, not on whether the movement came from voluntary input or forced displacement.
+- The source can be made immune to the trail through the canonical `ignore_source = true` path,
+  rather than by a sketch-local exception.

@@ -8,7 +8,7 @@
 
 **Description:** Dynamically spawning a "Pocket Arena" — a private R-Tree node — and migrating a subset of entities into it for isolated resolution.
 
-**Sketches:** SK-105 (Pocket Arena), SK-61 (Spirit Split — instanced duel space)
+**Sketches:** SK-105 (Pocket Arena)
 
 **Engine layer:** `docs-core/`
 

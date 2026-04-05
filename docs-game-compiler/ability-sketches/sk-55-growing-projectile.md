@@ -6,7 +6,7 @@ I roll a giant snowball in a target direction. As the snowball travels, it grows
 
 ## Primitive Composition
 
-P-32 (Actor Spawning) → P-09 (Shape Overlap Query)
+P-32 (Actor Spawning) → projectile travel scalars → `ProjectileCarryBlock`
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -30,74 +30,80 @@ P-32 (Actor Spawning) → P-09 (Shape Overlap Query)
 
 ### Dynamic Projectile Properties
 
-All existing ProjectileActors have fixed properties (speed, radius, damage). The Growing Projectile has **properties that change per tick**:
+This sketch now uses the canonical projectile travel-scalar surface:
 
-```
-struct GrowingProjectile {
-    base_radius: SimFixed,
-    growth_rate_per_tick: SimFixed,
-    current_radius: SimFixed,       // Recalculated each tick
-    base_damage: SimFixed,
-    damage_growth_per_unit: SimFixed,
-    distance_traveled: SimFixed,    // Accumulated each tick
-    captured_entities: Vec<EntityID>,
-}
-```
+1. `spawn_actor.projectile.radius_growth_per_unit`
+2. `spawn_actor.projectile.payload_scale_per_unit`
+3. optional `spawn_actor.projectile.max_scaled_radius`
 
-Each tick:
-1. Move the projectile forward by its velocity
-2. `distance_traveled += velocity_magnitude`
-3. `current_radius = base_radius + (distance_traveled * growth_rate_per_tick)`
-4. Collision check uses `current_radius` (growing hitbox)
-5. Damage on hit = `base_damage + (distance_traveled * damage_growth_per_unit)`
+The runtime derives current collision radius and payload multiplier from authoritative
+`distance_traveled`, so growth survives handoff without bespoke state.
 
 ### Entity Accumulation
 
-Unlike SK-34 Charge (captures one entity), the Growing Projectile captures ALL enemies it hits:
-- Each captured entity's position is locked to the snowball's front face
-- Multiple entities share the front — they stack or spread along the snowball's surface
-- Captured entities are displaced (hard CC, cannot act)
-- On detonation/expiry: all captured entities are released at the snowball's current position
+Unlike `SK-34 Charge`, which uses entity-local `kinematic_sweep.capture_first`, this sketch uses
+the canonical projectile-local `carry_policy`.
 
-The projectile maintains a `captured_entities` list. Each tick, all captured entities' positions are updated to track the snowball.
+The projectile owns:
+
+- a bounded ordered carried-target roster
+- a front offset (`carry_offset_distance`)
+- a perpendicular spacing value (`lateral_spacing`)
+
+Each newly admitted impact appends the target to that roster until `max_carried_targets` is
+reached. Carried targets remain ordinary entities in the authoritative R-tree, but while carried
+their independent movement, casts, attacks, and item use are suppressed. Their positions are
+derived each tick from the snowball's current heading and slot order. On wall impact, expiry, or
+projectile removal, all carried entities are released at the snowball's current position in the
+same preserved order.
 
 ### Growing Collision Radius
 
-The spatial query for collision must use the CURRENT radius, not the original. As the snowball grows, it sweeps a wider path. Entities that were safe at distance might be caught as the snowball approaches and its radius grows to encompass them.
-
-This means the collision query changes shape each tick — the swept area per tick is not a fixed capsule but a widening one.
+The spatial query uses the projectile's CURRENT derived radius, not its spawn radius. As the
+snowball grows, later entities can be admitted even if they would have been missed early in flight.
+This is already covered by the canonical travel-scalar projectile contract.
 
 ## Cross-Boundary Concerns
 
-TODO: The snowball is a projectile that can cross Arbiter boundaries — standard projectile handoff. But it carries a growing list of captured entities. Handoff must transfer:
-- The projectile state (position, velocity, distance_traveled, current_radius)
-- The entire `captured_entities` list
-- Each captured entity's state
+The snowball uses ordinary projectile handoff plus a bounded carried-target roster.
 
-If the snowball captures a Ghost, the Ghost's owning Arbiter must release the entity to the snowball's Arbiter. As the snowball crosses a boundary with 3 captured entities, that's 1 projectile handoff + 3 entity handoffs simultaneously.
-
-Wall collision near a boundary: if the wall is in the neighbor's static_grid, does the snowball's Arbiter know about it? Ghost-range static geometry awareness matters here.
+1. The projectile snapshot transfers travel state plus the ordered carried-target ID list.
+2. The carried entities themselves remain ordinary authoritative entities and therefore continue
+   through co-located entity handoff, not inside the projectile snapshot.
+3. If the projectile handoff commits one tick before a carried entity's co-located handoff
+   finishes, that entity follows the projectile shadow/ghost until the receiver owns both again.
+4. Static blocking geometry near a boundary follows the ordinary replicated projectile/world-impact
+   contract, so authored terrain walls still count as valid snowball stops.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: initial radius, growth rate, initial damage, damage scaling, speed, max range, capture behavior (push all hit enemies), wall detonation behavior, release on expiry. Compiler produces:
-- ProjectileActor with per-tick mutable properties (radius, damage scaling)
-- Entity capture list (extending SK-34's single capture to multi-capture)
-- Growth formula as a deterministic function of distance_traveled
-- Wall collision trigger (detonation)
-- Release behavior on detonation and expiry
+Designer specifies:
 
-The compiler needs to support **dynamic projectile properties** — projectile stats that are functions of runtime state, not fixed at spawn time.
+- initial radius and optional radius cap
+- growth rate per world unit traveled
+- initial damage and payload scaling per world unit traveled
+- speed and max lifetime/range
+- `max_carried_targets`
+- front offset and lateral spacing for carried targets
+- wall-impact and expiry consequences
 
-## Open Questions
+Compiler produces:
 
-- Is there a maximum number of entities the snowball can capture (bounded for performance)?
-- Can the snowball capture allied entities (friendly fire push)?
-- Does the snowball pass through minions/summons or capture them too?
-- Can captured entities be healed by allies (SK-16 Holy Ground) while being pushed?
-- Does the snowball's damage use caster's stats at cast time (epoch-pinned) or scale independently?
-- If the snowball is very large (max radius) in a dense area, how many collision checks per tick?
-- Can the snowball be destroyed by enemies (does it have HP)?
-- How does the snowball interact with SK-03 Terrain Wall — does a player-placed wall stop it?
-- Can the snowball be deflected or redirected by abilities (SK-31 Vortex pull)?
-- Does the growth rate account for Kinematic Dilation (snowball grows slower in dilated zones)?
+- one projectile archetype with canonical travel scalars
+- one canonical `ProjectileCarryBlock`
+- deterministic projectile-local carried-target roster handling
+- ordinary projectile handoff with carried-target ID transfer
+- ordinary release behavior on world impact / expiry / removal
+
+## Resolved Notes
+
+- `max_carried_targets` is the performance bound for rolling capture.
+- This sketch uses ordinary hostile target admission (`enemy_alive`); allied or neutral capture
+  remains a game-data filter choice, not a second carry subsystem.
+- Carried entities remain targetable/healable unless other authored effects say otherwise; the carry
+  contract suppresses independent action, not targetability.
+- Terrain walls and other valid projectile-blocking geometry count as world impact and therefore
+  trigger release/detonation normally.
+- Projectile interception, redirect, and kinematic dilation follow the same canonical projectile
+  rules as other advanced projectile actors. Because growth derives from world distance traveled,
+  slower travel in dilated space naturally slows growth per tick without changing the formula.

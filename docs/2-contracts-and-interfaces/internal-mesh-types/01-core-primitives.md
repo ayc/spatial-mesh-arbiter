@@ -607,12 +607,19 @@ enum DownstreamPayload {
 }
 
 // 5. Inbound Meta Commands (From Meta Services to Spatial Arbiter via Event Bus topics)
+enum RespawnSpawnContext {
+    RespawnAnchor {
+        anchor_entity_id: EntityID,
+    },
+}
+
 enum MetaCommand {
     SpawnEntity {
         entity_id: EntityID,
         character_id: UUID,
-        compiled_state: SoftState,       // Base stats, JRPG Save Zone coordinates pre-calculated by Meta
+        compiled_state: SoftState,       // Base stats and persistent spawn defaults pre-calculated by Meta
         compiled_offense: OffensiveStats, // Gear-compiled offensive attributes for Pre-Roll
+        respawn_context: Option<RespawnSpawnContext>, // None for ordinary save-zone spawns; Some(...) for bounded post-terminal override flows
     },
     // Pushes updated base stats when equipment or attributes change.
     // The Arbiter atomically overwrites the stored OffensiveStats, DefensiveStats,
@@ -702,6 +709,7 @@ struct ProjectileSnapshot {
     arming_remaining_ticks: u32,
     pierce_remaining: u8,
     hit_exclusion_list: Vec<EntityID>, // Deterministically ordered set of targets already struck by this projectile
+    carried_entities: Vec<EntityID>,   // Deterministically ordered carried-target roster; entities hand off separately
     impact_sequence: u32,
     data_epoch: u32,
     damage_origin: u8, // DamageOrigin discriminant

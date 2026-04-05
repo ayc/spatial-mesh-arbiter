@@ -30,111 +30,72 @@ P-48 (Secondary Stagger Bar) → P-26 (Capability Bitmask) → P-16 (Stat Layeri
 
 ## Engine Primitives Required
 
-### Secondary Breakable Bar
+Stagger Bar is already the canonical `P-48` secondary-resource model.
 
-The entity state gains a new resource bar alongside HP:
+The target entity opts in through `EntityDefinition.stagger_bar`, which supplies:
 
-```
-struct StaggerBar {
-    current: SimFixed,
-    max: SimFixed,
-    regen_rate_per_tick: SimFixed,     // Regeneration when not taking stagger damage
-    regen_delay_ticks: u64,            // Ticks after last stagger damage before regen starts
-    last_stagger_tick: u64,
-    is_staggered: bool,
-    stagger_duration_ticks: u64,
-    damage_vulnerability_bonus: SimFixed,  // e.g., 0.20 for 20% bonus damage during stagger
-}
-```
+1. `max_stagger`
+2. `regen_rate_per_tick`
+3. `regen_delay_ticks`
+4. `stagger_duration_ticks`
+5. `vulnerability_bonus`
 
-### Stagger Damage as a Parallel Damage Channel
+Abilities contribute through the already-canonical `AbilityDefinition.stagger_damage` field. That
+means one hit may carry both ordinary HP damage and stagger damage in parallel. The target owner
+applies the HP packet through ordinary damage resolution, then updates the stagger bar through
+`P-48`.
 
-Every ability has TWO damage values:
-- `hp_damage: SimFixed` — normal damage to the entity's HP
-- `stagger_damage: SimFixed` — damage to the entity's stagger bar
+When the bar depletes, the engine applies the mechanical stagger state from the target's
+`StaggerBarDef`: fixed stagger duration plus the authored vulnerability bonus. This is NOT ordinary
+`apply_cc`; it does not use tenacity, DR, or status-resistance scaling. The bar resets only after
+the stagger window ends, and regeneration is controlled by the authored per-tick rate plus delay.
 
-Both are calculated and applied during the same damage resolution:
-```
-fn resolve_damage(target: &mut Entity, hp_damage: SimFixed, stagger_damage: SimFixed) {
-    // Normal HP damage resolution (shields, mitigation, etc.)
-    apply_hp_damage(target, hp_damage);
-
-    // Stagger damage — separate resolution, may have its own mitigation
-    if let Some(bar) = &mut target.stagger_bar {
-        bar.current = max(SimFixed::ZERO, bar.current - stagger_damage);
-        bar.last_stagger_tick = current_tick();
-
-        if bar.current == SimFixed::ZERO && !bar.is_staggered {
-            trigger_stagger(target);
-        }
-    }
-}
-```
-
-### Stagger State
-
-When the stagger bar is depleted:
-1. Entity enters STAGGER STATE (effectively a stun — SK-24)
-2. All actions are disabled (can't move, attack, cast)
-3. Damage vulnerability is applied (all incoming damage increased by bonus %)
-4. Duration is fixed (5 seconds)
-5. On expiry: stagger bar resets to max, entity resumes acting
-
-The stagger state is like a CC but it's triggered by a RESOURCE DEPLETION, not by a CC ability. It's not subject to Tenacity or DR (SK-28) — it's a mechanical check, not a CC effect.
-
-### Stagger Regeneration
-
-The stagger bar regenerates when not taking stagger damage:
-- If `current_tick - last_stagger_tick > regen_delay_ticks`: begin regenerating
-- Regen rate: `bar.current += regen_rate_per_tick` each tick
-- Regen stops when bar reaches max or when new stagger damage is dealt
-
-This creates a DPS CHECK — the team must deal enough stagger damage to outpace regeneration and deplete the bar before the regen delay kicks in.
-
-### Per-Ability Stagger Value
-
-The compiler must assign a `stagger_damage` value to every ability alongside `hp_damage`:
-- Heavy, slow abilities: high stagger (e.g., 150)
-- Light, fast abilities: low stagger (e.g., 30)
-- Some abilities: zero stagger (DoTs, certain magic abilities)
-
-This is a new field on every ability definition in SpellData.
-
-### Team-Wide Contribution
-
-Unlike most combat mechanics (one attacker vs one defender), the stagger bar is a SHARED TARGET for the entire team. All players' stagger damage contributes to the same bar. This creates coordination pressure — "everyone use your high-stagger abilities NOW."
-
-The engine doesn't need special handling for this — all damage events from all sources naturally reduce the same bar. The team coordination is emergent from the shared resource.
+The team-wide contribution model is just the shared target owner mutating one authoritative bar.
+No special team accumulator is needed beyond multiple attacks all landing on the same boss.
 
 ## Cross-Boundary Concerns
 
-TODO: The stagger bar is on the boss entity's Arbiter. Players on different Arbiters attack the boss:
-1. Local players: stagger damage applied directly to the bar
-2. Cross-boundary players (boss is a Ghost? or players relay damage to boss's Arbiter): stagger damage relays alongside HP damage
+The stagger bar is authoritative on the target owner, exactly like HP. If an attacker is remote and
+the boss is a Ghost, the origin owner relays the prepared hit as usual; the boss owner then applies
+both the HP-side combat packet and the authored `stagger_damage` locally.
 
-In a raid scenario, the boss is likely on one Arbiter with many players nearby. Cross-boundary concerns are minimal unless the boss is near an Arbiter boundary with players on both sides. Standard damage relay carries both HP damage and stagger damage.
+So the cross-boundary rule is simple: stagger contribution rides the same prepared-hit path as the
+rest of combat. There is no separate raid-wide stagger coordinator.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: per-entity stagger bar (max value, regen rate, regen delay), per-ability stagger damage value, stagger state on depletion (stun + vulnerability + duration), bar reset after stagger, optional mandatory stagger check (failure triggers wipe). Compiler produces:
-- StaggerBar as an optional entity component (only on bosses/elites)
-- Per-ability `stagger_damage` field in SpellData
-- Damage resolution: apply HP damage + stagger damage in parallel
-- Stagger state trigger on bar depletion
-- Regeneration logic with delay timer
-- Downstream payload: stagger bar value for client rendering
+Designer specifies:
 
-The compiler adds a new optional entity component and a new field on every ability definition.
+- optional `stagger_bar` on bosses/elites
+- per-ability `stagger_damage`
+- the entity's stagger duration, regen delay/rate, and vulnerability bonus
+- any encounter-specific failure consequence separately (for example a wipe mechanic triggered by
+  not staggering during a scripted window)
 
-## Open Questions
+Compiler emits:
 
-- Does stagger damage go through the same mitigation as HP damage (armor reduction)?
-- Can shields (SK-17) absorb stagger damage, or only HP damage?
-- Does SK-114 Piercing Execute instantly deplete the stagger bar?
-- Can stagger damage be reflected (SK-22) or thorned (SK-23)?
-- Does SK-92 Anti-Heal affect stagger bar regeneration (anti-heal reduces healing, stagger regen isn't healing)?
-- Can players' stagger contributions be individually tracked (for scoring/contribution meters)?
-- Does SK-110 Mute disable the boss's stagger bar regeneration (it's a passive)?
-- Can the stagger bar have multiple depletion thresholds (half-stagger at 50%, full stagger at 0%)?
-- Does Kinematic Dilation affect stagger bar regeneration rate?
-- Can the stagger bar exist on player entities (PvP stagger mechanic)?
+- `EntityDefinition.stagger_bar` for entities that participate in the mechanic
+- per-ability `stagger_damage` values
+- the standard `P-48` state-update path that mutates the bar, checks depletion, and applies the
+  compiled mechanical stagger state
+- downstream bar/state data for observer payloads
+
+Compiler validates:
+
+1. `max_stagger > 0`
+2. `regen_rate_per_tick >= 0`
+3. `regen_delay_ticks >= 0`
+4. `stagger_duration_ticks > 0`
+5. `stagger_damage` defaults to `0` when omitted and otherwise participates as a parallel damage
+   channel, not as a bespoke status effect
+
+## Resolved Interaction Notes
+
+- Mechanical stagger is not ordinary CC. Its duration and vulnerability bonus come from
+  `StaggerBarDef`, not from `apply_cc`, and are not reduced by tenacity or DR.
+- Stagger regeneration is part of the `P-48` resource model, not healing, so anti-heal semantics do
+  not apply to the bar's refill behavior.
+- Multiple players naturally contribute to the same bar because the boss owner applies every
+  incoming `stagger_damage` packet to one shared target resource.
+- Mandatory stagger checks are encounter scripting layered on top of the canonical bar mechanic,
+  not a separate stagger implementation.

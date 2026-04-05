@@ -6,7 +6,7 @@ I attach to an allied hero from anywhere on the map. While attached, my abilitie
 
 ## Primitive Composition
 
-P-06 (Attached Kinematics) → P-34 (Persistent Linkage) → P-60 (Event Cloning)
+P-34 (Persistent Linkage) → P-31 (Identity/Loadout Swap) → P-26 (Capability Bitmask)
 
 *See `ability-primitives/` for canonical definitions.*
 
@@ -31,79 +31,78 @@ P-06 (Attached Kinematics) → P-34 (Persistent Linkage) → P-60 (Event Cloning
 
 ## Engine Primitives Required
 
-### Remote Ability Origin
+Symbiote is one link-bound remote-origin projection on the CASTER, not a second controlled body.
 
-This is the first ability where the **caster's abilities use a different entity's position as their origin point**. All existing abilities originate from the caster's position. Symbiote breaks this:
+The canonical decomposition is:
 
-```
-struct SymbioteState {
-    host_id: EntityID,
-    caster_body_position: Vec2F,  // Where the body stays
-    ability_set: AbilitySetId,    // Symbiote-specific abilities
-}
-```
+1. `link(target = host, origin_override = source_uses_target_position, observer_anchor = true)`
+   establishes the persistent attachment.
+2. A `P-31` loadout/profile swap projects the symbiote ability bar onto the caster for the
+   attachment window.
+3. A self-applied lockout/root on the caster body suppresses movement while leaving the body in the
+   world as a vulnerable target.
 
-When the caster uses an ability while symbioted:
-1. The ActionProposal originates from the caster's Edge Node
-2. The Arbiter resolves the ability with `origin_position = host.position` instead of `caster.position`
-3. Spatial queries (who's in range of Spike Burst) use the host's position
-4. Projectiles (Stab) launch from the host's position
+That means the host is not being mind-controlled and the caster body is not physically attached to
+the host. The acting entity remains the caster; only ability-origin queries and observer payload
+anchoring are borrowed from the linked host.
 
-The engine needs to support **ability origin override** — a modifier that says "this entity's abilities use entity X's position."
-
-### Body Vulnerability
-
-The caster's body remains in the entity map at its original position. It:
-- Cannot move (immobile)
-- Cannot attack or cast (all input routed to symbiote)
-- CAN be targeted and damaged by enemies
-- CAN die — which kills the caster even though they're "somewhere else"
-
-The caster exists as two things simultaneously: a vulnerable body and a remote ability source. The body is like a channeling entity (immobile, vulnerable) but the "channel" produces abilities at a remote location.
-
-### Global Range Attachment
-
-The symbiote can attach to any ally anywhere on the map. This means:
-- The host is almost certainly on a different Arbiter than the caster
-- All symbiote abilities resolve at the host's position, on the host's Arbiter
-- The caster's Edge Node sends input, which the caster's Arbiter translates into ability commands and relays to the host's Arbiter
-
-This is a persistent cross-boundary ability connection — not a one-time relay like damage, but a continuous stream of ability commands from Arbiter A (caster) to Arbiter B (host) for the duration of the symbiote.
-
-### Camera / Vision
-
-The caster's client needs to see the host's surroundings. The Edge Node must receive downstream state updates for the host's area, not the caster's body's area. This is a **vision redirect** — the Arbiter that owns the host must send state updates to the caster's Edge Node as if the caster were there.
+The body stays at its original position, remains targetable, and can die normally. If the body is
+removed, the acting entity dies and the whole symbiote projection ends. If the host is removed, the
+link breaks and the caster cleanly detaches with their original loadout restored.
 
 ## Cross-Boundary Concerns
 
-TODO: This ability is inherently cross-boundary by design. The caster is on Arbiter A, the host is on Arbiter B.
+Symbiote is now covered by the canonical `link.origin_override` + `observer_anchor` + `P-31`
+loadout-projection model.
 
-1. **Ability relay:** Every symbiote ability the caster uses must be relayed from A to B. Arbiter B resolves the ability at the host's position using the caster's offensive stats (carried in the relay). This is a per-action cross-boundary relay, not per-tick — only fires when the caster presses an ability.
-
-2. **Vision relay:** The caster's Edge Node needs state updates from Arbiter B's area. Does B send downstream payloads to the caster's Edge Node directly? Or does A proxy them? This is a new data flow — an Edge Node receiving state from an Arbiter it's not spatially associated with.
-
-3. **Body vulnerability:** The caster's body on Arbiter A can be attacked. If the body dies, the symbiote must terminate — Arbiter A sends a death notification to Arbiter B, which terminates the symbiote session.
-
-4. **Host handoff:** If the host crosses a boundary (from B to C), the symbiote must follow. The ability relay destination changes from B to C. The vision source changes from B to C.
+1. The caster remains the acting entity for inputs, stats, cooldowns, and resource costs.
+2. The linked host supplies the CURRENT origin position for range checks, projectile spawn points,
+   ground-target centers, and other origin-derived spatial queries.
+3. If the host is remote, ordinary cross-boundary relay rules determine which Arbiter resolves that
+   spatial query authoritatively; there is no sketch-local "always proxy through the host" rule.
+4. `observer_anchor = true` moves the caster's downstream observer payloads to the host's vicinity
+   so the camera/view follows the host while the body remains targetable at its real position.
+5. If the host hands off, the link survives as ordinary SoftState and the remote origin/observer
+   anchor automatically follow the host's new owner. If the host is removed, the link breaks and the
+   symbiote projection ends cleanly.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: global range ally target, attach (caster immobile + vulnerable), symbiote ability set (3 abilities that fire from host position), detach on command or host death or caster death, camera follows host. Compiler produces:
-- SymbioteState status effect on caster (host reference, body position, ability set swap)
-- Ability origin override: all caster abilities use host.position
-- Input routing: caster's Edge Node → caster's Arbiter → relay to host's Arbiter
-- Vision redirect: host's Arbiter → caster's Edge Node
-- Detach/death hooks: terminate symbiote on detach, host death, or caster body death
+Designer specifies:
 
-## Open Questions
+- ally target
+- attach duration or detach conditions
+- the symbiote loadout/profile to project onto the caster while attached
+- a self-lock/immobilizing status on the body while attached
+- `link.origin_override` so the caster uses the host's position as the ability origin
+- `observer_anchor = true` if the camera/view should follow the host
+- break rules on host removal, caster removal, or manual detach
 
-- Can the symbiote abilities trigger on-hit procs using the caster's proc effects?
-- Does the symbiote use the caster's offensive stats or the host's?
-- Can the host see the symbiote abilities being used (UI indicator)?
-- Can enemies see who is symbioted to a host (targeting the body as counter-play)?
-- Can multiple symbiotes attach to the same host?
-- Does the symbiote persist through SK-44 Burrow on the host (host burrows, symbiote stays)?
-- If the host enters SK-60 Bunker, does the symbiote stay attached?
-- Can the caster's body be consumed by SK-54 Entity Consumption while symbioted?
-- How does the ability relay interact with latency — symbiote abilities at global range have higher latency than local abilities?
-- Performance: persistent cross-boundary ability relay + vision redirect for the duration — how much bandwidth?
+Compiler emits:
+
+- one `link` from the caster to the host with `origin_override` enabled
+- one projected symbiote loadout through `swap_identity` or equivalent `P-31` profile swap on the
+  caster
+- one self-applied immobilizing/lockout status on the caster body for the attached duration
+- one detach path that removes the link and reverts the projected loadout, typically through the
+  existing same-key reactivation/hidden-variant surface
+
+Compiler validates:
+
+1. the target is allied
+2. the projected loadout/profile exists
+3. the body lockout is expressed through ordinary status/capability policy rather than a bespoke
+   "symbiote mode" flag
+4. remote-origin casting is authored through `link.origin_override`, not by moving the caster body
+   or transferring authority to the host
+
+## Resolved Interaction Notes
+
+- Symbiote abilities use the caster's own offensive stats, cooldowns, and proc state. Only the
+  spatial origin is borrowed from the host.
+- The caster's body remains a normal targetable body at its original location. `observer_anchor`
+  changes downstream view anchoring only; it does not make the body untargetable or move it.
+- Host death cleanly detaches the symbiote by breaking the link. Caster death ends the effect
+  normally because the acting entity is removed.
+- The detach/revert path is a canonical reactivation/loadout-revert problem, not a sketch-local
+  special case.

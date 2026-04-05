@@ -27,81 +27,68 @@ P-39 (On-Death Hook) → P-23 (Floor Clamping) → P-15 (Value Modification)
 
 ## Engine Primitives Required
 
-### Death Check Interception
+Death Prevention is now a canonical status-owned `death_prevention` reference.
 
-The death pipeline currently:
-1. Damage is applied → HP reaches 0
-2. Death is declared
-3. Entity removed from Arbiter
-4. Meta handles respawn
+The recommended lowering is:
 
-Death Prevention intercepts at step 2:
-1. Damage is applied → HP reaches 0
-2. **Check: does this entity have a Death Prevention buff?**
-3. If yes: DO NOT declare death. Instead: heal to max HP, consume the buff.
-4. If no: proceed with normal death.
+1. apply one positive protection status to the ally for 180 ticks
+2. author on that status:
+   - `death_prevention = {`
+     `restore_hp_ratio = 1.0,`
+     `consume_on_trigger = true,`
+     `bypass_anti_heal = true`
+     `}`
+3. let ordinary status expiry remove the protection with no payoff if no lethal event arrives in
+   the window
 
-```
-fn check_death(entity: &mut Entity) -> bool {
-    if entity.hp <= SimFixed::ZERO {
-        if let Some(palm) = entity.find_effect::<DeathPreventionBuff>() {
-            entity.hp = entity.max_hp;  // Full heal
-            entity.remove_effect(palm.effect_id);  // Consume
-            return false;  // Death prevented
-        }
-        return true;  // Entity dies
-    }
-    false
-}
-```
+This keeps the mechanic inside existing surfaces:
 
-### Distinct From Other Death Mechanics
-
-| Mechanic | When HP hits 0 | Result |
-|---|---|---|
-| Normal | Death declared | Entity removed, respawn |
-| SK-73 Death Immunity | HP floors at 1, never reaches 0 | Entity alive at 1 HP |
-| SK-57 Death-Triggered Form | Intercepted, transform instead of die | Entity alive in new form |
-| SK-89 Respawn Anchor | Death declared, fast respawn elsewhere | Entity removed, quick respawn |
-| **SK-93 Death Prevention** | **Intercepted, full heal instead of die** | **Entity alive at full HP** |
-
-Death Prevention is unique: the entity's HP actually reaches 0 (or below), but the death is reversed with a full heal. This is the most dramatic save — from 0 HP to 100% in one tick.
-
-### Window-Based Conditional (Like SK-87 Counter)
-
-Like SK-87 Conditional Counter ("if attacked during window → payoff"), Death Prevention is "if ally would die during window → payoff." The trigger is: ally HP reaches 0 while the buff is active. If no lethal damage occurs, the buff expires unused.
-
-### Interaction With SK-92 Anti-Heal
-
-Critical interaction: if the ally has Anti-Heal (100% healing reduction) and Death Prevention triggers, the "heal to full" could be reduced to 0 by anti-heal. The ally's HP reaches 0 → Death Prevention triggers → heal to full → anti-heal reduces heal to 0 → HP is still 0 → dies anyway?
-
-Design choice: Death Prevention's heal BYPASSES anti-heal (it's a death prevention mechanic, not a normal heal), or Death Prevention is countered by anti-heal (adding counterplay).
+- lethal interception is the canonical `death_prevention` block
+- full restore is just `restore_hp_ratio = 1.0`
+- anti-heal bypass is already an authored flag on the same block
+- no bespoke death-hook API is needed
 
 ## Cross-Boundary Concerns
 
-TODO: The buff is applied to the ally via standard relay. The death check happens on the ally's Arbiter (where their HP is authoritative). The ally's Arbiter checks for the buff and applies the heal locally. No cross-boundary concern for the death check itself.
+Death Prevention is target-owner authoritative after admission.
 
-The only cross-boundary element is the initial buff application (if caster and ally are on different Arbiters).
+1. If the caster and ally are on different Arbiters, the positive status is admitted through the
+   ordinary ally-target relay path.
+2. Later lethal checks happen only on the protected ally's current owner, after damage and any
+   active `hp_floor` effects have already resolved there.
+3. If `death_prevention` triggers, the same owner rewrites HP locally and consumes the status before
+   terminal death is declared, so no `PlayerDied` or Meta respawn path opens.
+4. If the protected ally hands off while the buff is active, the status simply transfers with them
+   as ordinary SoftState.
 
 ## Compiler Requirements
 
-TODO: Designer specifies: target (ally), buff duration (3s), trigger (ally HP reaches 0), on-trigger (prevent death + heal to 100% max HP), consumed on trigger, expires if not triggered. Compiler produces:
-- DeathPreventionBuff status effect
-- Death check hook: intercept death → check for buff → heal → consume
-- Single-use consumption on trigger
-- Expiry on timeout without trigger
+Designer specifies:
 
-The compiler needs to support **death check hooks** — the game adapter can intercept the death pipeline and conditionally prevent it.
+- allied target
+- buff duration
+- restored HP ratio
+- whether the protection is consumed on trigger
+- whether the restore bypasses anti-heal
 
-## Open Questions
+Compiler emits:
 
-- Does the full heal bypass SK-92 Anti-Heal?
-- Does the heal trigger on-heal effects (SK-04 Tether heal sharing)?
-- Can the buff be purged by enemies (removing it before it triggers)?
-- If the ally takes 10,000 damage in one hit (overkill), is death still prevented?
-- Does the death prevention trigger before or after SK-73 Death Immunity check?
-- If both SK-73 and SK-93 are active, which takes priority? (SK-73 prevents reaching 0, so SK-93 never triggers)
-- Can Death Prevention trigger on damage from SK-53 HP Swap (HP set to a lethal value)?
-- Does the full heal generate SK-70 Energy Shield energy (it's technically incoming healing)?
-- Can the buff be applied to the caster (self-cast)?
-- If the ally is in SK-91 Team-Agnostic Stasis, can they receive the buff? (Untargetable during stasis)
+- one positive status definition with canonical `death_prevention`
+- one ordinary ally-target application effect for that status
+
+Compiler validates:
+
+1. `restore_hp_ratio` is in `(0, 1]`
+2. the mechanic is authored through canonical `death_prevention`, not through a bespoke death
+   callback or a hidden respawn path
+3. if the designer wants anti-heal to matter, they must explicitly set `bypass_anti_heal = false`
+
+## Resolved Interaction Notes
+
+- `hp_floor` resolves before `death_prevention`, so HP-floor effects like `SK-73` prevent this
+  status from triggering if they already keep the entity alive.
+- Overkill damage still triggers the protection if the entity remains lethal after ordinary
+  mitigation and floor checks.
+- This reference uses `bypass_anti_heal = true`, so the restore is not countered by `SK-92`.
+- If enemies purge the protection before lethal damage arrives, nothing special happens; the later
+  lethal event follows the ordinary death path.

@@ -22,7 +22,7 @@
 
 **Description:** Removing an entity from all spatial, targeting, and rendering systems while preserving its existence in memory.
 
-**Sketches:** SK-58 (Cocoon — swallowed entity), SK-91 (Team-Agnostic Stasis — frozen entity)
+**Sketches:** SK-58 (Cocoon — swallowed entity), SK-61 (Spirit Split — stored owner body while split members are active), SK-91 (Team-Agnostic Stasis — frozen entity)
 
 **Engine layer:** `docs-core/`
 
